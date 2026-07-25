@@ -55,8 +55,13 @@ test("desktop transport keeps voice instructions out of the user goal", async ()
 });
 
 test("desktop transcript hides internal reminders and labels fresh input", async () => {
+  // The transcript reducer moved to state/foldEvent.ts in the UI
+  // modularization; the reminder-hiding logic lives there now, while the
+  // token accounting stayed with App's status rendering.
   const app = await readFile(new URL("../tauri/src/App.tsx", import.meta.url), "utf8");
-  assert.match(app, /if \(!visible\) break/);
-  assert.match(app, /const freshInput = Math\.max\(0, item\.input - item\.cacheRead\)/);
-  assert.match(app, /cacheReadTokens/);
+  const fold = await readFile(new URL("../tauri/src/state/foldEvent.ts", import.meta.url), "utf8");
+  assert.match(fold, /if \(!visible\) break/);
+  const combined = app + fold;
+  assert.match(combined, /const freshInput = Math\.max\(0, item\.input - item\.cacheRead\)/);
+  assert.match(combined, /cacheReadTokens/);
 });
