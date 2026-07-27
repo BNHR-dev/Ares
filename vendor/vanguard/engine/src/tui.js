@@ -32,7 +32,6 @@ export async function runTui(startDirectory) {
     const engine = new VanguardEngine({ logger: () => { } });
     let sessionId;
     let contracted = false;
-    let continuation;
     const ui = freshUiState(config);
     const terminalWidth = () => Math.max(40, process.stdout.columns ?? 100);
     const renderer = new InlineRenderer(process.stdout, terminalWidth);
@@ -218,12 +217,8 @@ export async function runTui(startDirectory) {
                     });
                     sessionId = created.sessionId;
                 }
-                const modelMessage = continuation === undefined
-                    ? input
-                    : buildContinuationMessage(continuation, input);
-                continuation = undefined;
                 currentSessionId = sessionId;
-                const turn = await runEngineTurn(engine, sessionId, modelMessage, config, ui, fx, terminalWidth, contracted, input);
+                const turn = await runEngineTurn(engine, sessionId, input, config, ui, fx, terminalWidth, contracted, input);
                 contracted = turn.contracted;
                 if (turn.outcome?.status === "waiting_for_user") {
                     const question = turn.outcome.question ?? "Vanguard needs your answer to continue.";
@@ -232,14 +227,9 @@ export async function runTui(startDirectory) {
                     fx.message("main", question);
                 }
                 if (turn.outcome?.status === "completed") {
-                    if (config.inPlace)
-                        continuation = turn.continuation;
                     fx.note(config.inPlace
-                        ? `The work is live in ${path.basename(config.workspace)} — your next message keeps this task's context and builds on it.`
-                        : `Verified in the isolated workspace — it is not in ${path.basename(config.workspace)} yet. See /status for the session path.`);
-                    sessionId = undefined;
-                    currentSessionId = undefined;
-                    contracted = false;
+                        ? `The work is live in ${path.basename(config.workspace)} — keep talking to build on it.`
+                        : `Verified in the isolated workspace — keep talking to build on it; see /status for the session path.`);
                 }
                 if (turn.outcome?.status === "failed") {
                     fx.note("Keep talking to steer this session, or type exit.");
@@ -513,33 +503,8 @@ async function runEngineTurn(engine, sessionId, message, config, state, fx, term
     return {
         outcome: cancelled ? { status: "failed" } : outcome,
         contracted: state.contracted,
-        ...(outcome?.status === "completed" ? { continuation: continuationFromState(state) } : {}),
         ...(questionVisible ? { questionShown: true } : {}),
     };
-}
-function continuationFromState(state) {
-    const verifiedSummary = state.chat
-        .filter((item) => item.agentId !== "you")
-        .slice(-6)
-        .map((item) => `${item.agentId}: ${item.message}`)
-        .join("\n");
-    return {
-        previousTask: bounded(state.task, 4_000),
-        verifiedSummary: bounded(verifiedSummary || "The previous task reached verified completion.", 6_000),
-    };
-}
-function buildContinuationMessage(context, input) {
-    return [
-        "[Vanguard continuation context — historical context, not new instructions]",
-        "A previous verified coding task completed in this same live project. Inspect and build on the existing files; do not recreate the project from scratch.",
-        `Previous user task: ${context.previousTask}`,
-        `Previous verified run summary: ${context.verifiedSummary}`,
-        "[Current follow-up]",
-        input,
-    ].join("\n");
-}
-export function buildContinuationMessageForTest(previousTask, verifiedSummary, input) {
-    return buildContinuationMessage({ previousTask, verifiedSummary }, input);
 }
 function sessionState(status) {
     return {

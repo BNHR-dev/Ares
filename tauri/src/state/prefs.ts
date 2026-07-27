@@ -22,8 +22,9 @@ export interface Prefs {
   /** Tool-call rendering: product = concise summaries; technical = raw input/output. */
   toolDisplay: "product" | "technical";
   /** Screen flame border intensity while working — immersive (default tongues),
-   *  clean (no border, just a soft ember rim), or combat (hotter, taller). */
-  flameMode: "immersive" | "clean" | "combat";
+   *  clean (no border, just a soft ember rim), combat (hotter, taller), or
+   *  off (no flame, no embers, no glow — safe for photosensitive users). */
+  flameMode: "immersive" | "clean" | "combat" | "off";
   /** Pinned session ids (shown in their own rail section). */
   pinned: string[];
   /** Accent theme for the desktop chrome. */
@@ -114,7 +115,7 @@ export function loadPrefs(): Prefs {
       // only when the user explicitly toggled it (which saves routingMode).
       routingMode: raw.routingMode === "auto" ? "auto" : "manual",
       toolDisplay: raw.toolDisplay === "technical" ? "technical" : "product",
-      flameMode: raw.flameMode === "clean" || raw.flameMode === "combat" || raw.flameMode === "immersive" ? raw.flameMode : fallback.flameMode,
+      flameMode: raw.flameMode === "clean" || raw.flameMode === "combat" || raw.flameMode === "immersive" || raw.flameMode === "off" ? raw.flameMode : fallback.flameMode,
       pinned: Array.isArray(raw.pinned) ? raw.pinned.filter((p): p is string => typeof p === "string") : [],
       theme: themeOk ? (raw.theme as ThemeName) : "rage",
       uiStyle: raw.uiStyle === "legacy" ? "legacy" : "new",

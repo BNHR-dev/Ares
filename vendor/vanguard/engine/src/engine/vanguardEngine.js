@@ -341,8 +341,8 @@ export class VanguardEngine {
             || session.state === "running" || session.state === "cancelling") {
             throw new VanguardEngineError("session_busy", "The session already has an active advance.", true);
         }
-        if (session.state === "completed") {
-            throw new VanguardEngineError("session_completed", "A completed session cannot be advanced.");
+        if (session.state === "completed" && message === undefined) {
+            throw new VanguardEngineError("session_completed", "A completed session needs a follow-up message to advance.");
         }
         session.state = "running";
         session.cancelRequested = false;

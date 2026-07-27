@@ -235,6 +235,11 @@ function noUsableKeys(keyStatus: Record<string, boolean>): boolean {
   return known.length > 0 && known.every((v) => !v);
 }
 
+/** "I'll use local Ollama" is a real decision, not a per-launch dismissal:
+ *  remember it so the gate never re-prompts a local-first user on every boot.
+ *  (Adding a key / signing in closes the gate through keyStatus instead.) */
+const FIRSTRUN_CHOICE_KEY = "ares.firstRun.choice";
+
 function FirstRunGate({
   active,
   onOpenKeys,
@@ -245,11 +250,22 @@ function FirstRunGate({
   onConnectAres: () => void;
 }): React.ReactElement | null {
   const [dismissed, setDismissed] = useState(false);
-  // Re-arm if keys disappear again (e.g. the user clears them mid-session).
+  // Re-arm if keys disappear again (e.g. the user clears them mid-session) —
+  // but never for a user who durably chose the local-Ollama path.
   useEffect(() => {
     if (!active) setDismissed(false);
   }, [active]);
-  if (!active || dismissed) return null;
+  let chosenLocal = false;
+  try {
+    chosenLocal = window.localStorage.getItem(FIRSTRUN_CHOICE_KEY) === "local-ollama";
+  } catch { /* storage unavailable — fall back to per-launch behavior */ }
+  if (!active || dismissed || chosenLocal) return null;
+  const chooseLocal = () => {
+    try {
+      window.localStorage.setItem(FIRSTRUN_CHOICE_KEY, "local-ollama");
+    } catch { /* storage unavailable */ }
+    setDismissed(true);
+  };
   return (
     <div className="scrim center" role="dialog" aria-modal="true" aria-labelledby="frgTitle">
       <div className="wnCard frgCard" tabIndex={-1} onClick={(e) => e.stopPropagation()}>
@@ -268,7 +284,7 @@ function FirstRunGate({
           </p>
         </header>
         <footer className="wnFoot">
-          <button className="wnOlderToggle" onClick={() => setDismissed(true)}>
+          <button className="wnOlderToggle" onClick={chooseLocal}>
             I'll use local Ollama
           </button>
           <button className="wnGhost" onClick={onOpenKeys}>
@@ -1797,7 +1813,7 @@ function App() {
     });
   };
 
-  const FLAME_MODES: Prefs["flameMode"][] = ["immersive", "clean", "combat"];
+  const FLAME_MODES: Prefs["flameMode"][] = ["immersive", "clean", "combat", "off"];
   const cycleFlame = () => {
     const next = FLAME_MODES[(FLAME_MODES.indexOf(prefs.flameMode) + 1) % FLAME_MODES.length];
     const p = { ...prefs, flameMode: next };
@@ -2788,7 +2804,7 @@ function App() {
                 <i className="dot" data-state="running" /><b>missions</b><span>{opStatus.activeCount}</span>
               </button>
             ) : null}
-            <button className="statusSeg" onClick={cycleFlame} title="screen flame border — immersive / clean / combat">
+            <button className="statusSeg" onClick={cycleFlame} title="screen flame border — immersive / clean / combat / off (off disables all flame and ember motion)">
               <b>flame</b><span>{prefs.flameMode}</span>
             </button>
           </div>

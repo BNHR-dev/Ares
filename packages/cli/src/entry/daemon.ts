@@ -1,6 +1,6 @@
 // Extracted from entry.ts — daemon.
 
-import { authStatus, listSessions, loadSessionSnapshot, loadSessionRollout, deleteSession, renameSession, type Provider, classifyLane, runAnthropicLoginFlow, sideQuery, sideQueryJson, QueryEngine, installGlobalCrashHandlers, EventRing, probeCredentialEncryption, connectMcpServer, disconnectMcpServer, setMcpServerEnabled, connectorNameFromUrl, runOpenAILoginFlow } from "@ares/core";
+import { authStatus, listSessions, loadSessionSnapshot, loadSessionRollout, deleteSession, renameSession, type Provider, classifyLane, runAnthropicLoginFlow, loadAnthropicTokens, sideQuery, sideQueryJson, QueryEngine, installGlobalCrashHandlers, EventRing, probeCredentialEncryption, connectMcpServer, disconnectMcpServer, setMcpServerEnabled, connectorNameFromUrl, runOpenAILoginFlow } from "@ares/core";
 import { appendFile, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import path from "node:path";
@@ -716,6 +716,10 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
   // its ChatGPT OAuth session. Otherwise an env-keyed Ollama-Cloud user (the
   // default!) or an OAuth'd OpenAI user wrongly sees "only deepseek configured".
   const readyAuth = await authStatus().catch(() => null);
+  // Claude Pro/Max OAuth and the Ares account sign-in are real "ways to think"
+  // too: without them here, an OAuth-only or gateway-only user has an all-false
+  // keyStatus and the first-run gate re-prompts on every single launch.
+  const readyAnthropicOAuth = Boolean(await loadAnthropicTokens().catch(() => null));
   process.stdout.write(
     JSON.stringify({
       type: "daemon_ready",
@@ -728,13 +732,14 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
       engine: readySettings.engine ?? {},
       permissions: { ...DEFAULT_PERMISSIONS, ...(readySettings.permissions ?? {}) },
       keyStatus: {
-        anthropic: Boolean(readySettings.anthropicKey || process.env.ANTHROPIC_API_KEY || process.env.ARES_ANTHROPIC_API_KEY),
+        anthropic: Boolean(readySettings.anthropicKey || process.env.ANTHROPIC_API_KEY || process.env.ARES_ANTHROPIC_API_KEY || readyAnthropicOAuth),
         openai: Boolean(readyAuth?.configured),
         deepseek: Boolean(readySettings.deepSeekKey || process.env.DEEPSEEK_API_KEY),
         kimi: Boolean(readySettings.kimiKey || process.env.KIMI_API_KEY),
         openrouter: Boolean(readySettings.openRouterKey || process.env.OPENROUTER_API_KEY),
         ollama: Boolean(readySettings.ollamaApiKey || process.env.OLLAMA_API_KEY),
         brave: Boolean(readySettings.braveKey || process.env.ARES_BRAVE_API_KEY),
+        ares: Boolean(readySettings.aresGatewayToken),
       },
     }) + "\n",
   );
@@ -1482,6 +1487,9 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
         }, fetch, 300_000, true)
           .then(() => {
             tagEmit(sid, { type: "anthropic_login_done", ok: true });
+            // Count the fresh OAuth session as a usable key so the first-run
+            // gate closes live instead of re-prompting until an API key lands.
+            process.stdout.write(JSON.stringify({ type: "provider_key_set", provider: "anthropic", hasKey: true }) + "\n");
           })
           .catch((err: unknown) => {
             tagEmit(sid, { type: "anthropic_login_done", ok: false, error: err instanceof Error ? err.message : String(err) });
@@ -1639,6 +1647,9 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
           .then(async ({ token, base }) => {
             await updateUiSettings({ aresGatewayToken: token, aresGatewayUrl: base });
             process.stdout.write(JSON.stringify({ type: "oauth_connected", provider: "ares" }) + "\n");
+            // The account IS the credential: reflect it into keyStatus so the
+            // first-run gate closes now and stays closed on later launches.
+            process.stdout.write(JSON.stringify({ type: "provider_key_set", provider: "ares", hasKey: true }) + "\n");
             // Immediately snapshot the freshly-connected account for the panel.
             const me = await fetchAresGatewayMe(base, token).catch(() => null);
             process.stdout.write(

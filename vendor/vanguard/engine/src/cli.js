@@ -271,9 +271,17 @@ async function advanceSessionUnlocked(session, options, message) {
                 });
             }
         }
-        const runtime = await buildExecutionRuntime(session, options, fileJournal, true, userChannel);
+        let runtime = await buildExecutionRuntime(session, options, fileJournal, true, userChannel);
         disposeRuntime = runtime.dispose;
-        const outcome = await runWithBudgets(options, runtime.journalActivity, controller, (signal) => runtime.kernel.advance(pendingMessage === undefined ? {} : { userMessage: pendingMessage }, signal, priorEvents));
+        let outcome = await runWithBudgets(options, runtime.journalActivity, controller, (signal) => runtime.kernel.advance(pendingMessage === undefined ? {} : { userMessage: pendingMessage }, signal, priorEvents));
+        while (outcome.status === "contracted") {
+            pendingMessage = undefined;
+            priorEvents = await fileJournal.readValidated();
+            await runtime.dispose?.();
+            runtime = await buildExecutionRuntime(session, options, fileJournal, true, userChannel);
+            disposeRuntime = runtime.dispose;
+            outcome = await runWithBudgets(options, runtime.journalActivity, controller, (signal) => runtime.kernel.advance({}, signal, priorEvents));
+        }
         if (outcome.status === "completed" || outcome.status === "failed") {
             await writeScorecard({
                 session, options, outcome, fileJournal, scorecardFile, journalFile, configurationFile,

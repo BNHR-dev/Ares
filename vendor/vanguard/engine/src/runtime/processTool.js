@@ -126,7 +126,13 @@ async function runProcess(command, args, cwd, timeoutMs, maxOutputBytes, signal,
     if (signal.aborted)
         return { ok: false, output: { error: "Process aborted before launch." } };
     return new Promise((resolve) => {
-        const child = spawn(command, args, { cwd, shell: false, windowsHide: true, env: environment });
+        const child = spawn(command, args, {
+            cwd,
+            shell: false,
+            windowsHide: true,
+            env: environment,
+            detached: process.platform !== "win32",
+        });
         let stdout = Buffer.alloc(0);
         let stderr = Buffer.alloc(0);
         let settled = false;
@@ -171,6 +177,42 @@ async function runProcess(command, args, cwd, timeoutMs, maxOutputBytes, signal,
             signal.removeEventListener("abort", abort);
             resolve(result);
         };
+        const killTree = (killSignal) => {
+            if (process.platform === "win32") {
+                if (child.pid !== undefined) {
+                    try {
+                        spawn("taskkill", ["/T", "/F", "/PID", String(child.pid)], {
+                            shell: false,
+                            windowsHide: true,
+                            stdio: "ignore",
+                        }).on("error", () => {
+                            try {
+                                child.kill("SIGKILL");
+                            }
+                            catch { }
+                        });
+                        return;
+                    }
+                    catch { }
+                }
+                try {
+                    child.kill("SIGKILL");
+                }
+                catch { }
+                return;
+            }
+            if (child.pid !== undefined) {
+                try {
+                    process.kill(-child.pid, killSignal);
+                    return;
+                }
+                catch { }
+            }
+            try {
+                child.kill(killSignal);
+            }
+            catch { }
+        };
         const terminate = (reason) => {
             if (settled || termination !== undefined)
                 return;
@@ -179,17 +221,11 @@ async function runProcess(command, args, cwd, timeoutMs, maxOutputBytes, signal,
                 clearTimeout(timer);
             if (idleTimer !== undefined)
                 clearTimeout(idleTimer);
-            try {
-                child.kill("SIGTERM");
-            }
-            catch { }
+            killTree("SIGTERM");
             terminationEscalation = setTimeout(() => {
                 if (settled)
                     return;
-                try {
-                    child.kill("SIGKILL");
-                }
-                catch { }
+                killTree("SIGKILL");
                 containmentDeadline = setTimeout(() => {
                     stopCapture();
                     finish({
@@ -205,7 +241,7 @@ async function runProcess(command, args, cwd, timeoutMs, maxOutputBytes, signal,
                             ...(reason === "idle" && idleTimeoutMs !== undefined ? { idleTimeoutMs } : {}),
                         },
                     });
-                }, 1_000);
+                }, process.platform === "win32" ? 2_000 : 1_000);
             }, 1_000);
         };
         const abort = () => terminate("aborted");

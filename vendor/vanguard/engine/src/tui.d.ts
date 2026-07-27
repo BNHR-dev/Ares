@@ -8,7 +8,6 @@ interface TurnOutcome {
     readonly question?: string;
 }
 export declare function runTui(startDirectory: string): Promise<void>;
-export declare function buildContinuationMessageForTest(previousTask: string, verifiedSummary: string, input: string): string;
 /**
  * Refuse the directories that are never a project.
  *

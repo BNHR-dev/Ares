@@ -278,12 +278,23 @@ export class AgentKernel {
             }
             lastWorkspaceFingerprint = fingerprint;
         };
-        if (restored.poisonedReason !== undefined) {
+        const executionFenced = restored.poisonedReason !== undefined;
+        if (executionFenced && input.userMessage === undefined) {
             return { status: "failed", reason: restored.poisonedReason, steps: restored.completedSteps };
         }
-        if (restored.completed)
-            throw new Error("Cannot resume a completed Vanguard run.");
-        if (restored.pendingContract !== undefined) {
+        if (restored.completed && input.userMessage === undefined) {
+            throw new Error("This run already completed; advance with a follow-up user message to continue.");
+        }
+        let contractStartStep = restored.contractStartStep;
+        if (restored.failedTerminal !== undefined && input.userMessage !== undefined) {
+            contractStartStep = restored.completedSteps;
+            if (executionFenced) {
+                mode = "conversation";
+                mutationNeedsExecutionEvidence = false;
+                mutationNeedsReview = false;
+            }
+        }
+        if (restored.pendingContract !== undefined && !executionFenced) {
             if (input.task !== undefined)
                 throw new Error("A task can only start a fresh session; resume without one.");
             const contract = restored.pendingContract;
@@ -366,6 +377,14 @@ export class AgentKernel {
             }
             await this.#record("run.resumed", { completedSteps: restored.completedSteps });
         }
+        if (executionFenced && !restored.fenceNoticeRecorded) {
+            const fenceNote = "[Vanguard runtime] Execution is permanently fenced in this session: "
+                + `${restored.poisonedReason} An unmonitored process may still be able to alter the workspace, `
+                + "so no further execution or verification evidence can be trusted here. Continue the conversation "
+                + "and inspect state with read-only tools; direct any new hands-on work to a fresh session.";
+            await this.#record("runtime.note", { text: fenceNote, kind: "execution-fenced" });
+            transcript.push({ role: "runtime", content: fenceNote });
+        }
         if (input.userMessage !== undefined) {
             transcript.push({ role: "user", content: input.userMessage });
             await this.#record("user.message", { text: input.userMessage });
@@ -390,7 +409,8 @@ export class AgentKernel {
         }
         const turnStartStep = restored.completedSteps;
         let effectiveContextBytes = this.#options.maxContextBytes;
-        for (let step = restored.completedSteps + 1; step <= this.#options.maxSteps; step += 1) {
+        const stepBudgetCeiling = contractStartStep + this.#options.maxSteps;
+        for (let step = restored.completedSteps + 1; step <= stepBudgetCeiling; step += 1) {
             if (signal.aborted) {
                 return this.#fail("Run aborted.", step - 1);
             }
@@ -520,7 +540,7 @@ export class AgentKernel {
                         task: modelTask,
                         mode,
                         transcript: selectedTranscript,
-                        tools: this.#offeredTools(mode),
+                        tools: this.#offeredTools(mode, executionFenced),
                         remainingSteps: this.#options.maxSteps - step + 1,
                         signal,
                         workingState: workingStateSnapshot,
@@ -658,6 +678,17 @@ export class AgentKernel {
                 return { status: "waiting_for_user", question: decision.question, steps: step };
             }
             if (decision.kind === "execute") {
+                if (executionFenced) {
+                    const observation = await this.#terminalObservation({ id: "task-execute", name: CONTROL_TOOL_NAMES.execute, input: decision.contract }, "Execution is permanently fenced in this session: process containment was lost, so no new contract can produce trustworthy evidence here. Tell the user to start a fresh session for new hands-on work.", "policy", recovery, signal, toolEvidenceId(modelDecisionSequence, 0));
+                    transcript.push({ role: "observation", content: observation });
+                    await this.#record("tool.failed", observation);
+                    const count = (actionFailures.get("execute_task-fenced") ?? 0) + 1;
+                    actionFailures.set("execute_task-fenced", count);
+                    if (count >= this.#options.maxRepeatedAction) {
+                        return this.#fail("Repeated attempts to contract execution in a fenced session.", step);
+                    }
+                    continue;
+                }
                 if (mode === "execution") {
                     const observation = await this.#terminalObservation({ id: "task-execute", name: CONTROL_TOOL_NAMES.execute, input: decision.contract }, "Execution is already contracted. Continue the current task.", "policy", recovery, signal, toolEvidenceId(modelDecisionSequence, 0));
                     transcript.push({ role: "observation", content: observation });
@@ -875,12 +906,12 @@ export class AgentKernel {
             if (batchOutcome !== undefined)
                 return this.#fail(batchOutcome.reason, step, batchOutcome.poisoned === true);
         }
-        return this.#fail("Step budget exhausted without verified completion.", this.#options.maxSteps);
+        return this.#fail("Step budget exhausted without verified completion.", stepBudgetCeiling);
     }
     #canonicalTools() {
         return [...this.#tools.entries()].filter(([name, tool]) => name === tool.name).map(([, tool]) => tool);
     }
-    #offeredTools(mode) {
+    #offeredTools(mode, executionFenced = false) {
         if (mode === "conversation") {
             const observers = this.#canonicalTools()
                 .filter((tool) => tool.definition.effect === "observe")
@@ -888,7 +919,7 @@ export class AgentKernel {
             return [
                 ...observers,
                 ...(this.#options.interactive ? [ASK_CONTROL_DEFINITION] : []),
-                EXECUTE_CONTROL_DEFINITION,
+                ...(executionFenced ? [] : [EXECUTE_CONTROL_DEFINITION]),
             ];
         }
         return [
@@ -1448,6 +1479,7 @@ function restoreSession(events, tools) {
     let mutationNeedsExecutionEvidence = false;
     let mutationNeedsReview = false;
     let completedSteps = 0;
+    let contractStartStep = 0;
     let failedVerificationAttempts = 0;
     let failedCompletionEvidenceAttempts = 0;
     let completionClaimFailed = false;
@@ -1459,6 +1491,8 @@ function restoreSession(events, tools) {
     let stepsSinceReground = 0;
     let completedMutations = 0;
     let poisonedReason;
+    let failedTerminal;
+    let fenceNoticeRecorded = false;
     let pendingContract;
     let timeTravelResumePending = false;
     const flushCompletion = () => {
@@ -1475,11 +1509,13 @@ function restoreSession(events, tools) {
             resetObservationStagnation(observationStagnation);
             executionThrash.streaks.clear();
             pendingContract = undefined;
+            failedTerminal = undefined;
             const data = recordValue(event.data);
             if (typeof data?.task === "string") {
                 mode = "execution";
                 task = data.task;
                 expectedTask = data.task;
+                contractStartStep = completedSteps;
                 transcript.push({ role: "task", content: data.task });
             }
             continue;
@@ -1488,11 +1524,14 @@ function restoreSession(events, tools) {
             resetObservationStagnation(observationStagnation);
             executionThrash.streaks.clear();
             pendingContract = undefined;
+            failedTerminal = undefined;
             const data = recordValue(event.data);
             if (typeof data?.task === "string") {
                 mode = "execution";
                 task = data.task;
                 expectedTask = data.task;
+                contractStartStep = completedSteps;
+                completed = false;
                 transcript.push({ role: "task", content: data.task });
             }
             continue;
@@ -1501,6 +1540,16 @@ function restoreSession(events, tools) {
             const data = recordValue(event.data);
             if (typeof data?.text === "string")
                 transcript.push({ role: "user", content: data.text });
+            completed = false;
+            if (failedTerminal !== undefined) {
+                failedTerminal = undefined;
+                contractStartStep = completedSteps;
+                if (poisonedReason !== undefined) {
+                    mode = "conversation";
+                    mutationNeedsExecutionEvidence = false;
+                    mutationNeedsReview = false;
+                }
+            }
             pendingQuestion = undefined;
             trailingNarrations = 0;
             resetObservationStagnation(observationStagnation);
@@ -1523,6 +1572,8 @@ function restoreSession(events, tools) {
                 if (streak !== undefined)
                     streak.guided = true;
             }
+            if (data?.kind === "execution-fenced")
+                fenceNoticeRecorded = true;
             stepsSinceReground = 0;
             continue;
         }
@@ -1540,12 +1591,23 @@ function restoreSession(events, tools) {
         }
         if (event.type === "run.completed") {
             completed = true;
+            mode = "conversation";
+            contractStartStep = completedSteps;
+            flushCompletion();
+            failedVerificationAttempts = 0;
+            failedCompletionEvidenceAttempts = 0;
+            mutationNeedsExecutionEvidence = false;
+            mutationNeedsReview = false;
+            trailingNarrations = 0;
+            resetObservationStagnation(observationStagnation);
+            executionThrash.streaks.clear();
             continue;
         }
         if (event.type === "run.failed") {
             const data = recordValue(event.data);
             if (data?.poisoned === true && typeof data.reason === "string")
                 poisonedReason = data.reason;
+            failedTerminal = typeof data?.reason === "string" ? data.reason : "Run failed.";
             continue;
         }
         if (event.type === "session.restored" || event.type === "session.forked") {
@@ -1553,6 +1615,7 @@ function restoreSession(events, tools) {
             if (event.type === "session.forked" && data?.role !== "child")
                 continue;
             completed = false;
+            failedTerminal = undefined;
             pendingQuestion = undefined;
             pendingCalls = [];
             pendingObservationBatch = undefined;
@@ -1719,6 +1782,7 @@ function restoreSession(events, tools) {
         mutationNeedsExecutionEvidence,
         mutationNeedsReview,
         completedSteps,
+        contractStartStep,
         sequence: events.reduce((maximum, event) => Math.max(maximum, event.sequence), 0),
         completed,
         pendingQuestion,
@@ -1731,6 +1795,8 @@ function restoreSession(events, tools) {
         executionThrash,
         observationStagnation,
         poisonedReason,
+        failedTerminal,
+        fenceNoticeRecorded,
         pendingContract,
         timeTravelResumePending,
     };

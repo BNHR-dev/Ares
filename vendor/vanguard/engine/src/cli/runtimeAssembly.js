@@ -155,6 +155,13 @@ export async function buildExecutionRuntime(session, options, fileJournal, inter
         && typeof contractedData === "object" && !Array.isArray(contractedData)
         ? normalizeContract(contractedData.contract)
         : undefined;
+    const contractOrdinal = logicalPriorEvents.filter((event) => event.type === "run.contracted"
+        || (event.type === "run.started" && event.data !== null && typeof event.data === "object"
+            && !Array.isArray(event.data) && typeof event.data.task === "string")).length;
+    const planFile = path.join(container, contractOrdinal <= 1 ? "plan.json" : `plan-${contractOrdinal}.json`);
+    const planAnchorEvents = contractedEvent === undefined
+        ? logicalPriorEvents
+        : logicalPriorEvents.filter((event) => event.sequence > contractedEvent.sequence);
     const runtimeStartedAtMs = Date.now();
     const renderScanScope = () => ({ touchedPaths: versions.paths(), modifiedSinceMs: runtimeStartedAtMs });
     const completionRender = new HeadlessRenderTool(workspace);
@@ -164,11 +171,11 @@ export async function buildExecutionRuntime(session, options, fileJournal, inter
         verifiers.push(new CreativeDirectionVerifier(createModel(options), workspace, contract, (relativePath, judgeContext) => completionRender.execute({ path: relativePath }, judgeContext), renderScanScope));
     }
     const evidenceResolver = new JournalEvidenceResolver(fileJournal);
-    const plan = await PlanLedger.open(path.join(container, "plan.json"), contract === undefined ? [] : contractCriterionIds(contract), evidenceResolver, {
+    const plan = await PlanLedger.open(planFile, contract === undefined ? [] : contractCriterionIds(contract), evidenceResolver, {
         required: true,
-        ...(latestDurableStateAnchor(logicalPriorEvents, "update_plan") === undefined
+        ...(latestDurableStateAnchor(planAnchorEvents, "update_plan") === undefined
             ? {}
-            : { expectedSha256: latestDurableStateAnchor(logicalPriorEvents, "update_plan").sha256 }),
+            : { expectedSha256: latestDurableStateAnchor(planAnchorEvents, "update_plan").sha256 }),
     });
     const usage = new UsageLedger(options.model);
     const delegationDepth = boundedEnvironmentInteger("VANGUARD_DELEGATION_DEPTH", 0, 0, 16);

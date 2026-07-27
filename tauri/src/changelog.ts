@@ -38,6 +38,50 @@ export interface ChangelogEntry {
 // from the "earlier updates" strip.
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.28.31",
+    date: "July 2026",
+    title: "Sessions that never go dark",
+    tagline: "A failed run is a conversation now, not a dead end — plus a calmer screen, a saner welcome, and Vanguard anywhere you have a terminal.",
+    highlights: [
+      {
+        icon: "💬",
+        title: "Keep talking after a crash",
+        tag: "Safer",
+        blurb: "When a coding run dies, the session stays alive — ask what happened, adjust, and send it back to work instead of watching every message auto-fail.",
+      },
+      {
+        icon: "🧹",
+        title: "No more ghost processes",
+        tag: "Safer",
+        blurb: "Stopping a stuck command now takes down everything it started, so nothing keeps running behind your back and runs stop dying from lost containment.",
+      },
+      {
+        icon: "🔥",
+        title: "Flame fully off",
+        tag: "New",
+        blurb: "The flame toggle now includes an off mode that stops all flame and ember motion completely — built for photosensitive players and quieter screens.",
+      },
+      {
+        icon: "👋",
+        title: "The welcome stops nagging",
+        tag: "Polished",
+        blurb: "Choosing local Ollama, signing into your Ares account, or connecting Claude now sticks — the getting-started prompt won't pop up again on every launch.",
+      },
+      {
+        icon: "🧠",
+        title: "Thinking reads top to bottom",
+        tag: "Polished",
+        blurb: "Long thinking traces wrap downward inside their block instead of shearing the layout sideways, and still expand or collapse with one click.",
+      },
+      {
+        icon: "⚔️",
+        title: "Vanguard in any terminal",
+        tag: "New",
+        blurb: "A new `vanguard` command opens the coding agent's own terminal UI in any project — PowerShell or Linux — no desktop shell needed.",
+      },
+    ],
+  },
+  {
     version: "0.28.8",
     date: "July 2026",
     title: "Steering that never breaks the session",
