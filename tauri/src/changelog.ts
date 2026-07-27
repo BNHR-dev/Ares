@@ -38,6 +38,50 @@ export interface ChangelogEntry {
 // from the "earlier updates" strip.
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.28.32",
+    date: "July 2026",
+    title: "One conversation, both engines",
+    tagline: "Vanguard finally remembers your session — same thread every toggle, context handed over, and no engine swaps mid-task.",
+    highlights: [
+      {
+        icon: "🧠",
+        title: "Vanguard keeps the thread",
+        tag: "New",
+        blurb: "Toggling Vanguard onto a conversation resumes the same engine session every time, and a brand-new one starts with a handoff of what you were already discussing.",
+      },
+      {
+        icon: "🔀",
+        title: "Model changes keep memory",
+        tag: "Safer",
+        blurb: "Switching models or lanes no longer silently restarts Vanguard's session — the conversation owns its history until you actually start fresh work.",
+      },
+      {
+        icon: "🛑",
+        title: "No engine swaps mid-task",
+        tag: "Safer",
+        blurb: "The Vanguard toggle politely refuses while a turn is running instead of stranding the work and answering your next message from an empty memory.",
+      },
+      {
+        icon: "🔁",
+        title: "The toggle survives restarts",
+        tag: "Polished",
+        blurb: "A session driven by Vanguard stays driven by Vanguard after you close the app — no more silent fallback to the classic engine.",
+      },
+      {
+        icon: "🫧",
+        title: "The orb backs off",
+        tag: "Polished",
+        blurb: "The floating voice orb now rests above the status bar instead of sitting on the version number.",
+      },
+      {
+        icon: "🧵",
+        title: "Live thinking reads clean",
+        tag: "Polished",
+        blurb: "While the model thinks, the collapsed preview shows a tidy rolling tail of the newest words instead of raw mid-word fragments.",
+      },
+    ],
+  },
+  {
     version: "0.28.31",
     date: "July 2026",
     title: "Sessions that never go dark",

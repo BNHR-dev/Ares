@@ -5,6 +5,20 @@ export function compact(text: string, max: number): string {
   return t.length <= max ? t : `${t.slice(0, max)}…`;
 }
 
+/** Rolling tail for live streaming previews: the NEWEST text, whitespace
+ *  flattened to one line and snapped to a word boundary with a leading
+ *  ellipsis. A raw slice(-n) starts mid-word at an arbitrary cut ("e.") and
+ *  keeps stream newlines, so a line-clamped preview shows stale fragments
+ *  instead of what's being written right now. */
+export function liveTail(text: string, max: number): string {
+  const flat = text.replace(/\s+/gu, " ").trim();
+  if (flat.length <= max) return flat;
+  let tail = flat.slice(-max);
+  const firstSpace = tail.indexOf(" ");
+  if (firstSpace > 0 && firstSpace < 40) tail = tail.slice(firstSpace + 1);
+  return `…${tail}`;
+}
+
 /** Pull a file_path (or path/url) out of PARTIAL tool-input JSON while the
  *  model is still authoring it — so a streaming Write names its target file
  *  long before the input is complete. Returns a short basename-ish label. */

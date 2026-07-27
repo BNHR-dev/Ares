@@ -217,6 +217,10 @@ interface Binding {
    *  no-event watchdog is suspended — a human deciding is not a hang — and
    *  re-asks for the same line do not spawn duplicate cards. */
   pendingApprovals: Set<string>;
+  /** Digest of the prior Ares conversation, prepended to the FIRST advance of
+   *  a freshly created engine session so Vanguard never starts as a stranger
+   *  mid-conversation. Consumed (cleared) by the first turn that uses it. */
+  seedDigest?: string;
 }
 
 export interface VanguardDrive {
@@ -237,6 +241,7 @@ export function createVanguardDrive(
   persist?: PersistEvent,
   approveCommand?: ApproveCommand,
   bindingStore?: DriveBindingStore,
+  loadConversationDigest?: (tag: string | undefined) => Promise<string | undefined>,
 ): VanguardDrive {
   let modulePromise: Promise<EngineModule> | undefined;
   let engine: VanguardEngineLike | undefined;
@@ -514,10 +519,13 @@ export function createVanguardDrive(
     options?: { forceFresh?: boolean },
   ): Promise<Binding> => {
     const existing = bindings.get(key);
+    // Workspace is the ONLY identity gate. A model or lane change must never
+    // reset the conversation: the engine session keeps the model it was
+    // created with (the same sticky-routing rule native turns follow — the
+    // model owns the conversation), and the new selection applies whenever a
+    // genuinely fresh session starts.
     if (existing !== undefined
       && options?.forceFresh !== true
-      && existing.family === selection.family
-      && existing.model === selection.model
       && existing.workspace === selection.workspace) {
       return existing;
     }
@@ -553,13 +561,15 @@ export function createVanguardDrive(
       ? undefined
       : await bindingStore.load(tag).catch(() => undefined);
     if (stored !== undefined
-      && stored.family === selection.family
-      && stored.model === selection.model
       && stored.workspace === selection.workspace) {
       try {
         created = await live.resume(stored.sessionRoot);
-        // Never share one Vanguard session across two live Ares sessions.
-        if (byVanguardId.has(created.sessionId)) throw new Error("session already bound");
+        // Never share one Vanguard session across two live Ares sessions —
+        // but this key's OWN stale binding is not a conflict, it's the exact
+        // session being resumed (rejecting it forced a fresh create and was
+        // one of the "it forgot everything" paths).
+        const holder = byVanguardId.get(created.sessionId);
+        if (holder !== undefined && holder !== existing) throw new Error("session already bound");
         // The reconstructed journal sits in the replay buffer; its highest
         // journal sequence becomes the render-dedupe floor so history never
         // re-renders as fresh cards in the next turn.
@@ -577,7 +587,9 @@ export function createVanguardDrive(
         created = undefined;
       }
     }
+    let createdFresh = false;
     if (created === undefined) {
+      createdFresh = true;
       try {
         created = await live.create(config);
       } catch (error) {
@@ -603,8 +615,15 @@ export function createVanguardDrive(
         }).catch(() => undefined);
       }
     }
+    // A brand-new engine session mid-conversation starts as a stranger unless
+    // the prior Ares exchange rides along with its first message. Resumed
+    // journals already carry their own history and are never seeded.
+    const seedDigest = createdFresh && loadConversationDigest !== undefined
+      ? await loadConversationDigest(tag).catch(() => undefined)
+      : undefined;
     if (existing !== undefined) byVanguardId.delete(existing.vanguardSessionId);
     const binding: Binding = {
+      ...(seedDigest === undefined || seedDigest.length === 0 ? {} : { seedDigest }),
       vanguardSessionId: created.sessionId,
       family: selection.family,
       model: selection.model,
@@ -677,8 +696,15 @@ export function createVanguardDrive(
         const live = await ensureEngine();
         // Keep the bridged Anthropic session tracking Ares's token refreshes.
         if (binding.aresOAuthBridge) await syncAresAnthropicOAuth();
+        // First turn of a freshly created engine session: the prior Ares
+        // conversation rides along as inline context. The rollout keeps the
+        // raw goal — the digest is engine context, not something the owner said.
+        const advanceText = binding.seedDigest === undefined || binding.seedDigest.length === 0
+          ? goal
+          : `${binding.seedDigest}\n\n${goal}`;
+        binding.seedDigest = undefined;
         try {
-          live.advance(binding.vanguardSessionId, goal);
+          live.advance(binding.vanguardSessionId, advanceText);
         } catch (error) {
           const text = error instanceof Error ? error.message : String(error);
           if (/active advance|session_busy/iu.test(text)) {
@@ -687,12 +713,13 @@ export function createVanguardDrive(
             // steering delivers this message into the running run.
             live.steer(binding.vanguardSessionId, goal);
           } else if (/session_completed|completed session/iu.test(text)) {
-            // The contract is fulfilled and sealed — a new message is NEW
-            // work, not an amendment. Roll a fresh Vanguard session for this
-            // Ares session instead of telling the owner "cannot be advanced".
+            // Engine 0.2.5 reopens a completed session on any follow-up
+            // message, so this path only fires on an older worker or an edge
+            // case. Even then: resume the SAME journal (no forceFresh) — a
+            // finished contract is history to keep, never memory to discard.
             byVanguardId.delete(binding.vanguardSessionId);
             bindings.delete(key);
-            binding = await ensureBinding(key, tag, selection, { forceFresh: true });
+            binding = await ensureBinding(key, tag, selection);
             binding.tag = tag;
             binding.turnActive = true;
             binding.turnStartedAt = startedAt;

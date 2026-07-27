@@ -1373,8 +1373,10 @@ a.vaultName { border-bottom: none; }
 }
 .readAloudBtn:hover { border-color: var(--accent); }
 
-/* ── Skill / voice dock — floating animated tray ── */
-.skillDock { position: fixed; right: 18px; bottom: 18px; z-index: 40; display: flex; flex-direction: column; align-items: flex-end; gap: 10px; pointer-events: none; }
+/* ── Skill / voice dock — floating animated tray ──
+   Floats above the status bar, never on it: at bottom:18px the 52px orb sat
+   squarely on the HUD strip's right corner and covered the version readout. */
+.skillDock { position: fixed; right: 18px; bottom: 54px; z-index: 40; display: flex; flex-direction: column; align-items: flex-end; gap: 10px; pointer-events: none; }
 .skillDock > * { pointer-events: auto; }
 .skillDockOrb {
   width: 52px; height: 52px; border-radius: 50%;

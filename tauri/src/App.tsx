@@ -74,7 +74,7 @@ import {
   sessionFromHistory,
 } from "./state/session";
 import { foldEvent, toolKind, summarizeSteps } from "./state/foldEvent";
-import { compact, stringify, fmtTokens, fmtSpend, fmtMs, fmtBytes, escapeHtml, dataUrlB64Len, splitDataImages } from "./lib/format";
+import { compact, liveTail, stringify, fmtTokens, fmtSpend, fmtMs, fmtBytes, escapeHtml, dataUrlB64Len, splitDataImages } from "./lib/format";
 import { renderMarkdown, splitRich, inlineMd, type RichSegment } from "./lib/markdown";
 import {
   type Prefs,
@@ -5997,7 +5997,7 @@ function ThinkingView({ text }: { text: string }) {
         <span className="thinkChevron" data-open={open ? "1" : "0"} aria-hidden="true">▾</span>
       </button>
       <div className="thinkText" data-open={open ? "1" : "0"}>
-        {open ? text : compact(live ? text.slice(-220) : text, 220)}
+        {open ? text : live ? liveTail(text, 150) : compact(text, 220)}
       </div>
     </>
   );

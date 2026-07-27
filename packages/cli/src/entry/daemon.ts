@@ -374,8 +374,46 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
         const file = driveBindingFile(sessionId);
         if (file === undefined) return;
         await mkdir(path.dirname(file), { recursive: true });
-        await writeFile(file, JSON.stringify(binding, null, 2), "utf8");
+        // Merge, don't clobber: the same file carries the session's engine
+        // toggle (`enabled`), written by the vanguard_mode command.
+        let current: Record<string, unknown> = {};
+        try {
+          current = JSON.parse(await readFile(file, "utf8")) as Record<string, unknown>;
+        } catch { /* fresh file */ }
+        await writeFile(file, JSON.stringify({ ...current, ...binding }, null, 2), "utf8");
       },
+    },
+    async (tag) => {
+      // Context handoff for a NEWLY minted engine session inside an existing
+      // conversation: the prior Ares exchange rides along with the first
+      // message so Vanguard never opens as a stranger.
+      const entry = sessions.get(tag ?? DEFAULT_SID) ?? primaryEntry;
+      const sid = entry.live.session.meta.id;
+      if (typeof sid !== "string" || sid.length === 0) return undefined;
+      const snap = await loadSessionSnapshot(entry.live.context.workspace, sid, { maxMessages: 14 }).catch(() => undefined);
+      if (snap === undefined || !Array.isArray(snap.messages) || snap.messages.length === 0) return undefined;
+      const lines: string[] = [];
+      let total = 0;
+      for (const message of snap.messages) {
+        const m = message as { role?: unknown; content?: unknown };
+        if (m.role !== "user" && m.role !== "assistant") continue;
+        const parts = Array.isArray(m.content) ? m.content : [m.content];
+        const text = parts
+          .map((part) => typeof part === "string"
+            ? part
+            : (part as { type?: unknown })?.type === "text" ? String((part as { text?: unknown }).text ?? "") : "")
+          .join(" ")
+          .replace(/\s+/gu, " ")
+          .trim();
+        if (text.length === 0) continue;
+        const line = `${String(m.role)}: ${text.length > 500 ? `${text.slice(0, 500)}…` : text}`;
+        total += line.length;
+        if (total > 6000) break;
+        lines.push(line);
+      }
+      if (lines.length === 0) return undefined;
+      return "[Context handoff — the conversation this session continues. Background only; the task is the final message below.]\n"
+        + lines.join("\n");
     },
   );
   function driveBindingFile(sessionId: string | undefined): string | undefined {
@@ -384,6 +422,21 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
     if (typeof sid !== "string" || sid.length === 0) return undefined;
     return path.join(entry.live.context.workspace, ".ares", "sessions", sid, "vanguard.json");
   }
+  // The engine choice survives daemon restarts: the primary session's toggle
+  // rehydrates from its stored binding file (secondary sessions rehydrate in
+  // resolveEntry when their card first reconnects).
+  void (async () => {
+    try {
+      const file = driveBindingFile(undefined);
+      if (file === undefined) return;
+      const parsed = JSON.parse(await readFile(file, "utf8")) as { enabled?: unknown; workspace?: unknown };
+      if (parsed.enabled === true) {
+        primaryEntry.vanguardMode = true;
+        if (typeof parsed.workspace === "string" && parsed.workspace.length > 0) primaryEntry.vanguardWorkspace = parsed.workspace;
+        tagEmit(undefined, { type: "vanguard_mode", enabled: true, workspace: primaryEntry.vanguardWorkspace ?? primaryEntry.live.context.workspace });
+      }
+    } catch { /* no stored binding — legacy default */ }
+  })();
 
   // Crash safety net. The desktop bridge is a long-lived process on a coworker's
   // machine; until now an uncaught error or stray rejection could kill it with
@@ -582,6 +635,19 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
     );
     const entry: DaemonEntry = { live: fresh, turnActive: false, pendingSteers: [], landingSteers: [] };
     sessions.set(sid, entry);
+    // Rehydrate this session's engine choice — the Vanguard toggle must
+    // survive daemon restarts and app reloads, not silently revert to legacy.
+    try {
+      const file = driveBindingFile(sid);
+      if (file !== undefined) {
+        const parsed = JSON.parse(await readFile(file, "utf8")) as { enabled?: unknown; workspace?: unknown };
+        if (parsed.enabled === true) {
+          entry.vanguardMode = true;
+          if (typeof parsed.workspace === "string" && parsed.workspace.length > 0) entry.vanguardWorkspace = parsed.workspace;
+          tagEmit(sid, { type: "vanguard_mode", enabled: true, workspace: entry.vanguardWorkspace ?? entry.live.context.workspace });
+        }
+      }
+    } catch { /* no stored binding */ }
     tagEmit(sid, { type: "session_opened", model: fresh.selection.model, provider: fresh.selection.provider.name });
     return entry;
   };
@@ -769,11 +835,43 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
         // shield button and shockwave overlay key off. An optional workspace
         // pins where the engine works ("build it in THIS folder").
         const entry = await resolveEntry(command.sessionId);
-        entry.vanguardMode = (command as { enabled?: unknown }).enabled === true;
+        const wanted = (command as { enabled?: unknown }).enabled === true;
+        // Mid-turn engine swaps strand the running work: the old engine keeps
+        // going with nobody routing its steer/stop, and the next send answers
+        // from the other engine's empty memory. Refuse until the turn settles.
+        if (wanted !== (entry.vanguardMode === true)
+          && (entry.turnActive || vanguardDrive.isTurnActive(command.sessionId || DEFAULT_SID))) {
+          tagEmit(command.sessionId, { type: "daemon_error", error: "A turn is still running — stop it or let it finish before switching engines." });
+          tagEmit(command.sessionId, {
+            type: "vanguard_mode",
+            enabled: entry.vanguardMode === true,
+            workspace: entry.vanguardWorkspace ?? entry.live.context.workspace,
+          });
+          continue;
+        }
+        entry.vanguardMode = wanted;
         const requestedWorkspace = (command as { workspace?: unknown }).workspace;
         if (typeof requestedWorkspace === "string" && requestedWorkspace.trim() !== "") {
           entry.vanguardWorkspace = path.resolve(requestedWorkspace.trim());
         }
+        // The choice is durable: it rides the session's vanguard.json so a
+        // daemon restart or app reload cannot silently revert the engine.
+        void (async () => {
+          try {
+            const file = driveBindingFile(command.sessionId);
+            if (file === undefined) return;
+            await mkdir(path.dirname(file), { recursive: true });
+            let current: Record<string, unknown> = {};
+            try {
+              current = JSON.parse(await readFile(file, "utf8")) as Record<string, unknown>;
+            } catch { /* fresh file */ }
+            await writeFile(file, JSON.stringify({
+              ...current,
+              enabled: entry.vanguardMode === true,
+              ...(entry.vanguardWorkspace === undefined ? {} : { workspace: entry.vanguardWorkspace }),
+            }, null, 2), "utf8");
+          } catch { /* persistence is best-effort */ }
+        })();
         tagEmit(command.sessionId, {
           type: "vanguard_mode",
           enabled: entry.vanguardMode === true,
@@ -1847,12 +1945,16 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
           && !rawModel.endsWith("-cloud")
           ? `${rawModel}:cloud`
           : rawModel;
+        // A drive turn is a real turn: busy-state must be visible to the
+        // steer/stop routing, model_switch, and the engine-toggle guard —
+        // exactly like native turns.
+        entry.turnActive = true;
         void vanguardDrive.runTurn(sid, command.sessionId, goal, {
           workspace: entry.vanguardWorkspace ?? entry.live.context.workspace,
           family: driveFamily,
           model: driveModel,
           settings,
-        });
+        }).finally(() => { entry.turnActive = false; });
         continue;
       }
       if (entry.turnActive) {
