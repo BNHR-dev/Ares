@@ -12,10 +12,10 @@
 // `vanguard` opens the TUI).
 
 import { spawn } from "node:child_process";
-import { createRequire } from "node:module";
 import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { currentVanguardEngine } from "./entry/vanguardEngineUpdate.js";
 
 async function resolveEngineCli(): Promise<string | undefined> {
@@ -24,12 +24,16 @@ async function resolveEngineCli(): Promise<string | undefined> {
   const home = process.env.ARES_HOME || path.join(os.homedir(), ".ares");
   const updated = await currentVanguardEngine(home).catch(() => undefined);
   if (updated !== undefined) return path.join(updated.dir, "engine", "src", "cli.js");
-  try {
-    const resolved = createRequire(import.meta.url).resolve("vanguard");
-    const candidate = path.join(path.dirname(resolved), "cli.js");
-    if (existsSync(candidate)) return candidate;
-  } catch {
-    // No resolvable vendored package — the earlier candidates were the story.
+  // The vendored engine, wherever this bin landed: beside the package's own
+  // node_modules (the pnpm file: link) or in the repo's vendor tree. The
+  // package cannot be require.resolve'd — its exports map is ESM-only.
+  const candidates = [
+    new URL("../node_modules/vanguard/engine/src/cli.js", import.meta.url),
+    new URL("../../../vendor/vanguard/engine/src/cli.js", import.meta.url),
+  ];
+  for (const candidate of candidates) {
+    const file = fileURLToPath(candidate);
+    if (existsSync(file)) return file;
   }
   return undefined;
 }
