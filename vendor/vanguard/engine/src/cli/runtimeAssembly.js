@@ -1,7 +1,7 @@
 import path from "node:path";
 import { logicalRunEvents } from "../kernel/logicalHistory.js";
 import { SESSION_EXCLUDED_DIRECTORIES, TreeSnapshotCache, snapshotTree } from "../runtime/treeSnapshot.js";
-import { AdaptiveCommandVerifier, AgentKernel, CheckpointTool, CommandVerifier, adaptiveVerifyMode, isAdaptiveVerifyCommand, CreativeDirectionVerifier, RenderableArtifactVerifier, DeleteFileTool, HeadlessRenderTool, CodeIntelTool, RepoMemoryStore, RepoMemoryTool, ScoutDelegateTool, EvidenceReadTool, SkillReadTool, ImageInspectionTool, JournalEvidenceResolver, GlobTool, ListFilesTool, ProcessTool, prewarmExecutionRuntime, ReadFileTool, ReplaceTextTool, ReviewChangesTool, RunCheckpointLedger, SearchTextTool, WorkspaceBoundary, WorkspaceIntegrityVerifier, WorkspaceMutationPolicy, WorkspaceVersionLedger, WebFetchTool, WebSearchTool, WriteFileTool, contractCriterionIds, normalizeContract, FixedCommandTool, PlanLedger, PlanTool, PostEditSyntaxChecker, PublicRunEventPresenter, RepositoryMapTool, StickyContextPolicy, SyntaxCheckTool, SyntaxCommandRunner, UsageLedger, resolveExtensions, ExtensionPermissionPolicy, FileExtensionAuditJournal, HookRunner, McpStdioClient, loadWorkspaceSkills, latestDurableStateAnchor, DelegationCoordinator, CliDelegateRunner, TransactionalDelegateMerger, createDelegationTools, } from "../index.js";
+import { AdaptiveCommandVerifier, AgentKernel, CheckpointTool, CommandVerifier, adaptiveVerifyMode, isAdaptiveVerifyCommand, CreativeDirectionVerifier, RenderableArtifactVerifier, DeleteFileTool, HeadlessRenderTool, CodeIntelTool, RepoMemoryStore, RepoMemoryTool, ScoutDelegateTool, EvidenceReadTool, SkillReadTool, ServiceTool, SupervisedProcessRegistry, PublicNetworkTargetPolicy, ImageInspectionTool, JournalEvidenceResolver, GlobTool, ListFilesTool, ProcessTool, prewarmExecutionRuntime, ReadFileTool, ReplaceTextTool, ReviewChangesTool, RunCheckpointLedger, SearchTextTool, WorkspaceBoundary, WorkspaceIntegrityVerifier, WorkspaceMutationPolicy, WorkspaceVersionLedger, WebFetchTool, WebSearchTool, WriteFileTool, contractCriterionIds, normalizeContract, FixedCommandTool, PlanLedger, PlanTool, PostEditSyntaxChecker, PublicRunEventPresenter, RepositoryMapTool, StickyContextPolicy, SyntaxCheckTool, SyntaxCommandRunner, UsageLedger, resolveExtensions, ExtensionPermissionPolicy, FileExtensionAuditJournal, HookRunner, McpStdioClient, loadWorkspaceSkills, latestDurableStateAnchor, DelegationCoordinator, CliDelegateRunner, TransactionalDelegateMerger, createDelegationTools, } from "../index.js";
 import { boundedEnvironmentInteger, commandAliases } from "./options.js";
 import { commandApprover } from "./userChannel.js";
 import { createModel } from "./modelFactory.js";
@@ -257,7 +257,14 @@ export async function buildExecutionRuntime(session, options, fileJournal, inter
         new WebFetchTool(),
     ];
     const postMutationSyntaxChecker = new PostEditSyntaxChecker(new SyntaxCommandRunner(), workspace);
+    const services = new SupervisedProcessRegistry(workspace, {
+        allowedCommands: agentAllowedCommands,
+        commandAliases: commandAliases(session.workspaceRoot, options.restrictProcess, mutationPolicy.writableAbsoluteRoots(session.workspaceRoot)),
+        deniedArgumentPrefixes: options.restrictProcess ? ["--allow-", "--no-permission", "--no-experimental-permission"] : [],
+        maxLifetimeMs: options.maxDurationMs,
+    });
     const profileTools = options.agentProfile === "coder" ? [
+        new ServiceTool(services),
         new RepoMemoryTool(repoMemory),
         new WriteFileTool(workspace, versions, mutationPolicy),
         new ReplaceTextTool(workspace, versions, mutationPolicy),
@@ -286,7 +293,7 @@ export async function buildExecutionRuntime(session, options, fileJournal, inter
             new CodeIntelTool(workspace),
             new RepositoryMapTool(workspace, { includeInstructions: !options.disableExtensions }),
             new WebSearchTool(),
-            new WebFetchTool(),
+            new WebFetchTool({ targetPolicy: new PublicNetworkTargetPolicy(services) }),
             ...(skillTool === undefined ? [] : [skillTool]),
             ...profileTools,
         ].map(withToolHooks),
@@ -304,6 +311,7 @@ export async function buildExecutionRuntime(session, options, fileJournal, inter
                 })(),
             },
         }),
+        quiesce: () => services.stopAll(),
         postMutationSyntaxCheck: async (relativePath) => {
             const result = await postMutationSyntaxChecker.check(relativePath);
             return { ok: result.ok, output: result };
@@ -331,6 +339,7 @@ export async function buildExecutionRuntime(session, options, fileJournal, inter
         usage,
         delegationSnapshot: () => JSON.parse(JSON.stringify(delegation.snapshot())),
         dispose: async () => {
+            await services.stopAll().catch(() => []);
             if (hookRunner !== undefined) {
                 await hookRunner.run("after-run", new AbortController().signal).catch(() => { });
             }

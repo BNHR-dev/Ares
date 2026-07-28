@@ -1,6 +1,6 @@
 [package]
 name = "ares-tauri"
-version = "0.28.34"
+version = "0.28.35"
 edition = "2021"
 
 [build-dependencies]

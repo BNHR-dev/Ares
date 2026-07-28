@@ -87,6 +87,12 @@ export interface KernelDependencies {
     /** Detects any reviewable workspace delta caused by tools or verifiers. */
     readonly workspaceState?: WorkspaceStatePort;
     /**
+     * Stops runtime-supervised background work before sealed verification and
+     * returns what it stopped. A service still writing inside the fingerprint
+     * bracket would invalidate the very claim it was helping to prove.
+     */
+    readonly quiesce?: () => Promise<readonly string[]>;
+    /**
      * Runtime-owned parse of a freshly mutated file. When present, every
      * successful mutation is syntax-checked automatically right after its batch
      * — no model turn, and the journaled observation satisfies the same gates a

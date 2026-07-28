@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { killProcessTree } from "./processTree.js";
 import { objectInput, optionalStringField, stringArrayField, stringField } from "./input.js";
 import { sanitizedChildEnvironment } from "../engine/security.js";
 import { asciiLowercase } from "../deterministicText.js";
@@ -7,7 +8,7 @@ export class ProcessTool {
     name = "run_command";
     definition = {
         name: this.name,
-        description: "Run one bounded allowlisted executable without a command shell and capture its exit state. Persistent development servers are rejected; use render_artifact for HTML evidence.",
+        description: "Run one bounded allowlisted executable without a command shell and capture its exit state. This tool is for commands that exit on their own; start a persistent development server or watcher with run_service instead.",
         inputSchema: {
             type: "object",
             properties: {
@@ -92,7 +93,7 @@ export class ProcessTool {
                 output: {
                     error: "Persistent server commands are not valid bounded process evidence.",
                     detail: persistentReason,
-                    guidance: "Use render_artifact to execute and inspect an HTML/SVG deliverable, or run a bounded test command that exits on its own.",
+                    guidance: "Start it with run_service (it returns a handle, streams logs, and fetch_url can then reach its port), or run a bounded command that exits on its own. render_artifact remains the way to inspect a static HTML/SVG deliverable.",
                 },
             };
         }
@@ -177,42 +178,7 @@ async function runProcess(command, args, cwd, timeoutMs, maxOutputBytes, signal,
             signal.removeEventListener("abort", abort);
             resolve(result);
         };
-        const killTree = (killSignal) => {
-            if (process.platform === "win32") {
-                if (child.pid !== undefined) {
-                    try {
-                        spawn("taskkill", ["/T", "/F", "/PID", String(child.pid)], {
-                            shell: false,
-                            windowsHide: true,
-                            stdio: "ignore",
-                        }).on("error", () => {
-                            try {
-                                child.kill("SIGKILL");
-                            }
-                            catch { }
-                        });
-                        return;
-                    }
-                    catch { }
-                }
-                try {
-                    child.kill("SIGKILL");
-                }
-                catch { }
-                return;
-            }
-            if (child.pid !== undefined) {
-                try {
-                    process.kill(-child.pid, killSignal);
-                    return;
-                }
-                catch { }
-            }
-            try {
-                child.kill(killSignal);
-            }
-            catch { }
-        };
+        const killTree = (killSignal) => killProcessTree(child, killSignal);
         const terminate = (reason) => {
             if (settled || termination !== undefined)
                 return;

@@ -38,6 +38,38 @@ export interface ChangelogEntry {
 // from the "earlier updates" strip.
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.28.35",
+    date: "July 2026",
+    title: "It can run your app now",
+    tagline: "Start a dev server, open the page, read the logs, fix it — the whole loop, without leaving anything running behind you.",
+    highlights: [
+      {
+        icon: "▶️",
+        title: "Dev servers actually work",
+        tag: "New",
+        blurb: "Ares can start your dev server or watcher and keep it running while it works, instead of refusing the command or hanging until it times out.",
+      },
+      {
+        icon: "🔎",
+        title: "It can open the page it just built",
+        tag: "New",
+        blurb: "Once a server it started is listening, it can load that local page and see what you would see — and only that page, never anything else on your machine.",
+      },
+      {
+        icon: "🧹",
+        title: "Nothing is left running",
+        tag: "Safer",
+        blurb: "Every started service is tracked, limited in number and lifetime, and shut down with everything it spawned when the session ends or a check runs.",
+      },
+      {
+        icon: "📃",
+        title: "Server logs on tap",
+        tag: "Polished",
+        blurb: "It can page through a running service's output to find the actual stack trace, and it tells you plainly when older lines have scrolled away.",
+      },
+    ],
+  },
+  {
     version: "0.28.34",
     date: "July 2026",
     title: "Long sessions that hold together",

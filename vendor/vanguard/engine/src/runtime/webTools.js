@@ -12,6 +12,10 @@ const SEARCH_RESPONSE_BYTES = 512 * 1024;
 const SEARCH_ENDPOINT = "https://html.duckduckgo.com/html/";
 const USER_AGENT = "Vanguard/0.2 (+https://github.com/vanguard)";
 export class PublicNetworkTargetPolicy {
+    loopback;
+    constructor(loopback) {
+        this.loopback = loopback;
+    }
     async assertAllowed(url) {
         if (url.protocol !== "https:" && url.protocol !== "http:") {
             throw new Error("Only http:// and https:// URLs are supported.");
@@ -19,6 +23,9 @@ export class PublicNetworkTargetPolicy {
         if (url.username.length > 0 || url.password.length > 0) {
             throw new Error("URLs containing credentials are not allowed.");
         }
+        const requestedPort = url.port === "" ? (url.protocol === "https:" ? 443 : 80) : Number(url.port);
+        if (this.loopback?.allows(url.hostname, requestedPort) === true)
+            return;
         if ((url.protocol === "https:" && url.port !== "" && url.port !== "443")
             || (url.protocol === "http:" && url.port !== "" && url.port !== "80")) {
             throw new Error("Only the default HTTP and HTTPS ports are allowed.");
@@ -43,7 +50,7 @@ export class WebFetchTool {
     name = "fetch_url";
     definition = {
         name: this.name,
-        description: "Fetch a public HTTP(S) page as bounded model-readable text. Redirects are revalidated and private/local network targets are refused.",
+        description: "Fetch a public HTTP(S) page as bounded model-readable text, or a local port a run_service service is listening on. Redirects are revalidated and other private/local network targets are refused.",
         inputSchema: {
             type: "object",
             properties: {

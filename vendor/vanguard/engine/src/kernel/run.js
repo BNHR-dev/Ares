@@ -75,6 +75,7 @@ export class AgentKernel {
     #contextOverflow;
     #workingState;
     #workspaceState;
+    #quiesce;
     #postMutationSyntaxCheck;
     #hasReviewTool;
     #hasPlanTool;
@@ -101,6 +102,7 @@ export class AgentKernel {
         this.#contextOverflow = new ModelContextOverflowDelegate(dependencies.model);
         this.#workingState = dependencies.workingState;
         this.#workspaceState = dependencies.workspaceState;
+        this.#quiesce = dependencies.quiesce;
         this.#postMutationSyntaxCheck = dependencies.postMutationSyntaxCheck;
         this.#taskAddendum = dependencies.taskAddendum;
         this.#userChannel = dependencies.userChannel;
@@ -809,6 +811,13 @@ export class AgentKernel {
                     continue;
                 }
                 const verification = [];
+                const quiesced = await this.#quiesce?.();
+                if (quiesced !== undefined && quiesced.length > 0) {
+                    await this.#record("runtime.note", {
+                        text: `[Vanguard runtime] Stopped ${quiesced.length} supervised service(s) before verification: ${quiesced.join(", ")}. Restart one with run_service if you still need it.`,
+                        kind: "verification-quiesce",
+                    });
+                }
                 const preVerificationGeneration = workspaceGeneration;
                 const verifierWorkspaceBefore = await observeWorkspaceBoundary("pre-verification-boundary");
                 if (workspaceGeneration !== preVerificationGeneration)
