@@ -2,6 +2,10 @@ import { normalizeDecision } from "./contracts.js";
 import { summarizeHistoricalToolExchange } from "./historySummary.js";
 import { ContextBudgetExceededError } from "./stickyContext.js";
 export class EvidenceContextPolicy {
+    options;
+    constructor(options = {}) {
+        this.options = options;
+    }
     select(task, transcript, maxBytes, reservedTail = []) {
         if (!Number.isSafeInteger(maxBytes) || maxBytes < 2) {
             throw new Error("Context byte budget must be an integer of at least two bytes.");
@@ -14,7 +18,9 @@ export class EvidenceContextPolicy {
             return anchoredTranscript;
         const rawChunks = causalChunks(anchoredTranscript);
         const recentToolChunks = new Set(rawChunks.map((chunk, index) => chunk.toolExchange ? index : -1).filter((index) => index >= 0).slice(-2));
-        const chunks = rawChunks.map((chunk, index) => chunk.toolExchange && !recentToolChunks.has(index) ? compactToolExchange(chunk) : chunk);
+        const chunks = rawChunks.map((chunk, index) => chunk.toolExchange && !recentToolChunks.has(index)
+            ? compactToolExchange(chunk, this.options.retrievableEvidence === true)
+            : chunk);
         const taskIndices = chunks
             .map((chunk, index) => chunk.entries.some((entry) => entry.role === "task") ? index : -1)
             .filter((index) => index >= 0);
@@ -122,11 +128,11 @@ function causalChunks(transcript) {
     }
     return chunks;
 }
-function compactToolExchange(chunk) {
+function compactToolExchange(chunk, retrievable) {
     return {
         priority: chunk.priority,
         toolExchange: false,
-        entries: [summarizeHistoricalToolExchange(chunk.entries)],
+        entries: [summarizeHistoricalToolExchange(chunk.entries, { retrievable })],
     };
 }
 function serializedBytes(entries) {

@@ -417,6 +417,25 @@ export class AgentKernel {
             if ((step - turnStartStep - 1) % this.#options.boundaryFingerprintIntervalSteps === 0) {
                 await observeWorkspaceBoundary("decision-boundary");
             }
+            const escalateGuard = async (reason, guidance, atStep) => {
+                if (!this.#options.interactive || this.#userChannel === undefined)
+                    return this.#fail(reason, atStep);
+                const question = `${reason} ${guidance}`;
+                await this.#record("run.waiting_for_user", { question, mode, guard: true });
+                const answer = await this.#userChannel.wait(signal);
+                if (answer === undefined)
+                    return this.#fail(signal.aborted ? "Run aborted." : reason, atStep);
+                await this.#record("user.message", { text: answer });
+                transcript.push({ role: "user", content: answer });
+                consecutiveNarrations = 0;
+                resetObservationStagnation(observationStagnation);
+                observationRepeats.clear();
+                executionThrash.streaks.clear();
+                actionFailures.clear();
+                failedVerificationAttempts = 0;
+                failedCompletionEvidenceAttempts = 0;
+                return undefined;
+            };
             for (const steering of this.#userChannel?.drain() ?? []) {
                 await this.#record("user.message", { text: steering });
                 transcript.push({ role: "user", content: steering });
@@ -501,6 +520,13 @@ export class AgentKernel {
                 if (selectedContextBytes > effectiveContextBytes) {
                     throw new ContextBudgetExceededError(selectedContextBytes, effectiveContextBytes);
                 }
+                await this.#record("context.projected", {
+                    step,
+                    selectedBytes: selectedContextBytes,
+                    budgetBytes: effectiveContextBytes,
+                    entries: selectedTranscript.length,
+                    byRole: transcriptBytesByRole([...selectedTranscript, ...reservedTail]),
+                });
                 if (compactionPlausible) {
                     const fullContextBytes = Buffer.byteLength(JSON.stringify([
                         ...transcript,
@@ -630,7 +656,10 @@ export class AgentKernel {
                 }
                 consecutiveNarrations += 1;
                 if (consecutiveNarrations >= this.#options.maxConsecutiveNarrations) {
-                    return this.#fail("Execution stalled in narration without tool actions.", step);
+                    const failed = await escalateGuard("Execution stalled in narration without tool actions.", "Tell me what to do next: give a concrete instruction, or say to stop.", step);
+                    if (failed !== undefined)
+                        return failed;
+                    continue;
                 }
                 if (consecutiveNarrations === 1 && this.#hasPlanTool && !this.#plan.isEmpty()
                     && [...this.#plan.unproven()].length === 0) {
@@ -773,7 +802,9 @@ export class AgentKernel {
                     transcript.push({ role: "verification", content: evidence });
                     failedCompletionEvidenceAttempts += 1;
                     if (failedCompletionEvidenceAttempts >= this.#options.maxCompletionEvidenceAttempts) {
-                        return this.#fail(`Completion evidence policy budget exhausted after ${failedCompletionEvidenceAttempts} premature completion claims.`, step);
+                        const failed = await escalateGuard(`Completion evidence policy budget exhausted after ${failedCompletionEvidenceAttempts} premature completion claims.`, "The work keeps being claimed done without the evidence the contract requires. Tell me what to do: relax what completion must prove, point me at what is missing, or stop.", step);
+                        if (failed !== undefined)
+                            return failed;
                     }
                     continue;
                 }
@@ -847,7 +878,9 @@ export class AgentKernel {
                 observationRepeats.clear();
                 failedVerificationAttempts += 1;
                 if (failedVerificationAttempts >= this.#options.maxFailedVerificationAttempts) {
-                    return this.#fail(`Verification failure budget exhausted after ${failedVerificationAttempts} failed completion claims.`, step);
+                    const failed = await escalateGuard(`Verification failure budget exhausted after ${failedVerificationAttempts} failed completion claims.`, "Verification keeps rejecting the work. Tell me how to proceed: what to fix, what to change about the check, or whether to stop.", step);
+                    if (failed !== undefined)
+                        return failed;
                 }
                 continue;
             }
@@ -863,7 +896,9 @@ export class AgentKernel {
                 const count = (actionFailures.get("malformed-batch") ?? 0) + 1;
                 actionFailures.set("malformed-batch", count);
                 if (count >= this.#options.maxRepeatedAction) {
-                    return this.#fail("Repeated malformed tool batches.", step);
+                    const failed = await escalateGuard("Repeated malformed tool batches.", "The model keeps emitting tool calls this runtime cannot execute. Tell me how to proceed, or say to stop.", step);
+                    if (failed !== undefined)
+                        return failed;
                 }
                 continue;
             }
@@ -903,8 +938,14 @@ export class AgentKernel {
                     return undefined;
                 },
             });
-            if (batchOutcome !== undefined)
-                return this.#fail(batchOutcome.reason, step, batchOutcome.poisoned === true);
+            if (batchOutcome !== undefined) {
+                if (batchOutcome.poisoned === true)
+                    return this.#fail(batchOutcome.reason, step, true);
+                const failed = await escalateGuard(batchOutcome.reason, "The run is repeating itself instead of making progress. Tell me what to try differently, or say to stop.", step);
+                if (failed !== undefined)
+                    return failed;
+                continue;
+            }
         }
         return this.#fail("Step budget exhausted without verified completion.", stepBudgetCeiling);
     }
@@ -1422,6 +1463,14 @@ function observationBatchFingerprint(fingerprints) {
     return createHash("sha256")
         .update(JSON.stringify([...fingerprints].sort(compareOrdinal)), "utf8")
         .digest("hex");
+}
+function transcriptBytesByRole(entries) {
+    const byRole = {};
+    for (const entry of entries) {
+        const role = typeof entry.role === "string" ? entry.role : "unknown";
+        byRole[role] = (byRole[role] ?? 0) + Buffer.byteLength(JSON.stringify(entry));
+    }
+    return byRole;
 }
 function observationStagnationFailureReason(repeatedBatches, workspaceGeneration) {
     return "Successful-observation stagnation guard stopped the run after "

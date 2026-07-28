@@ -38,6 +38,38 @@ export interface ChangelogEntry {
 // from the "earlier updates" strip.
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.28.34",
+    date: "July 2026",
+    title: "Long sessions that hold together",
+    tagline: "It stops forgetting what it already looked at, and asks you instead of dying when it gets stuck.",
+    highlights: [
+      {
+        icon: "🧠",
+        title: "It remembers what it found",
+        tag: "New",
+        blurb: "When a long session trims old work out of view, the details are kept and can be pulled back on demand instead of being lost — so it stops re-reading files it already understood.",
+      },
+      {
+        icon: "🙋",
+        title: "Stuck means asking, not quitting",
+        tag: "Safer",
+        blurb: "When it starts looping or can't satisfy a check, it now stops and asks you what to do instead of ending the whole run with an error.",
+      },
+      {
+        icon: "🪶",
+        title: "Lighter every turn",
+        tag: "Faster",
+        blurb: "Your project skills are listed by name and loaded only when actually needed, leaving far more room for the real work in long sessions.",
+      },
+      {
+        icon: "📊",
+        title: "We can see what fills the context",
+        tag: "Polished",
+        blurb: "Each session now records what its memory was actually spent on, so slowdowns get fixed from measurements instead of guesswork.",
+      },
+    ],
+  },
+  {
     version: "0.28.33",
     date: "July 2026",
     title: "It can look things up now",

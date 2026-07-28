@@ -1,7 +1,7 @@
 import path from "node:path";
 import { logicalRunEvents } from "../kernel/logicalHistory.js";
 import { SESSION_EXCLUDED_DIRECTORIES, TreeSnapshotCache, snapshotTree } from "../runtime/treeSnapshot.js";
-import { AdaptiveCommandVerifier, AgentKernel, CheckpointTool, CommandVerifier, adaptiveVerifyMode, isAdaptiveVerifyCommand, CreativeDirectionVerifier, RenderableArtifactVerifier, DeleteFileTool, HeadlessRenderTool, CodeIntelTool, RepoMemoryStore, RepoMemoryTool, ScoutDelegateTool, ImageInspectionTool, JournalEvidenceResolver, GlobTool, ListFilesTool, ProcessTool, prewarmExecutionRuntime, ReadFileTool, ReplaceTextTool, ReviewChangesTool, RunCheckpointLedger, SearchTextTool, WorkspaceBoundary, WorkspaceIntegrityVerifier, WorkspaceMutationPolicy, WorkspaceVersionLedger, WebFetchTool, WebSearchTool, WriteFileTool, contractCriterionIds, normalizeContract, FixedCommandTool, PlanLedger, PlanTool, PostEditSyntaxChecker, PublicRunEventPresenter, RepositoryMapTool, StickyContextPolicy, SyntaxCheckTool, SyntaxCommandRunner, UsageLedger, resolveExtensions, ExtensionPermissionPolicy, FileExtensionAuditJournal, HookRunner, McpStdioClient, loadWorkspaceSkills, latestDurableStateAnchor, DelegationCoordinator, CliDelegateRunner, TransactionalDelegateMerger, createDelegationTools, } from "../index.js";
+import { AdaptiveCommandVerifier, AgentKernel, CheckpointTool, CommandVerifier, adaptiveVerifyMode, isAdaptiveVerifyCommand, CreativeDirectionVerifier, RenderableArtifactVerifier, DeleteFileTool, HeadlessRenderTool, CodeIntelTool, RepoMemoryStore, RepoMemoryTool, ScoutDelegateTool, EvidenceReadTool, SkillReadTool, ImageInspectionTool, JournalEvidenceResolver, GlobTool, ListFilesTool, ProcessTool, prewarmExecutionRuntime, ReadFileTool, ReplaceTextTool, ReviewChangesTool, RunCheckpointLedger, SearchTextTool, WorkspaceBoundary, WorkspaceIntegrityVerifier, WorkspaceMutationPolicy, WorkspaceVersionLedger, WebFetchTool, WebSearchTool, WriteFileTool, contractCriterionIds, normalizeContract, FixedCommandTool, PlanLedger, PlanTool, PostEditSyntaxChecker, PublicRunEventPresenter, RepositoryMapTool, StickyContextPolicy, SyntaxCheckTool, SyntaxCommandRunner, UsageLedger, resolveExtensions, ExtensionPermissionPolicy, FileExtensionAuditJournal, HookRunner, McpStdioClient, loadWorkspaceSkills, latestDurableStateAnchor, DelegationCoordinator, CliDelegateRunner, TransactionalDelegateMerger, createDelegationTools, } from "../index.js";
 import { boundedEnvironmentInteger, commandAliases } from "./options.js";
 import { commandApprover } from "./userChannel.js";
 import { createModel } from "./modelFactory.js";
@@ -27,10 +27,12 @@ export function buildConversationRuntime(session, options, fileJournal, userChan
         model: createModel(options, createStreamPresenter(markActivity)),
         tools: [
             ...conversationTools,
+            new EvidenceReadTool(fileJournal),
             new ScoutDelegateTool(createModel(options), conversationTools),
         ],
         verifiers: [],
         journal,
+        contextPolicy: new StickyContextPolicy({ retrievableEvidence: true }),
         ...(options.extensions === undefined ? {} : { workingState: { snapshot: () => ({ extensions: options.extensions }) } }),
         taskAddendum: taskAddendum(options, mutationPolicy),
         ...(userChannel === undefined ? {} : { userChannel }),
@@ -96,6 +98,7 @@ export async function buildExecutionRuntime(session, options, fileJournal, inter
     const extensionTools = [];
     let hookRunner;
     let skillsAddendum = "";
+    let skillTool;
     if (options.disableExtensions !== true) {
         const resolved = await resolveExtensions({ workspaceRoot: session.sourceRoot });
         const policy = new ExtensionPermissionPolicy(resolved.config.permissions);
@@ -124,8 +127,9 @@ export async function buildExecutionRuntime(session, options, fileJournal, inter
         if (skillRoots.length > 0) {
             const skills = await loadWorkspaceSkills(sourceBoundary, { ...resolved.config.skills, roots: skillRoots });
             if (skills.length > 0) {
-                skillsAddendum = "\n\nAvailable workspace skills (apply when relevant to the task):"
-                    + skills.map((skill) => `\n### Skill: ${skill.metadata.name} — ${skill.metadata.description}\n${skill.instructions.trim()}`).join("");
+                skillsAddendum = "\n\nAvailable workspace skills — read one with read_skill when it is relevant:"
+                    + skills.map((skill) => `\n- ${skill.metadata.name}: ${skill.metadata.description}`).join("");
+                skillTool = new SkillReadTool(skills);
             }
         }
     }
@@ -271,17 +275,19 @@ export async function buildExecutionRuntime(session, options, fileJournal, inter
     ] : [];
     const kernel = new AgentKernel({
         model: createModel(options, observer),
-        contextPolicy: new StickyContextPolicy(),
+        contextPolicy: new StickyContextPolicy({ retrievableEvidence: true }),
         tools: [
             new ListFilesTool(workspace),
             new SearchTextTool(workspace),
             new GlobTool(workspace),
             new ReadFileTool(workspace, 1_000_000, versions),
+            new EvidenceReadTool(fileJournal),
             new ScoutDelegateTool(createModel(options), executionObserveTools),
             new CodeIntelTool(workspace),
             new RepositoryMapTool(workspace, { includeInstructions: !options.disableExtensions }),
             new WebSearchTool(),
             new WebFetchTool(),
+            ...(skillTool === undefined ? [] : [skillTool]),
             ...profileTools,
         ].map(withToolHooks),
         verifiers,

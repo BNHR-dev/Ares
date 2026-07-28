@@ -320,7 +320,7 @@ export interface VerifierPort {
     readonly name: string;
     verify(candidate: string, task: string): Promise<VerificationResult>;
 }
-export type RunEventType = "run.started" | "run.resumed" | "run.contracted" | "run.waiting_for_user" | "user.message" | "runtime.note" | "context.compacted" | "model.decided" | "tool.completed" | "tool.failed" | "verification.started" | "verification.completed" | "verification.finished" | "recovery.decided" | "recovery.delayed" | "recovery.exhausted" | "recovery.replan_required" | "run.completed" | "run.failed" | "change.reviewed" | "change.applied" | "change.reverted" | "session.checkpointed" | "session.restored" | "session.forked" | "workspace.observed" | "workspace.changed";
+export type RunEventType = "run.started" | "run.resumed" | "run.contracted" | "run.waiting_for_user" | "user.message" | "runtime.note" | "context.compacted" | "context.projected" | "model.decided" | "tool.completed" | "tool.failed" | "verification.started" | "verification.completed" | "verification.finished" | "recovery.decided" | "recovery.delayed" | "recovery.exhausted" | "recovery.replan_required" | "run.completed" | "run.failed" | "change.reviewed" | "change.applied" | "change.reverted" | "session.checkpointed" | "session.restored" | "session.forked" | "workspace.observed" | "workspace.changed";
 export interface RunEvent {
     readonly sequence: number;
     readonly type: RunEventType;

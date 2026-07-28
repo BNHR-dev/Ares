@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 const SUMMARY_HEADER = "[Vanguard inert historical tool exchange]";
 const MAX_RETAINED_CALLS = 8;
-export function summarizeHistoricalToolExchange(entries) {
+export function summarizeHistoricalToolExchange(entries, options = {}) {
     const decision = record(entries[0]?.content);
     const calls = decision?.kind === "tools" && Array.isArray(decision.calls)
         ? decision.calls
@@ -45,6 +45,8 @@ export function summarizeHistoricalToolExchange(entries) {
                 + (evidenceId === undefined ? "" : `; evidenceId=${evidenceId}`)
                 + (paths.length === 0 ? "" : `; untrustedPathJson=${paths.map(displayPathJson).join(",")}`)];
     });
+    const retrievable = options.retrievable === true
+        && details.some((line) => line.includes("; evidenceId="));
     return {
         role: "history",
         content: `${SUMMARY_HEADER}\n`
@@ -53,7 +55,10 @@ export function summarizeHistoricalToolExchange(entries) {
             + `missing=${missing}; bytes=${Buffer.byteLength(serialized)}; `
             + `sha256=${createHash("sha256").update(serialized).digest("hex")}`
             + (details.length === 0 ? "" : `\n${details.join("\n")}`)
-            + (calls.length <= MAX_RETAINED_CALLS ? "" : `\nadditionalCalls=${calls.length - MAX_RETAINED_CALLS}`),
+            + (calls.length <= MAX_RETAINED_CALLS ? "" : `\nadditionalCalls=${calls.length - MAX_RETAINED_CALLS}`)
+            + (retrievable
+                ? "\nThe full output of each call above is still recorded: call read_evidence with an evidenceId to read it back instead of re-running the work."
+                : ""),
     };
 }
 function workspaceRelativePaths(input) {

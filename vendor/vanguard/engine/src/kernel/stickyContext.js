@@ -14,7 +14,11 @@ export class ContextBudgetExceededError extends Error {
 }
 const EPOCH_LOW_WATER_RATIO = 0.6;
 export class StickyContextPolicy {
+    options;
     #epoch;
+    constructor(options = {}) {
+        this.options = options;
+    }
     select(task, transcript, maxBytes, reservedTail = []) {
         if (!Number.isSafeInteger(maxBytes) || maxBytes < 2) {
             throw new Error("Context byte budget must be an integer of at least two bytes.");
@@ -95,7 +99,7 @@ export class StickyContextPolicy {
             if (selected.has(index))
                 continue;
             const chunk = chunks[index];
-            const entries = compactChunk(chunk, Math.min(8_000, Math.max(1_000, Math.floor(maxBytes * 0.18))));
+            const entries = compactChunk(chunk, Math.min(8_000, Math.max(1_000, Math.floor(maxBytes * 0.18))), this.options.retrievableEvidence === true);
             const bytes = serializedBytes(entries);
             if (recentBytes + bytes > recentBudget && recentBytes > 0)
                 break;
@@ -226,11 +230,11 @@ function causalChunks(transcript) {
     }
     return chunks;
 }
-function compactChunk(chunk, maxBytes) {
+function compactChunk(chunk, maxBytes, retrievable) {
     if (serializedBytes(chunk.entries) <= maxBytes || !isToolDecision(chunk.entries[0])) {
         return chunk.entries;
     }
-    return [summarizeHistoricalToolExchange(chunk.entries)];
+    return [summarizeHistoricalToolExchange(chunk.entries, { retrievable })];
 }
 function digestEntry(chunks, omittedIndices, maxBytes) {
     const hash = createHash("sha256");

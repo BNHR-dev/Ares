@@ -22,5 +22,21 @@ export interface TrajectoryMetrics {
     readonly failuresByCode: Readonly<Record<string, number>>;
     readonly failuresByDisposition: Readonly<Record<string, number>>;
     readonly toolCallsByName: Readonly<Record<string, number>>;
+    /**
+     * What the model was actually sent, measured rather than assumed. Long-run
+     * degradation is a context-composition problem, and "machinery crowded out
+     * the evidence" and "evidence crowded out the contract" look identical from
+     * the outside while wanting opposite fixes.
+     */
+    readonly context?: ContextCompositionMetrics;
+}
+export interface ContextCompositionMetrics {
+    readonly samples: number;
+    readonly meanSelectedBytes: number;
+    readonly maxSelectedBytes: number;
+    /** Mean share of the projected request, 0-1, keyed by transcript role. */
+    readonly meanShareByRole: Readonly<Record<string, number>>;
+    /** Peak fraction of the learned context budget any single request used. */
+    readonly maxBudgetUtilization: number;
 }
 export declare function analyzeTrajectory(events: readonly RunEvent[]): TrajectoryMetrics;

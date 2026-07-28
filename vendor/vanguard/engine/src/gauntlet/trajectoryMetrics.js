@@ -21,6 +21,11 @@ export function analyzeTrajectory(events) {
     const failuresByDisposition = {};
     const toolCallsByName = {};
     let pendingToolNames = [];
+    let contextSamples = 0;
+    let contextBytesTotal = 0;
+    let contextBytesMax = 0;
+    let budgetUtilizationMax = 0;
+    const roleBytesTotal = {};
     for (const event of events) {
         const data = record(event.data);
         if (event.type === "model.decided") {
@@ -84,6 +89,23 @@ export function analyzeTrajectory(events) {
                 contextCompactions += 1;
             }
         }
+        if (event.type === "context.projected") {
+            const selected = typeof data?.selectedBytes === "number" ? data.selectedBytes : 0;
+            contextSamples += 1;
+            contextBytesTotal += selected;
+            if (selected > contextBytesMax)
+                contextBytesMax = selected;
+            const budget = typeof data?.budgetBytes === "number" ? data.budgetBytes : 0;
+            if (budget > 0)
+                budgetUtilizationMax = Math.max(budgetUtilizationMax, selected / budget);
+            const byRole = record(data?.byRole);
+            if (byRole !== undefined) {
+                for (const [role, bytes] of Object.entries(byRole)) {
+                    if (typeof bytes === "number")
+                        roleBytesTotal[role] = (roleBytesTotal[role] ?? 0) + bytes;
+                }
+            }
+        }
         if (event.type === "recovery.decided") {
             recoveryDecisions += 1;
             if (data?.retry === true)
@@ -125,7 +147,25 @@ export function analyzeTrajectory(events) {
         failuresByCode,
         failuresByDisposition,
         toolCallsByName,
+        ...(contextSamples === 0 ? {} : {
+            context: {
+                samples: contextSamples,
+                meanSelectedBytes: Math.round(contextBytesTotal / contextSamples),
+                maxSelectedBytes: contextBytesMax,
+                meanShareByRole: shareByRole(roleBytesTotal, contextBytesTotal),
+                maxBudgetUtilization: Number(budgetUtilizationMax.toFixed(4)),
+            },
+        }),
     };
+}
+function shareByRole(roleBytesTotal, total) {
+    if (total <= 0)
+        return {};
+    const shares = {};
+    for (const [role, bytes] of Object.entries(roleBytesTotal).sort((left, right) => right[1] - left[1])) {
+        shares[role] = Number((bytes / total).toFixed(4));
+    }
+    return shares;
 }
 function record(value) {
     return value !== null && value !== undefined && !Array.isArray(value) && typeof value === "object" ? value : undefined;

@@ -11,4 +11,6 @@ import type { TranscriptEntry } from "./contracts.js";
  * Workspace-relative paths are JSON-escaped and clearly labelled as untrusted
  * identifiers rather than instructions.
  */
-export declare function summarizeHistoricalToolExchange(entries: readonly TranscriptEntry[]): TranscriptEntry;
+export declare function summarizeHistoricalToolExchange(entries: readonly TranscriptEntry[], options?: {
+    readonly retrievable?: boolean;
+}): TranscriptEntry;
