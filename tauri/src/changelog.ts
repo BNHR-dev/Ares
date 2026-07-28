@@ -38,6 +38,26 @@ export interface ChangelogEntry {
 // from the "earlier updates" strip.
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.29.1",
+    date: "July 2026",
+    title: "0.29.0 couldn't start its own backend",
+    tagline: "A packaging fault stopped the daemon, chat and the Garrison from launching at all. Fixed — 0.29.0 was pulled.",
+    highlights: [
+      {
+        icon: "🚑",
+        title: "The backend starts again",
+        tag: "Safer",
+        blurb: "In 0.29.0 the packaged app loaded its commands lazily, which deadlocked inside the bundle — the daemon, chat and the Garrison exited instantly and silently, so the app looped between \"online\", an error, and a restart. They load directly again.",
+      },
+      {
+        icon: "🧪",
+        title: "It can't happen quietly again",
+        tag: "Safer",
+        blurb: "The build now fails if the shipped bundle contains the pattern that caused it, so this class of fault is caught before a release instead of after.",
+      },
+    ],
+  },
+  {
     version: "0.29.0",
     date: "July 2026",
     title: "One engine, and it can reach its tools",

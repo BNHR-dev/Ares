@@ -14,6 +14,23 @@ import { stat } from "node:fs/promises";
 import path from "node:path";
 import { availableThemes, setTheme, themeChanged } from "./terminalUi.js";
 import { parseArgs } from "./entry/args.js";
+// Static, NOT lazy wait import(). The packaged runtime is an esbuild ESM
+// bundle, and ink -> yoga-layout carries a top-level await; a dynamic import of
+// any module in that graph compiles to an async `__esm` initializer that can
+// deadlock, which surfaces as the CLI exiting 0 with no output (v0.29.0 shipped
+// this and broke daemon/chat/garrison). Keep these static.
+import { agentCommand, evalCommand, missionCommand, modelsCommand } from "./entry/agentOps.js";
+import { chatCommand, launcherCommand, runCommand } from "./entry/chat.js";
+import { daemonCommand } from "./entry/daemon.js";
+import { attachCommand, garrisonCommand } from "./entry/garrisonCmd.js";
+import { holoCommand } from "./entry/holoCmd.js";
+import { checkpointsCommand, doctorCommand, frictionCommand, loginCommand, recapCommand, resumeCommand, sessionsCommand, themesCommand, todayCommand, worldCommand } from "./entry/introspect.js";
+import { mindCommand } from "./entry/mindCmd.js";
+import { operatorCommand } from "./entry/operatorCmd.js";
+import { printHelp } from "./entry/runtime.js";
+import { telegramCommand } from "./entry/telegramWiring.js";
+import { loadSavedTheme, saveTheme } from "./entry/terminalLines.js";
+import { triageCommand } from "./entry/triage.js";
 
 function bridgeLegacyEnv(env: NodeJS.ProcessEnv = process.env): void {
   for (const key of Object.keys(env)) {
@@ -45,86 +62,70 @@ async function main(): Promise<void> {
       process.exit(2);
     }
   } else if (INTERACTIVE_THEME_COMMANDS.has(args.command)) {
-    const { loadSavedTheme } = await import("./entry/terminalLines.js");
     await loadSavedTheme();
   }
   await applyWorkspaceFlag(args.flags);
   switch (args.command) {
     case "launcher":
     case "menu": {
-      const { launcherCommand } = await import("./entry/chat.js");
       process.exit(await launcherCommand(args));
       return;
     }
     case "chat":
     case "cli":
     case "shell": {
-      const { chatCommand } = await import("./entry/chat.js");
       process.exit(await chatCommand(args));
       return;
     }
     case "run": {
-      const { runCommand } = await import("./entry/chat.js");
       process.exit(await runCommand(args));
       return;
     }
     case "daemon": {
-      const { daemonCommand } = await import("./entry/daemon.js");
       process.exit(await daemonCommand(args));
       return;
     }
     case "agent": {
-      const { agentCommand } = await import("./entry/agentOps.js");
       process.exit(await agentCommand(args));
       return;
     }
     case "operator": {
-      const { operatorCommand } = await import("./entry/operatorCmd.js");
       process.exit(await operatorCommand(args));
       return;
     }
     case "mind": {
-      const { mindCommand } = await import("./entry/mindCmd.js");
       process.exit(await mindCommand(args));
       return;
     }
     case "garrison": {
-      const { garrisonCommand } = await import("./entry/garrisonCmd.js");
       process.exit(await garrisonCommand(args));
       return;
     }
     case "attach": {
-      const { attachCommand } = await import("./entry/garrisonCmd.js");
       process.exit(await attachCommand(args));
       return;
     }
     case "telegram": {
-      const { telegramCommand } = await import("./entry/telegramWiring.js");
       process.exit(await telegramCommand(args));
       return;
     }
     case "holo": {
-      const { holoCommand } = await import("./entry/holoCmd.js");
       process.exit(await holoCommand(args));
       return;
     }
     case "eval": {
-      const { evalCommand } = await import("./entry/agentOps.js");
       process.exit(await evalCommand(args));
       return;
     }
     case "sessions": {
-      const { sessionsCommand } = await import("./entry/introspect.js");
       process.exit(await sessionsCommand());
       return;
     }
     case "checkpoints": {
-      const { checkpointsCommand } = await import("./entry/introspect.js");
       process.exit(await checkpointsCommand());
       return;
     }
     case "themes": {
-      const { themesCommand } = await import("./entry/introspect.js");
       process.exit(themesCommand());
       return;
     }
@@ -134,67 +135,55 @@ async function main(): Promise<void> {
         process.stderr.write(`error: usage: ares theme <${availableThemes().join("|")}>\n`);
         process.exit(2);
       }
-      const { saveTheme } = await import("./entry/terminalLines.js");
       await saveTheme(selected);
       process.stdout.write(themeChanged(selected));
       return;
     }
     case "resume": {
-      const { resumeCommand } = await import("./entry/introspect.js");
       process.exit(await resumeCommand(args));
       return;
     }
     case "recap":
     case "whathappened": {
-      const { recapCommand } = await import("./entry/introspect.js");
       process.exit(await recapCommand(args));
       return;
     }
     case "world": {
-      const { worldCommand } = await import("./entry/introspect.js");
       process.exit(await worldCommand(args));
       return;
     }
     case "today":
     case "briefing": {
-      const { todayCommand } = await import("./entry/introspect.js");
       process.exit(await todayCommand(args));
       return;
     }
     case "models": {
-      const { modelsCommand } = await import("./entry/agentOps.js");
       process.exit(await modelsCommand(args));
       return;
     }
     case "mission": {
-      const { missionCommand } = await import("./entry/agentOps.js");
       process.exit(await missionCommand(args));
       return;
     }
     case "login": {
-      const { loginCommand } = await import("./entry/introspect.js");
       process.exit(await loginCommand());
       return;
     }
     case "doctor": {
-      const { doctorCommand } = await import("./entry/introspect.js");
       process.exit(await doctorCommand());
       return;
     }
     case "friction": {
-      const { frictionCommand } = await import("./entry/introspect.js");
       process.exit(await frictionCommand(args));
       return;
     }
     case "triage": {
-      const { triageCommand } = await import("./entry/triage.js");
       process.exit(await triageCommand(args));
       return;
     }
     case "help":
     case "--help":
     case "-h": {
-      const { printHelp } = await import("./entry/runtime.js");
       await printHelp();
       return;
     }
