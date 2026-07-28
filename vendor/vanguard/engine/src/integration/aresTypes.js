@@ -1,1 +1,0 @@
-export const ARES_VANGUARD_ADAPTER_VERSION = 1;

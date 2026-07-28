@@ -25,7 +25,7 @@ live beside it.
 
 - Leaf components → `components/`: transcript family (ItemView, DiffCard,
   ToolGroup, MermaidDiagram…), settings family (Settings, ModelPicker,
-  panes), fx (VanguardBurst/BootIntro, Flames), Composer, EmbeddedBrowser,
+  panes), fx (Flames), Composer, EmbeddedBrowser,
   Palette, RoutingPanel, HelmView, SkillDock, and friends.
 - Feature hooks: useDaemon (single `listen()` subscription + a handler map
   for the ~70-case event switch), usePrefs, useVoiceBus, useForge,

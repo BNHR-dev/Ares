@@ -1,4 +1,4 @@
-/* Ares desktop v3 — the token design system.
+/* Ares desktop v3 â€” the token design system.
    Flat obsidian, one bronze accent, steel = success, crimson = danger.
    Motion is everywhere but small: entrances, sweeps, pulses. The god
    relief is the only iconography, static at the edge of vision. */
@@ -6,7 +6,7 @@
 :root {
   color-scheme: dark;
 
-  /* Blood & Rage — obsidian scorched with ember, the god of war's forge. */
+  /* Blood & Rage â€” obsidian scorched with ember, the god of war's forge. */
   --bg: #0a0708;
   --bg-raised: #120c0d;
   --panel: #160d0e;
@@ -16,11 +16,11 @@
   --muted: #b99f93;
   --faint: #8b756d;
 
-  /* the accent — ember / blood-red. Overridden per theme on the root element.
-     NOTE: tokens DERIVED from --accent (--line, --bronze, …) must NOT live here.
+  /* the accent â€” ember / blood-red. Overridden per theme on the root element.
+     NOTE: tokens DERIVED from --accent (--line, --bronze, â€¦) must NOT live here.
      A custom property's var() resolves in the element it's declared on, so a
      derived token defined on :root would bake in :root's (default red) --accent
-     and inherit that down — the per-theme --accent override on .ares would never
+     and inherit that down â€” the per-theme --accent override on .ares would never
      reach it. Those derived tokens live on .ares instead (see below). */
   --accent: #d6402e;
   --accent-hi: #ff6a44;
@@ -43,10 +43,10 @@
   --mono: "Cascadia Code", ui-monospace, Consolas, monospace;
 }
 
-/* ── war-bands — each theme re-tints the WHOLE room, not just the accent.
+/* â”€â”€ war-bands â€” each theme re-tints the WHOLE room, not just the accent.
    We override the neutral obsidian tokens (bg/panel/text) and the working-heat
    ember so the entire UI shifts mood. --steel (success) and --crimson (error)
-   stay fixed everywhere — those are semantic status colors, not decoration.
+   stay fixed everywhere â€” those are semantic status colors, not decoration.
    Themed colors elsewhere flow automatically through var(--accent-rgb). */
 .ares[data-theme="rage"] {
   --accent: #d6402e; --accent-hi: #ff6a44; --accent-rgb: 214, 64, 46;
@@ -85,7 +85,7 @@
   --ember: #59c08c; --ember-hi: #93eab8; --ember-rgb: 89, 192, 140; --blood: #134029;
 }
 
-/* Tokens DERIVED from the accent — declared on .ares so their var() resolves
+/* Tokens DERIVED from the accent â€” declared on .ares so their var() resolves
    against the THEMED --accent (set by the [data-theme] rules above on this same
    element), not :root's default. This is what makes a theme switch actually
    re-tint borders, the bronze accent, links, and selection across the whole UI. */
@@ -116,7 +116,7 @@ a:hover { border-bottom-color: var(--bronze-hi); }
 ::-webkit-scrollbar-thumb:hover { background: rgba(var(--accent-rgb), 0.36); }
 ::-webkit-scrollbar-track { background: transparent; }
 
-/* ── shell ──────────────────────────────────────────────────────────── */
+/* â”€â”€ shell â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 
 .ares {
   display: grid;
@@ -129,7 +129,7 @@ a:hover { border-bottom-color: var(--bronze-hi); }
   position: relative;
   overflow: hidden;
   /* Paint the themed background HERE, not just on <body>. The theme lives on
-     this element, so body's var(--bg) resolves to the ROOT (dark) default —
+     this element, so body's var(--bg) resolves to the ROOT (dark) default â€”
      in daylight that left the center stage showing near-black through the
      transparent shell. Painting .ares makes the light bg cover everything. */
   background: var(--bg);
@@ -143,8 +143,8 @@ a:hover { border-bottom-color: var(--bronze-hi); }
 .ares[data-dragging="1"] { transition: none; }
 
 .ares[data-panel="1"] {
-  /* The forge track is minmax(0, …) so it SHRINKS instead of overflowing when
-     the window narrows — a fixed px third track pushed the total past the
+  /* The forge track is minmax(0, â€¦) so it SHRINKS instead of overflowing when
+     the window narrows â€” a fixed px third track pushed the total past the
      viewport and `overflow:hidden` clipped the right half of the UI. The JS
      resize clamp (App.tsx) keeps --forge-w from ever crushing the chat. */
   grid-template-columns: 264px minmax(0, 1fr) minmax(0, var(--forge-w, 480px));
@@ -167,7 +167,7 @@ a:hover { border-bottom-color: var(--bronze-hi); }
   border: 0;
 }
 
-/* ── the backdrop: a war-god's command table ────────────────────────── */
+/* â”€â”€ the backdrop: a war-god's command table â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 .backdrop {
   position: absolute;
   inset: 0;
@@ -175,7 +175,7 @@ a:hover { border-bottom-color: var(--bronze-hi); }
   z-index: 0;
   overflow: hidden;
 }
-/* the painted battlefield — the helm artwork carries the room */
+/* the painted battlefield â€” the helm artwork carries the room */
 .backdrop::before {
   content: "";
   position: absolute;
@@ -184,7 +184,7 @@ a:hover { border-bottom-color: var(--bronze-hi); }
   background-size: cover;
   background-position: right center;
   background-repeat: no-repeat;
-  /* The painting sets the mood but must never compete with the transcript —
+  /* The painting sets the mood but must never compete with the transcript â€”
      pushed far back, softly blurred, and DIMMED (not ignited) while working so
      the chat content is what pops under load. */
   opacity: 0.13;
@@ -202,13 +202,13 @@ a:hover { border-bottom-color: var(--bronze-hi); }
   opacity: 0.6;
   pointer-events: none;
 }
-/* the astrolabe — concentric tick-ringed dials, slow counter-rotation */
+/* the astrolabe â€” concentric tick-ringed dials, slow counter-rotation */
 .backdrop .astrolabe {
   position: absolute;
   top: 50%; left: auto; right: -22%;
   width: 1180px; height: 1180px;
   transform: translateY(-50%);
-  /* the painted ring carries the motif now — the live dials sit faint on top */
+  /* the painted ring carries the motif now â€” the live dials sit faint on top */
   opacity: 0.1;
 }
 .backdrop .ringSlow { transform-origin: 500px 500px; animation: spin360 240s linear infinite; }
@@ -216,7 +216,7 @@ a:hover { border-bottom-color: var(--bronze-hi); }
 .backdrop .ringFast { transform-origin: 500px 500px; animation: spin360 80s linear infinite; }
 .backdrop .astrolabe { transition: opacity 700ms ease; }
 /* the war-dials ignite and spin up when Ares works (the dials carry the energy
-   now — the photo recedes instead of flaring) */
+   now â€” the photo recedes instead of flaring) */
 .ares[data-working="1"] .backdrop .astrolabe { opacity: 0.2; }
 .ares[data-working="1"] .backdrop .ringFast { animation-duration: 14s; stroke: var(--ember-hi); }
 .ares[data-working="1"] .backdrop .ringMid { animation-duration: 34s; stroke: var(--ember); }
@@ -224,8 +224,8 @@ a:hover { border-bottom-color: var(--bronze-hi); }
 /* under load the painting DIMS and softens so the chat + dials own the frame */
 .ares[data-working="1"] .backdrop::before { animation-name: backdropWork; animation-duration: 12s; filter: blur(2px) saturate(0.85) brightness(0.82); }
 
-/* the great helm at the edge of vision — soft, deep, with a warm rim glow */
-/* the painted helm replaces the line-art helm — keep the node for layout
+/* the great helm at the edge of vision â€” soft, deep, with a warm rim glow */
+/* the painted helm replaces the line-art helm â€” keep the node for layout
    compatibility but render nothing */
 .backdrop .helm { display: none; }
 /* a drifting depth field of faint motes */
@@ -246,7 +246,7 @@ a:hover { border-bottom-color: var(--bronze-hi); }
   background: radial-gradient(130% 100% at 36% 46%, transparent 52%, rgba(8, 6, 7, 0.62) 100%);
 }
 
-/* ── working glow: a breathing ember aura rising over the stage ───────── */
+/* â”€â”€ working glow: a breathing ember aura rising over the stage â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 .workGlow {
   position: absolute;
   grid-area: stage;
@@ -272,8 +272,8 @@ a:hover { border-bottom-color: var(--bronze-hi); }
 .ares[data-working="1"] .workGlow { opacity: 1; animation: workBreath 2.2s ease-in-out infinite; }
 .ares[data-working="1"] .workGlow::before { opacity: 1; }
 
-/* ── THE RAGE VEIL: a cinematic full-screen ignition when Ares works ──────
-   Covers the entire UI (rail, stage, forge, titlebar) — the god goes to war
+/* â”€â”€ THE RAGE VEIL: a cinematic full-screen ignition when Ares works â”€â”€â”€â”€â”€â”€
+   Covers the entire UI (rail, stage, forge, titlebar) â€” the god goes to war
    and the whole frame feels it. Pure gradients + blend; GPU-cheap. */
 .ares::after {
   content: "";
@@ -297,7 +297,7 @@ a:hover { border-bottom-color: var(--bronze-hi); }
 /* a thin blood line under the titlebar that pulses while working */
 .ares[data-working="1"] .titlebar { border-bottom-color: rgba(var(--accent-rgb), 0.5); }
 
-/* embers — sparse sparks drifting up from the forge, two parallax layers */
+/* embers â€” sparse sparks drifting up from the forge, two parallax layers */
 .embers {
   position: absolute;
   inset: 0;
@@ -314,15 +314,15 @@ a:hover { border-bottom-color: var(--bronze-hi); }
   opacity: 0.5;
   transition: opacity 700ms ease;
 }
-/* when the god works, the forge roars — embers thicken and rise faster */
+/* when the god works, the forge roars â€” embers thicken and rise faster */
 .ares[data-working="1"] .embers { opacity: 0.95; animation-duration: 13s; }
-/* At REST the forge is near-silent — a faint glow, not a fireworks show. The
+/* At REST the forge is near-silent â€” a faint glow, not a fireworks show. The
    roar is reserved for when Ares is actually working, so motion always means
    something is happening. --draft/--heat still modulate, just from a low floor. */
 .ares .embers { opacity: calc(0.1 + var(--draft, 1) * 0.08 + var(--heat, 0.3) * 0.12); animation-duration: calc(34s / (0.5 + var(--draft, 1) * 0.6)); }
 .ares[data-working="1"] .embers { opacity: calc(0.62 + var(--heat, 0.3) * 0.3); }
 
-/* ACTION STRIKE — every agent action flares the screen edge + a felt micro-shake.
+/* ACTION STRIKE â€” every agent action flares the screen edge + a felt micro-shake.
    The god moves; you feel it, not just see a glow. One-shot, gated by reduced-motion. */
 .strikeFlash {
   position: fixed; inset: 0; pointer-events: none; z-index: 60;
@@ -351,7 +351,7 @@ a:hover { border-bottom-color: var(--bronze-hi); }
 }
 
 
-/* ── titlebar ───────────────────────────────────────────────────────── */
+/* â”€â”€ titlebar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 
 .titlebar {
   grid-area: title;
@@ -400,7 +400,7 @@ a:hover { border-bottom-color: var(--bronze-hi); }
 .winControls button:hover { background: rgba(var(--accent-rgb), 0.1); color: var(--text); }
 .winControls .winClose:hover { background: var(--crimson); color: #fff; }
 
-/* ── left rail ──────────────────────────────────────────────────────── */
+/* â”€â”€ left rail â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 
 .rail {
   grid-area: rail;
@@ -552,7 +552,7 @@ a:hover { border-bottom-color: var(--bronze-hi); }
 .daemonDot i[data-state="starting"] { background: var(--bronze-hi); animation: pulse 1.2s ease-in-out infinite; }
 .daemonDot i[data-state="error"], .daemonDot i[data-state="stopped"] { background: var(--crimson); }
 
-/* ── stage ──────────────────────────────────────────────────────────── */
+/* â”€â”€ stage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 
 .stage {
   grid-area: stage;
@@ -576,7 +576,7 @@ a:hover { border-bottom-color: var(--bronze-hi); }
 .stageHead h2 { margin: 0; font-size: 15px; font-weight: 650; letter-spacing: 0.01em; }
 .stageHead span { display: block; margin-top: 3px; font: 500 11px/1 var(--mono); color: var(--faint); }
 
-/* ── chat ───────────────────────────────────────────────────────────── */
+/* â”€â”€ chat â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 
 .chat {
   position: relative;
@@ -589,11 +589,11 @@ a:hover { border-bottom-color: var(--bronze-hi); }
 .chat > * {
   animation: transcriptIn 360ms cubic-bezier(0.2, 0.9, 0.3, 1) both;
   /* flex items shrink when the column fills, and overflow:hidden children
-     (tool cards, diff cards) have a 0 minimum — they were getting crushed to
+     (tool cards, diff cards) have a 0 minimum â€” they were getting crushed to
      their 2px borders in long transcripts. Never shrink; scrolling handles it. */
   flex-shrink: 0;
 }
-/* a more spatial entrance — items rise, scale up from 98.5%, and sharpen in */
+/* a more spatial entrance â€” items rise, scale up from 98.5%, and sharpen in */
 @keyframes transcriptIn {
   from { transform: translateY(10px) scale(0.985); opacity: 0; filter: blur(1.5px); }
   to { transform: none; opacity: 1; filter: blur(0); }
@@ -627,7 +627,7 @@ a:hover { border-bottom-color: var(--bronze-hi); }
 .empty h3 { margin: 6px 0 0; font-weight: 650; color: var(--text); letter-spacing: 0.01em; }
 .empty p { margin: 0; font-size: 13px; max-width: 380px; color: var(--muted); }
 
-/* the wordmark — the empty stage carries the name like a title card */
+/* the wordmark â€” the empty stage carries the name like a title card */
 .wordmark {
   font-family: Georgia, "Times New Roman", serif;
   font-size: clamp(64px, 9vw, 118px);
@@ -680,7 +680,7 @@ a:hover { border-bottom-color: var(--bronze-hi); }
 }
 
 .turn.assistant { display: grid; gap: 10px; max-width: 86%; }
-/* live generation — a glowing ember caret rides the end of the streaming text */
+/* live generation â€” a glowing ember caret rides the end of the streaming text */
 .turn.assistant[data-streaming="1"] .prose::after {
   content: "";
   display: inline-block; vertical-align: text-bottom;
@@ -747,7 +747,7 @@ a:hover { border-bottom-color: var(--bronze-hi); }
   background: linear-gradient(90deg, var(--line-strong), var(--line), transparent);
 }
 
-/* native tables — rendered from markdown, themed */
+/* native tables â€” rendered from markdown, themed */
 .prose .tableWrap { overflow-x: auto; margin: 10px 0; border: 1px solid var(--line); border-radius: var(--r-md); }
 .prose table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
 .prose thead th {
@@ -804,9 +804,9 @@ a:hover { border-bottom-color: var(--bronze-hi); }
 .authModalHint { margin: 0; font-size: 12.5px; color: var(--muted); line-height: 1.6; }
 .authSteps { display: grid; gap: 6px; margin: 4px 0; padding: 0; list-style: none; width: 100%; }
 .authSteps li { display: flex; align-items: center; gap: 9px; font-size: 12px; color: var(--faint); }
-.authSteps li::before { content: "○"; color: var(--faint); }
+.authSteps li::before { content: "â—‹"; color: var(--faint); }
 .authSteps li[data-on="1"] { color: var(--steel); }
-.authSteps li[data-on="1"]::before { content: "●"; color: var(--steel); }
+.authSteps li[data-on="1"]::before { content: "â—"; color: var(--steel); }
 .authModal input { width: 100%; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-sm); padding: 10px 13px; outline: none; font-family: var(--mono); font-size: 12.5px; }
 .authModal input:focus { border-color: var(--accent); }
 .authErr { margin: 0; font-size: 11.5px; color: var(--crimson); }
@@ -817,7 +817,7 @@ a:hover { border-bottom-color: var(--bronze-hi); }
 .signInRow { justify-content: space-between; }
 .signInBtn { color: var(--accent-hi); border-color: var(--line-strong); }
 
-/* model attribution badge — proves routing is live, per message */
+/* model attribution badge â€” proves routing is live, per message */
 .modelBadge {
   display: inline-flex; align-items: center; gap: 6px;
   align-self: flex-start;
@@ -873,7 +873,7 @@ a:hover { border-bottom-color: var(--bronze-hi); }
 .chartVal { flex: none; width: 52px; text-align: right; font: 600 12px/1 var(--mono); color: var(--accent-hi); }
 @keyframes chartGrow { from { width: 0 !important; } }
 
-/* the thought — a quiet aside, not a monument. No box, no slab, no uppercase
+/* the thought â€” a quiet aside, not a monument. No box, no slab, no uppercase
    mono: just a soft collapsible line that streams while Ares reasons. */
 .thinking { color: var(--muted); }
 .thinkHead {
@@ -913,10 +913,10 @@ a:hover { border-bottom-color: var(--bronze-hi); }
   .thinking[data-live="1"] .thinkSigil, .thinkEllipsis i { animation: none; }
 }
 
-/* ── the morphing tool card ────────────────────────────────────────────────
+/* â”€â”€ the morphing tool card â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
    One reused card per tool batch. A single icon slot crossfades through each
    tool as it runs; the title rewrites to the live action; on finish it settles
-   to "N tools attempted". Slim translucent glass — hugs its content, no fat box. */
+   to "N tools attempted". Slim translucent glass â€” hugs its content, no fat box. */
 .toolCard {
   position: relative;
   width: fit-content; max-width: 80%;
@@ -933,7 +933,7 @@ a:hover { border-bottom-color: var(--bronze-hi); }
   border-color: rgba(var(--ember-rgb), 0.3);
   animation: railEmber 2.8s ease-in-out infinite;
 }
-/* a soft ember halo while running — glow, not a fat rail */
+/* a soft ember halo while running â€” glow, not a fat rail */
 @keyframes railEmber {
   0%, 100% { box-shadow: 0 0 20px -10px rgba(var(--ember-rgb), 0.4); }
   50% { box-shadow: 0 0 28px -6px rgba(var(--ember-rgb), 0.6); }
@@ -953,7 +953,7 @@ a:hover { border-bottom-color: var(--bronze-hi); }
 .toolProgressRail i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--bronze), var(--ember-hi)); box-shadow: 0 0 10px rgba(var(--ember-rgb), .55); transition: width 280ms cubic-bezier(.2,.9,.3,1); animation: toolRailBreathe 1.2s ease-in-out infinite; }
 @keyframes toolRailBreathe { 50% { filter: brightness(1.35); } }
 
-/* the morphing icon slot — a small rounded chip whose glyph swaps in place */
+/* the morphing icon slot â€” a small rounded chip whose glyph swaps in place */
 .toolCardIcon {
   flex: none; width: 26px; height: 26px;
   display: grid; place-items: center;
@@ -964,7 +964,7 @@ a:hover { border-bottom-color: var(--bronze-hi); }
 .toolCard[data-state="running"] .toolCardIcon { background: rgba(var(--ember-rgb), 0.14); }
 .toolCard[data-state="error"] .toolCardIcon { background: rgba(194, 80, 72, 0.14); }
 .morphGlyph { position: relative; width: 16px; height: 16px; font-size: 11px; background: none; border: none; animation: morphIn 360ms cubic-bezier(0.2, 0.9, 0.3, 1); }
-/* a little splash ring each time the card morphs to a new tool — keyed remount
+/* a little splash ring each time the card morphs to a new tool â€” keyed remount
    replays it, so every tool call gets a quick ember ripple */
 .morphGlyph::after {
   content: ""; position: absolute; inset: -7px; border-radius: 50%;
@@ -1002,7 +1002,7 @@ a:hover { border-bottom-color: var(--bronze-hi); }
 .toolCardHead .caret[data-open="1"] { transform: rotate(90deg); border-left-color: var(--bronze); }
 .stepLiveTail.cardTail { margin: 0 12px 12px 58px; }
 
-/* shared glyph chip — used in trail (mini) and expanded steps */
+/* shared glyph chip â€” used in trail (mini) and expanded steps */
 .glyph {
   flex: none;
   display: grid; place-items: center;
@@ -1013,14 +1013,14 @@ a:hover { border-bottom-color: var(--bronze-hi); }
   border: 1px solid transparent;
   transition: color 200ms ease, border-color 200ms ease, background 200ms ease;
 }
-.glyph::before { content: "●"; font-size: 5px; }
-.glyph[data-glyph="file"]::before { content: "▤"; }
-.glyph[data-glyph="search"]::before { content: "⌕"; }
-.glyph[data-glyph="edit"]::before { content: "✎"; }
-.glyph[data-glyph="create"]::before { content: "✚"; }
-.glyph[data-glyph="shell"]::before { content: "❯_"; letter-spacing: -1px; }
-.glyph[data-glyph="web"]::before { content: "◍"; }
-.glyph[data-glyph="task"]::before { content: "⑂"; }
+.glyph::before { content: "â—"; font-size: 5px; }
+.glyph[data-glyph="file"]::before { content: "â–¤"; }
+.glyph[data-glyph="search"]::before { content: "âŒ•"; }
+.glyph[data-glyph="edit"]::before { content: "âœŽ"; }
+.glyph[data-glyph="create"]::before { content: "âœš"; }
+.glyph[data-glyph="shell"]::before { content: "â¯_"; letter-spacing: -1px; }
+.glyph[data-glyph="web"]::before { content: "â—"; }
+.glyph[data-glyph="task"]::before { content: "â‘‚"; }
 .glyph.mini[data-status="ok"] { color: var(--steel); }
 .glyph.mini[data-status="running"], .glyph.mini[data-status="drafting"] { color: var(--ember-hi); }
 .glyph.mini[data-status="error"] { color: var(--crimson); border-color: rgba(194, 80, 72, 0.4); }
@@ -1039,7 +1039,7 @@ a:hover { border-bottom-color: var(--bronze-hi); }
 .stepLabel { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .stepMeta { margin-left: auto; font: 500 10px/1 var(--mono); color: var(--faint); flex: none; }
 .toolStep .stepIo b { display: block; color: var(--bronze); font: 600 9px/1.8 var(--mono); letter-spacing: 0.2em; text-transform: uppercase; }
-/* Live shell output while a tool runs — a small auto-scrolling terminal vein.
+/* Live shell output while a tool runs â€” a small auto-scrolling terminal vein.
    Deliberately NOT styled like the bronze, italic "thinking" block: this is a
    black terminal with an ember rail and a "running" header, so command output
    never gets mistaken for the model's inner monologue. */
@@ -1053,12 +1053,12 @@ a:hover { border-bottom-color: var(--bronze-hi); }
   font: 11px/1.55 var(--mono); white-space: pre-wrap; word-break: break-word;
 }
 .toolStep .stepLiveTail::before {
-  content: "❯ running"; position: absolute; top: 5px; left: 10px;
+  content: "â¯ running"; position: absolute; top: 5px; left: 10px;
   font: 700 8.5px/1 var(--mono); letter-spacing: 0.16em; text-transform: uppercase;
   color: var(--ember-hi); opacity: 0.85;
 }
 
-/* ── the vault (Artifacts page) ─────────────────────────────────────── */
+/* â”€â”€ the vault (Artifacts page) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 .vault {
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
@@ -1242,7 +1242,7 @@ a.vaultName { border-bottom: none; }
   .vaultLoc { grid-column: 2; }
 }
 
-/* ── the settings shell: left-nav modal ─────────────────────────────── */
+/* â”€â”€ the settings shell: left-nav modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 .scrim.center { justify-content: center; align-items: center; }
 .settingsShell {
   width: min(920px, 94vw); height: min(680px, 92vh);
@@ -1313,7 +1313,7 @@ a.vaultName { border-bottom: none; }
 .themeCard[data-on="1"] { border-color: var(--accent); background: rgba(var(--accent-rgb), 0.08); }
 .themeSwatch { width: 100%; height: 26px; border-radius: 6px; box-shadow: 0 0 16px currentColor; }
 
-/* ── Voice Hub ── */
+/* â”€â”€ Voice Hub â”€â”€ */
 .voiceHub { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--line); }
 .voiceGrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
 .voiceCard {
@@ -1340,7 +1340,7 @@ a.vaultName { border-bottom: none; }
 .voicePreview:hover { color: var(--accent); background: rgba(var(--accent-rgb), 0.1); }
 .voiceSpeed { width: 100%; accent-color: var(--accent); margin-top: 4px; }
 
-/* ── Karaoke: the sentence being spoken right now ── */
+/* â”€â”€ Karaoke: the sentence being spoken right now â”€â”€ */
 .speakingNow {
   position: fixed; left: 50%; bottom: 86px; transform: translateX(-50%);
   z-index: 38; max-width: min(680px, 74vw);
@@ -1362,7 +1362,7 @@ a.vaultName { border-bottom: none; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
-/* ── Read-aloud: floating speak button over a text selection ── */
+/* â”€â”€ Read-aloud: floating speak button over a text selection â”€â”€ */
 .readAloudBtn {
   position: fixed; z-index: 60;
   padding: 6px 11px; font-size: 12px;
@@ -1373,7 +1373,7 @@ a.vaultName { border-bottom: none; }
 }
 .readAloudBtn:hover { border-color: var(--accent); }
 
-/* ── Skill / voice dock — floating animated tray ──
+/* â”€â”€ Skill / voice dock â€” floating animated tray â”€â”€
    Floats above the status bar, never on it: at bottom:18px the 52px orb sat
    squarely on the HUD strip's right corner and covered the version readout. */
 .skillDock { position: fixed; right: 18px; bottom: 54px; z-index: 40; display: flex; flex-direction: column; align-items: flex-end; gap: 10px; pointer-events: none; }
@@ -1403,7 +1403,7 @@ a.vaultName { border-bottom: none; }
 .skillDockOrb[data-state="listening"] .skillDockOrbPulse { color: #6fd08a; }
 @keyframes dockPulse { 0% { transform: scale(0.85); opacity: 0.7; } 100% { transform: scale(1.5); opacity: 0; } }
 /* orb revamp: a slow conic sheen ring whenever voice is alive, hotter while
-   speaking/listening — the collapsed presence you can read across the room */
+   speaking/listening â€” the collapsed presence you can read across the room */
 .skillDockOrb::before {
   content: ""; position: absolute; inset: -2px; border-radius: 50%; padding: 2px;
   background: conic-gradient(from 0deg, transparent 0 40%, rgba(var(--accent-rgb), 0.55) 50%, transparent 60% 100%);
@@ -1416,7 +1416,7 @@ a.vaultName { border-bottom: none; }
 .skillDockOrb[data-state="listening"]::before { background: conic-gradient(from 0deg, transparent 0 40%, rgba(111, 208, 138, 0.7) 50%, transparent 60% 100%); }
 @keyframes orbSheen { to { transform: rotate(360deg); } }
 
-/* ── voice PRESENCE — monitor-edge glow + hands-free captions ────────────── */
+/* â”€â”€ voice PRESENCE â€” monitor-edge glow + hands-free captions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 .presenceGlow {
   position: fixed; inset: 0; z-index: 48; pointer-events: none;
   opacity: 0; animation: presenceIn 420ms ease forwards;
@@ -1563,7 +1563,7 @@ a.vaultName { border-bottom: none; }
 }
 .skillDockToast[data-ok="0"] { border-color: #c0504a; color: #e88; }
 
-/* ── SkillHub browser ── */
+/* â”€â”€ SkillHub browser â”€â”€ */
 .skillRowActions { display: flex; align-items: center; gap: 8px; }
 .skillCat.provides { background: rgba(var(--accent-rgb), 0.14); color: var(--accent); }
 .skillHubSection { margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--line); }
@@ -1596,7 +1596,7 @@ a.vaultName { border-bottom: none; }
 .skillInfo { display: grid; gap: 3px; flex: 1; min-width: 0; }
 .skillInfo strong { display: flex; align-items: center; gap: 8px; font: 600 13px/1.2 var(--mono); color: var(--text); }
 .skillReady { font: 600 8px/1 var(--mono) !important; letter-spacing: .08em; text-transform: uppercase; color: #86b98a !important; }
-.skillReady::before { content: "●"; margin-right: 4px; }
+.skillReady::before { content: "â—"; margin-right: 4px; }
 .skillReady[data-ready="0"] { color: var(--faint) !important; }
 .skillCat { font: 500 9px/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--faint); padding: 3px 7px; border: 1px solid var(--line); border-radius: 999px; }
 .skillInfo span { font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1609,7 +1609,7 @@ a.vaultName { border-bottom: none; }
 
 /* engine rows */
 .engineRow { display: flex; align-items: center; gap: 16px; padding: 11px 0; border-bottom: 1px solid var(--line); }
-/* Per-category rows are overridden by "Act freely" — dim them so it reads as "all on". */
+/* Per-category rows are overridden by "Act freely" â€” dim them so it reads as "all on". */
 .engineRow[data-dim="1"] { opacity: 0.5; }
 .engineRow .toggle:disabled { cursor: not-allowed; }
 .engineInfo { flex: 1; display: grid; gap: 3px; }
@@ -1623,7 +1623,7 @@ a.vaultName { border-bottom: none; }
 .engineRow input:focus { border-color: var(--accent); }
 
 /* api key registry */
-/* ── API Keys — clean logo cards with a status pill + inline input ──────── */
+/* â”€â”€ API Keys â€” clean logo cards with a status pill + inline input â”€â”€â”€â”€â”€â”€â”€â”€ */
 .keyGroupLabel { font: 600 10px/1 var(--mono); letter-spacing: 0.16em; text-transform: uppercase; color: var(--faint); padding: 14px 0 6px; }
 .keyCard {
   display: flex; align-items: flex-start; gap: 12px;
@@ -1667,7 +1667,7 @@ a.vaultName { border-bottom: none; }
 .keySignInBtn:hover { background: rgba(var(--accent-rgb), 0.24); border-color: var(--accent); }
 
 /* about pane */
-/* What's New / Updates tab — the persistent changelog the popup used to be the only view of. */
+/* What's New / Updates tab â€” the persistent changelog the popup used to be the only view of. */
 .updatesHead { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .updatesTitle { margin: 0 0 2px; font-size: 16px; font-weight: 700; color: var(--accent-hi); }
 .updatesReplay { flex: none; padding: 7px 12px; font-size: 12px; font-weight: 600; color: var(--accent-hi);
@@ -1733,7 +1733,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .usageCalls { font-size: 11px; color: var(--faint); flex: none; }
 .usageTok { font: 500 11px/1 var(--mono); color: var(--muted); flex: none; }
 
-/* ── tool display mode cards (settings) ─────────────────────────────── */
+/* â”€â”€ tool display mode cards (settings) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 .displayModes { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .displayModes button {
   display: grid; gap: 4px;
@@ -1749,7 +1749,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .displayModes button[data-on="1"] strong { color: var(--bronze-hi); }
 .displayModes span { font-size: 11px; color: var(--faint); line-height: 1.45; }
 
-/* Appearance → the intentionally loud doorway into the experimental runtime. */
+/* Appearance â†’ the intentionally loud doorway into the experimental runtime. */
 .livingLaunchCard {
   position: relative; overflow: hidden; display: grid;
   grid-template-columns: 64px minmax(0, 1fr) auto; align-items: center; gap: 16px;
@@ -1797,7 +1797,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .notice[data-tone="warn"] { color: var(--bronze-hi); border-color: rgba(var(--accent-rgb), 0.4); background: rgba(var(--accent-rgb), 0.05); }
 .notice[data-tone="bad"] { color: var(--crimson); border-color: rgba(194, 80, 72, 0.4); background: rgba(194, 80, 72, 0.06); animation: fadeUp 280ms ease both, shake 360ms ease 280ms; }
 
-/* The Gate — approval prompt, styled to match the translucent tool card:
+/* The Gate â€” approval prompt, styled to match the translucent tool card:
    slim glass panel, a shield glyph, and pill actions. No more fat amber box. */
 .gate {
   display: flex; align-items: center; gap: 12px;
@@ -1835,7 +1835,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .gateActions .gateDeny { color: var(--crimson); border-color: rgba(194, 80, 72, 0.4); }
 .gateActions .gateDeny:hover { background: rgba(194, 80, 72, 0.12); }
 
-/* ── The delegation choice popup: Claude Code / Codex / Ares ─────────────────── */
+/* â”€â”€ The delegation choice popup: Claude Code / Codex / Ares â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 .cbOffer {
   width: fit-content; max-width: 92%; margin: 2px 0;
   padding: 12px 14px; border-radius: 14px;
@@ -1890,7 +1890,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
   animation: tickerIn 240ms cubic-bezier(0.2, 0.9, 0.3, 1) both;
 }
 
-/* diff cards — red/green proof of what changed */
+/* diff cards â€” red/green proof of what changed */
 .diffCard { border: 1px solid var(--line); border-radius: var(--r-md); background: var(--panel); max-width: 86%; overflow: hidden; }
 .diffCard[data-open="1"] { border-color: var(--line-strong); }
 .diffHead { display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px 14px; color: var(--muted); font: 500 12px/1 var(--mono); }
@@ -1936,7 +1936,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .subagentBody span { font-size: 12.5px; color: var(--muted); }
 .subagentBody p { margin: 2px 0 0; font-size: 12px; color: var(--text); line-height: 1.5; white-space: pre-wrap; }
 
-/* todo panel — the live plan above the composer */
+/* todo panel â€” the live plan above the composer */
 .todoPanel {
   border: 1px solid var(--line);
   border-radius: var(--r-md);
@@ -1963,11 +1963,11 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .send.stop { background: linear-gradient(180deg, #d4685f, var(--crimson)); color: #2a0f0c; }
 .send.stop:hover { filter: brightness(1.08); box-shadow: 0 0 18px rgba(194, 80, 72, 0.4); }
 
-/* ── composer ───────────────────────────────────────────────────────── */
+/* â”€â”€ composer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 
 .composer { padding: 4px clamp(20px, 6vw, 96px) 12px; display: grid; gap: 8px; position: relative; }
 
-/* "/" command menu — floats above the composer, keyboard-driven. */
+/* "/" command menu â€” floats above the composer, keyboard-driven. */
 .slashMenu {
   position: absolute; bottom: calc(100% + 6px); left: clamp(20px, 6vw, 96px); right: clamp(20px, 6vw, 96px);
   z-index: 30; display: flex; flex-direction: column; gap: 2px; padding: 6px;
@@ -2019,12 +2019,12 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
   transition: border-color 180ms ease, box-shadow 180ms ease;
 }
 .composerRow:focus-within { border-color: var(--bronze); box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.12), 0 0 32px -4px rgba(var(--accent-rgb), 0.10), inset 0 1px 0 rgba(255, 255, 255, 0.04); }
-/* steering an in-flight turn — the rim warms to ember so it's clearly a hand-off */
+/* steering an in-flight turn â€” the rim warms to ember so it's clearly a hand-off */
 .composerRow[data-busy="1"] { border-color: rgba(var(--ember-rgb), 0.4); }
 .composerRow[data-busy="1"]:focus-within { border-color: var(--ember); box-shadow: 0 0 0 3px rgba(var(--ember-rgb), 0.12), 0 0 32px -4px rgba(var(--ember-rgb), 0.14); }
 
-/* ══ SCREEN FLAME BORDER — real shaped flame tongues lick INWARD around the whole
-   UI while Ares works. Replaces the flat red glow with actual fire. Subtle. ══ */
+/* â•â• SCREEN FLAME BORDER â€” real shaped flame tongues lick INWARD around the whole
+   UI while Ares works. Replaces the flat red glow with actual fire. Subtle. â•â• */
 .screenFlame {
   --flame-edge: 26px;
   position: fixed; inset: 0; z-index: 46; pointer-events: none;
@@ -2035,7 +2035,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .ares[data-ultra="1"][data-working="1"] .screenFlame { opacity: 0; }
 .hackerRain {
   position: fixed; inset: 0; z-index: 47; pointer-events: none;
-  /* rain only on the rims — the center is masked transparent so the transcript stays readable */
+  /* rain only on the rims â€” the center is masked transparent so the transcript stays readable */
   -webkit-mask: radial-gradient(ellipse 64% 60% at 50% 50%, transparent 52%, #000 80%);
   mask: radial-gradient(ellipse 64% 60% at 50% 50%, transparent 52%, #000 80%);
   opacity: 0; animation: rainIn 600ms ease forwards; mix-blend-mode: screen;
@@ -2043,7 +2043,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 @keyframes rainIn { to { opacity: 0.62; } }
 .screenFlame .fStrip { position: absolute; }
 .screenFlame .fStrip svg { display: block; width: 100%; height: 100%; }
-/* the three layers dance at different rates → volumetric, living fire */
+/* the three layers dance at different rates â†’ volumetric, living fire */
 .screenFlame .flame-back { transform-origin: center bottom; animation: flameLick 1.1s ease-in-out infinite alternate; mix-blend-mode: screen; }
 .screenFlame .flame-mid { transform-origin: center bottom; animation: flameLick 0.62s ease-in-out infinite alternate; animation-delay: -0.2s; mix-blend-mode: screen; }
 .screenFlame .flame-core { transform-origin: center bottom; animation: flameLickHard 0.34s ease-in-out infinite alternate; mix-blend-mode: screen; }
@@ -2051,16 +2051,16 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
   from { transform: scaleY(0.82) translateY(2px); opacity: 0.7; }
   to { transform: scaleY(1.15) translateY(-2px); opacity: 1; }
 }
-/* bottom edge — tongues point up (the base orientation) */
+/* bottom edge â€” tongues point up (the base orientation) */
 .screenFlame .edge-bottom { left: 0; bottom: 0; width: 100%; height: var(--flame-edge); }
-/* top edge — flip so tongues point down into the screen */
+/* top edge â€” flip so tongues point down into the screen */
 .screenFlame .edge-top { left: 0; top: 0; width: 100%; height: var(--flame-edge); transform: scaleY(-1); }
-/* left edge — rotate the horizontal strip to run vertically, tongues pointing right */
+/* left edge â€” rotate the horizontal strip to run vertically, tongues pointing right */
 .screenFlame .edge-left { top: 0; left: 0; height: var(--flame-edge); width: 100vh; transform-origin: 0 0; transform: rotate(90deg) translateY(calc(-1 * var(--flame-edge))); }
-/* right edge — tongues pointing left */
+/* right edge â€” tongues pointing left */
 .screenFlame .edge-right { top: 0; right: 0; height: var(--flame-edge); width: 100vh; transform-origin: 100% 0; transform: rotate(-90deg) translateY(calc(-1 * var(--flame-edge))); }
 
-/* ── flame modes (status-bar toggle: immersive · clean · combat) ──────────
+/* â”€â”€ flame modes (status-bar toggle: immersive Â· clean Â· combat) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
    immersive = the default volumetric tongues above.
    clean     = no tongues; just a soft ember rim that breathes, so the border
                stops "bullying" the interface.
@@ -2113,7 +2113,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .send:hover:not(:disabled) { filter: brightness(1.1); box-shadow: 0 0 18px rgba(var(--accent-rgb), 0.35); }
 .send:active:not(:disabled) { transform: translateY(1px); }
 
-/* ── mic / dictation button ─────────────────────────────────────────── */
+/* â”€â”€ mic / dictation button â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 .mic {
   flex: none;
   position: relative; isolation: isolate;
@@ -2159,7 +2159,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
   animation: spin360 0.7s linear infinite;
 }
 
-/* ── the floating pill — Ares condensed to an always-on-top mic bar ───── */
+/* â”€â”€ the floating pill â€” Ares condensed to an always-on-top mic bar â”€â”€â”€â”€â”€ */
 .ares[data-pill="1"] { background: transparent; }
 .pillBar {
   position: fixed; inset: 0; z-index: 9000;
@@ -2215,9 +2215,9 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .pillBtn:hover { color: var(--text); background: rgba(var(--accent-rgb), 0.1); }
 .pillBtn[data-on="1"] { color: var(--accent-hi); background: rgba(var(--accent-rgb), 0.14); }
 
-/* ── status bar ─────────────────────────────────────────────────────── */
+/* â”€â”€ status bar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 
-/* The cockpit HUD strip — a single instrument bar, not a row of loose text.
+/* The cockpit HUD strip â€” a single instrument bar, not a row of loose text.
    Telemetry segments cluster on the left in a faint console panel; actions and
    readouts sit on the right. Every chip shares one height + structure. */
 .statusBar {
@@ -2235,7 +2235,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .statusBar .dot[data-state="starting"] { background: var(--bronze-hi); animation: pulse 1.2s ease-in-out infinite; }
 .statusBar .dot[data-state="error"], .statusBar .dot[data-state="stopped"] { background: var(--crimson); }
 
-/* a clustered instrument group — BOTH ends are matched console panels with
+/* a clustered instrument group â€” BOTH ends are matched console panels with
    hairline dividers, so the bar reads as one cockpit instrument, not loose text */
 .statusGroup {
   display: flex; align-items: center; gap: 2px;
@@ -2287,11 +2287,11 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 }
 .hudVersion::before { content: "v"; opacity: 0.7; }
 
-/* ── boot overlay ───────────────────────────────────────────────────── */
+/* â”€â”€ boot overlay â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 
-/* ══ INTRO SPLASH — a cinematic forge-ignition: the painted war table behind a
+/* â•â• INTRO SPLASH â€” a cinematic forge-ignition: the painted war table behind a
    heavy vignette, the Ares sigil rising inside spinning rune-rings, the wordmark
-   slamming in, then a hot bloom that dissolves into the live shell. ══ */
+   slamming in, then a hot bloom that dissolves into the live shell. â•â• */
 .boot {
   position: fixed; inset: 0; z-index: 90;
   display: grid; place-items: center;
@@ -2369,7 +2369,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
   .bootRing1, .bootRing2, .bootEmbers, .bootHero { animation: none !important; }
 }
 
-/* ── settings drawer ────────────────────────────────────────────────── */
+/* â”€â”€ settings drawer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 
 .scrim { position: fixed; inset: 0; z-index: 60; background: rgba(8, 6, 7, 0.6); display: flex; justify-content: flex-end; animation: bootIn 160ms ease; backdrop-filter: blur(2px); }
 .drawer {
@@ -2422,7 +2422,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .drawer footer { margin-top: auto; flex: none; padding-top: 6px; }
 .drawer footer .primary { width: 100%; }
 
-/* ── settings: the premium surface ──────────────────────────────────── */
+/* â”€â”€ settings: the premium surface â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 .settingsDrawer { width: 432px; }
 .settingsHero {
   display: flex; align-items: center; gap: 14px;
@@ -2479,7 +2479,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
   word-break: break-word;
 }
 
-/* daemon console drawer — the log is the hero, lifecycle controls in the header */
+/* daemon console drawer â€” the log is the hero, lifecycle controls in the header */
 .consoleDrawer { display: flex; flex-direction: column; gap: 12px; height: min(680px, 84vh); }
 .consoleHead { display: flex; align-items: center; gap: 10px; }
 .consoleHead .pill { display: inline-flex; align-items: center; gap: 6px; }
@@ -2506,12 +2506,12 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
   background: rgba(8, 6, 7, 0.55);
   /* Vertically centered with guaranteed top+bottom breathing room so tall
      popovers (the War Table, the model swap) are NEVER jammed against an edge
-     or clipped — the old top-anchor (padding-top:12vh, no bottom) cut off the
+     or clipped â€” the old top-anchor (padding-top:12vh, no bottom) cut off the
      footer button on shorter windows. */
   display: grid; justify-items: center; align-items: center;
   padding: 5vh 16px;
   animation: bootIn 140ms ease;
-  /* a deeper blur reads as depth-of-field — the room recedes, the panel is the subject */
+  /* a deeper blur reads as depth-of-field â€” the room recedes, the panel is the subject */
   backdrop-filter: blur(7px) saturate(0.85);
 }
 .palette {
@@ -2545,7 +2545,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .paletteEmpty { padding: 16px; text-align: center; font-size: 12px; color: var(--faint); }
 .palette.modelSwap { width: min(600px, 92vw); max-height: 82vh; gap: 10px; padding-bottom: 14px; }
 
-/* ── model DISCOVERY panel — the big two-pane model browser ─────────────── */
+/* â”€â”€ model DISCOVERY panel â€” the big two-pane model browser â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 .palette.modelDiscovery {
   width: min(1080px, 94vw); max-height: 86vh; height: min(720px, 86vh);
   flex-direction: row; padding: 0; gap: 0;
@@ -2630,7 +2630,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .modelGlyph svg, .mdlMark svg, .mdGlyph svg, .settingsModelLogo svg, .provIdent svg { width: 100%; height: 100%; display: block; }
 .modelGlyph { width: 22px; height: 22px; }
 .mdGlyph { width: 40px; height: 40px; }
-/* favicon logos loaded from the provider's own domain — clean light tile so a
+/* favicon logos loaded from the provider's own domain â€” clean light tile so a
    dark or colored mark reads in any theme; the img is contained with padding */
 .brandLogo {
   display: inline-flex; align-items: center; justify-content: center; flex: none;
@@ -2643,7 +2643,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .brandLogo.mdGlyph { width: 40px; height: 40px; border-radius: 11px; }
 .brandLogo.settingsModelLogo { width: 38px; height: 38px; border-radius: 11px; }
 
-/* settings → Model: a summary card that opens the full discovery browser */
+/* settings â†’ Model: a summary card that opens the full discovery browser */
 .settingsModelCard {
   display: flex; align-items: center; gap: 12px; width: 100%; text-align: left;
   padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line);
@@ -2657,7 +2657,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .settingsModelBody em { display: block; font-style: normal; font-size: 11.5px; color: var(--faint); }
 .settingsModelBrowse { flex: none; font-size: 12px; font-weight: 700; color: var(--accent-hi, var(--accent)); }
 
-/* settings → Model: branded provider picker (was flat colored dots) */
+/* settings â†’ Model: branded provider picker (was flat colored dots) */
 .provIdentGrid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin: 4px 0 6px; }
 .provIdent {
   display: flex; align-items: center; gap: 10px; text-align: left;
@@ -2672,7 +2672,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .provIdentBody strong { display: block; font-size: 12.5px; text-transform: capitalize; }
 .provIdentBody em { display: block; font-style: normal; font-size: 10.5px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-/* voice engine health strip (settings → Voice) */
+/* voice engine health strip (settings â†’ Voice) */
 .voiceEngineStatus {
   display: flex; align-items: center; gap: 10px; margin: 2px 0 14px;
   padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line);
@@ -2817,7 +2817,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
   .effortChoices button { min-height: 72px; border-top: 1px solid rgba(255,255,255,.045); }
 }
 
-/* ── the effort slider — low → max → ULTRA ──────────────────────────────── */
+/* â”€â”€ the effort slider â€” low â†’ max â†’ ULTRA â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 .effortSlider { padding: 8px 16px 4px; display: grid; gap: 12px; }
 .effortTrack { position: relative; height: 26px; display: flex; align-items: center; }
 .effortTrack::before {
@@ -2883,7 +2883,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 /* the HUD 'mode' chip glows when the fleet posture is armed */
 .statusSeg[data-ultra="1"] span { color: var(--ember-hi); text-shadow: 0 0 8px rgba(var(--ember-rgb), 0.6); }
 
-/* ── the live fleet board — Conductor agents, grouped by phase ───────────── */
+/* â”€â”€ the live fleet board â€” Conductor agents, grouped by phase â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 .fleetPanel {
   margin: 0 0 8px; border: 1px solid var(--line-strong); border-radius: var(--r-md);
   background: linear-gradient(180deg, var(--bg-raised), var(--panel));
@@ -2928,7 +2928,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .fleetRole { font: 600 11px/1.2 var(--mono); color: var(--text); flex: none; max-width: 42%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fleetAct { font: 400 10.5px/1.3 var(--mono); color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: auto; }
 
-/* ── Delegation cut-scene: Ares beaming a job to Claude Code / Codex ────────── */
+/* â”€â”€ Delegation cut-scene: Ares beaming a job to Claude Code / Codex â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 .cbScene {
   --cb-accent: #d9935a;
   margin: 0 0 8px; padding: 14px 14px 11px; border-radius: var(--r-md);
@@ -2956,7 +2956,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .cbAres .cbName { color: var(--ember-hi); }
 .cbBackend .cbName { color: var(--cb-accent); }
 
-/* The beam: three chevrons streaming Ares → backend while working. */
+/* The beam: three chevrons streaming Ares â†’ backend while working. */
 .cbBeam { display: inline-flex; gap: 6px; align-items: center; opacity: 0.35; }
 .cbBeam i { width: 8px; height: 8px; border-top: 2px solid var(--cb-accent); border-right: 2px solid var(--cb-accent); transform: rotate(45deg); border-radius: 1px; }
 .cbScene[data-phase="running"] .cbBeam { opacity: 1; }
@@ -2978,7 +2978,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .cbStep { display: inline-flex; align-items: center; gap: 5px; font: 600 9px/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--faint); opacity: 0.5; }
 .cbStep[data-state="active"] { opacity: 1; color: var(--ember-hi); }
 .cbStep[data-state="done"] { opacity: 0.85; color: var(--steel); }
-.cbStep:not(:last-child)::after { content: "→"; margin-left: 4px; color: var(--faint); opacity: 0.5; }
+.cbStep:not(:last-child)::after { content: "â†’"; margin-left: 4px; color: var(--faint); opacity: 0.5; }
 .cbStepDot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .cbStep[data-state="active"] .cbStepDot { box-shadow: 0 0 7px var(--ember-hi); animation: micPulse 1.2s ease-in-out infinite; }
 
@@ -3005,7 +3005,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .popRow span { font: 600 13px/1 var(--mono); }
 .popRow em { font-style: normal; font-size: 11.5px; color: var(--faint); margin-left: auto; }
 
-/* ══ THE WAR TABLE — routing assignments, spacious and un-squished ══ */
+/* â•â• THE WAR TABLE â€” routing assignments, spacious and un-squished â•â• */
 .palette.routingPop { width: min(720px, 95vw); max-height: 86vh; display: flex; flex-direction: column; }
 .routingHead {
   display: flex; align-items: flex-start; gap: 16px;
@@ -3015,7 +3015,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .routingHead strong { font: 700 14px/1 var(--mono); letter-spacing: 0.04em; color: var(--bronze-hi); }
 .routingHead span { font: 400 11.5px/1.5 var(--mono); color: var(--faint); max-width: 540px; }
 .routingHead .popClose { flex: none; padding: 6px 12px; font-size: 11px; }
-/* min-height:0 is REQUIRED for a flex child to actually scroll — without it the
+/* min-height:0 is REQUIRED for a flex child to actually scroll â€” without it the
    body grows to content height and the modal clips it with no scrollbar. */
 .routingPopBody { overflow-y: auto; min-height: 0; flex: 1; padding: 12px 14px; display: grid; gap: 10px; align-content: start; }
 .routingPopFoot { padding: 14px 18px; border-top: 1px solid var(--line); flex: none; }
@@ -3107,7 +3107,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 }
 .modelGroup em { font-style: normal; letter-spacing: 0; color: var(--bronze); }
 .modelRow {
-  /* glyph | identity(flex) | hint | tick — explicit 4 tracks (the tick used to
+  /* glyph | identity(flex) | hint | tick â€” explicit 4 tracks (the tick used to
      wrap under the glyph on a phantom 2nd row); top-aligned so the description
      card can grow downward. */
   display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: start; gap: 4px 12px;
@@ -3116,7 +3116,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
   text-align: left;
   position: relative;
   transition: background 130ms ease, box-shadow 130ms ease, transform 130ms ease;
-  /* staggered entrance — each row slides up in sequence as the list opens */
+  /* staggered entrance â€” each row slides up in sequence as the list opens */
   opacity: 0;
   animation: modelRowIn 320ms cubic-bezier(0.2, 0.9, 0.3, 1) forwards;
   animation-delay: calc(var(--i, 0) * 22ms);
@@ -3149,12 +3149,12 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .modelHint { font-size: 10.5px; line-height: 1.35; color: var(--faint); text-align: right; max-width: 200px; }
 /* a check that fades in only on the selected row */
 .modelTick { width: 14px; flex: none; opacity: 0; transition: opacity 130ms ease; }
-.modelTick::before { content: "✓"; color: var(--accent-hi); font: 700 12px/1 var(--mono); }
+.modelTick::before { content: "âœ“"; color: var(--accent-hi); font: 700 12px/1 var(--mono); }
 .modelRow[data-on="1"] .modelTick { opacity: 1; }
 .modelHintEmpty { font-size: 11.5px; color: var(--faint); padding: 14px; text-align: center; }
 @keyframes modelRowIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
-/* The ⓘ details affordance on a card — click opens the big page, without selecting. */
+/* The â“˜ details affordance on a card â€” click opens the big page, without selecting. */
 .modelInfo {
   flex: none; align-self: center; width: 20px; height: 20px; display: grid; place-items: center;
   border-radius: 50%; font: 600 12px/1 var(--mono); color: var(--faint); cursor: pointer;
@@ -3162,7 +3162,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 }
 .modelInfo:hover { color: var(--bronze-hi); border-color: var(--bronze); background: rgba(var(--accent-rgb), 0.12); }
 
-/* ── The model DETAIL page — big, readable, opened from a card ─────────────── */
+/* â”€â”€ The model DETAIL page â€” big, readable, opened from a card â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 .modelDetail {
   border: 1px solid var(--line-strong); border-radius: var(--r-md);
   background: radial-gradient(120% 80% at 0% -10%, rgba(var(--ember-rgb), 0.08), transparent 55%), var(--panel);
@@ -3256,10 +3256,10 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .laneToggle:hover .laneName strong { color: var(--bronze-hi); }
 .laneBody { display: grid; gap: 9px; padding: 4px 14px 14px; animation: fadeUp 180ms ease both; }
 .laneBody input { width: 100%; }
-/* give the per-lane model list real room — no more squished 150px scroller */
+/* give the per-lane model list real room â€” no more squished 150px scroller */
 .laneBody .modelPicker.compact .modelList { max-height: 230px; }
 
-/* ── the Forge: the right-side panel ────────────────────────────────── */
+/* â”€â”€ the Forge: the right-side panel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 
 .forge {
   grid-area: forge;
@@ -3324,7 +3324,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
   background: var(--bg-raised);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.forgeMeta::before { content: "◆"; font-size: 8px; color: var(--bronze-hi); }
+.forgeMeta::before { content: "â—†"; font-size: 8px; color: var(--bronze-hi); }
 .forgeBody:has(.forgeMeta) { grid-template-rows: auto minmax(0, 1fr); }
 .forgeToolbar, .liveToolbar {
   display: flex; align-items: center; gap: 7px;
@@ -3348,7 +3348,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .forgeEmpty { display: grid; place-content: center; justify-items: center; gap: 12px; color: var(--muted); text-align: center; padding: 20px; }
 .forgeEmpty p { margin: 0; font-size: 12.5px; max-width: 260px; line-height: 1.6; }
 
-/* ── embedded live browser — Ares driving its own browser, streamed in ── */
+/* â”€â”€ embedded live browser â€” Ares driving its own browser, streamed in â”€â”€ */
 .forgeTabs button[data-live="1"] { color: var(--ember-hi); border-color: rgba(var(--ember-rgb), 0.5); background: rgba(var(--ember-rgb), 0.1); animation: livePulse 1.4s ease-in-out infinite; }
 @keyframes livePulse { 50% { background: rgba(var(--ember-rgb), 0.22); } }
 .liveBrowser .liveStage { display: grid; place-items: center; min-height: 0; padding: 10px; background: #0a0809; overflow: auto; }
@@ -3407,7 +3407,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .artifact em { font-style: normal; font-size: 11px; color: var(--muted); }
 .artifactGo { margin-left: auto; font: 700 10px/1 var(--mono); letter-spacing: 0.16em; color: var(--bronze-hi); }
 
-/* ── animation primitives ───────────────────────────────────────────── */
+/* â”€â”€ animation primitives â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 
 @keyframes pulse { 0%, 100% { opacity: 0.45; } 50% { opacity: 1; } }
 @keyframes drawOn { to { stroke-dashoffset: 0; } }
@@ -3488,11 +3488,11 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
   opacity: 0.35;
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
-   HELM — "The Scrying Basin of Ares"
+/* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+   HELM â€” "The Scrying Basin of Ares"
    Drivers: --heat (0..1 molten temp), --draft (0..1 daemon ambient),
    --tilt-x/--tilt-y (pointer parallax). Everything reads these.
-   ═══════════════════════════════════════════════════════════════════════════ */
+   â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 .helm-root {
   --heat: 0.3; --draft: 1; --tilt-x: 0deg; --tilt-y: 0deg;
   position: relative;
@@ -3551,7 +3551,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .helm-refresh { flex: none; width: 26px; height: 26px; border-radius: 6px; color: var(--faint); font-size: 13px; border: 1px solid var(--line); transition: color 140ms, background 140ms, transform 300ms; }
 .helm-refresh:hover { color: var(--bronze-hi); background: rgba(var(--accent-rgb), 0.1); transform: rotate(180deg); }
 
-/* CENTER GRID — three slates | basin | three slates */
+/* CENTER GRID â€” three slates | basin | three slates */
 .helm-content {
   position: relative; z-index: 1;
   display: grid;
@@ -3568,7 +3568,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .slate-auguries { grid-column: 3; grid-row: 2; }
 .slate-favor { grid-column: 3; grid-row: 3; }
 
-/* THE OMPHALOS — basin */
+/* THE OMPHALOS â€” basin */
 .helm-basin {
   position: relative; z-index: 1;
   align-self: center; justify-self: center;
@@ -3695,7 +3695,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .helm-ledger-scroll { display: flex; gap: 10px; overflow: hidden; flex: 1; }
 .helm-tablet { flex: none; font: 600 10.5px/1 var(--mono); color: var(--steel); padding: 5px 10px; border-radius: 5px; border: 1px solid rgba(127, 166, 163, 0.3); background: rgba(127, 166, 163, 0.06); white-space: nowrap; animation: forgeIn 500ms ease both; }
 
-/* narrow widths — collapse to a single column: basin first, slates stacked */
+/* narrow widths â€” collapse to a single column: basin first, slates stacked */
 @media (max-width: 920px) {
   .helm-content { grid-template-columns: 1fr; grid-template-rows: none; grid-auto-rows: min-content; }
   .helm-basin { grid-column: 1; grid-row: auto; order: -1; width: min(100%, 320px); margin: 0 auto; }
@@ -3703,7 +3703,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
   .helm-content { overflow-y: auto; }
 }
 
-/* daemon dying — cold crust inversion */
+/* daemon dying â€” cold crust inversion */
 .helm-root[data-daemon="stopped"], .helm-root[data-daemon="error"] {
   filter: saturate(0.5) brightness(0.82);
 }
@@ -3713,7 +3713,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
   .helm-embers, .helm-pool, .helm-pool-glow, .helm-ring-outer, .helm-ring-mid, .helm-shock, .helm-ticker span[data-on="1"] { animation: none !important; }
 }
 
-/* ─── Auto-update banner ─────────────────────────────────────────────────── */
+/* â”€â”€â”€ Auto-update banner â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 .updateBanner {
   position: fixed;
   top: 14px;
@@ -3759,7 +3759,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .updateBanner__bar { width: 120px; height: 5px; border-radius: 3px; background: rgba(255, 255, 255, 0.08); overflow: hidden; }
 .updateBanner__barFill { height: 100%; background: linear-gradient(90deg, var(--ember), var(--ember-hi)); transition: width 0.2s ease; }
 
-/* ─── Consciousness settings pane ────────────────────────────────────────── */
+/* â”€â”€â”€ Consciousness settings pane â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 .consciousHead { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 14px 0 18px; }
 .consciousPhase {
   font-weight: 600;
@@ -3804,7 +3804,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
   margin-bottom: 4px;
 }
 
-/* ─── What's New reveal ──────────────────────────────────────────────────── */
+/* â”€â”€â”€ What's New reveal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 /* Fires once after an update. Obsidian card, one bronze accent, motion small. */
 .wnScrim {
   z-index: 80; /* above settings (60) */
@@ -3832,7 +3832,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .wnCard:focus { outline: none; }
 .wnClosing .wnCard { animation: wnSink 200ms ease forwards; }
 
-/* First-run key gate — a tighter card than the changelog reveal it borrows. */
+/* First-run key gate â€” a tighter card than the changelog reveal it borrows. */
 .frgCard { width: min(460px, calc(100vw - 40px)); }
 
 .wnGlow {
@@ -3953,7 +3953,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
   .wnItem { opacity: 1; transform: none; }
 }
 
-/* ─── Custom (OpenAI-compatible) provider block ──────────────────────────── */
+/* â”€â”€â”€ Custom (OpenAI-compatible) provider block â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 .customProv {
   margin: 10px 0 4px;
   padding: 12px 13px;
@@ -3977,18 +3977,18 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .customProv .keyHint[data-ok="1"] { color: var(--steel); }
 .customProv .keyHint[data-ok="0"] { color: var(--crimson); }
 
-/* ═══════════════════════════════════════════════════════════════════════════
-   NEW-STYLE SKIN — "Forged". The GPU/spring/glass leap.
+/* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+   NEW-STYLE SKIN â€” "Forged". The GPU/spring/glass leap.
    EVERY rule below is scoped under .ares[data-style="new"] so legacy mode
    (data-style="legacy") stays pixel-identical to the pre-skin app. The global
    prefers-reduced-motion rule above (animation/transition: none !important)
    already nukes all of this for reduced-motion users.
-   ═══════════════════════════════════════════════════════════════════════════ */
+   â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 
-/* ── forge-in turn entrance — metal set from the fire: a white-hot flash that
+/* â”€â”€ forge-in turn entrance â€” metal set from the fire: a white-hot flash that
    cools to the resting tone while the item rises with a springy overshoot.
    Replaces transcriptIn under the new skin. Staggered on load via nth-child
-   (streamed items mount one at a time — natural stagger). */
+   (streamed items mount one at a time â€” natural stagger). */
 .ares[data-style="new"] .chat > * {
   animation: forgeTurnIn 560ms cubic-bezier(0.22, 1.16, 0.32, 1) both;
 }
@@ -4022,7 +4022,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .ares[data-style="new"] .working { margin-left: 17px; }
 .voiceBar { transform-origin: center; }
 
-/* ── the working glow + rage veil ride --heat smoothly instead of snapping
+/* â”€â”€ the working glow + rage veil ride --heat smoothly instead of snapping
    between two fixed opacities. --heat is written by React on busy/daemon
    flips; the opacity transition turns those discrete writes into a smooth
    swell/cool. */
@@ -4032,7 +4032,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .ares[data-style="new"][data-working="1"]::after { opacity: calc(0.45 + var(--heat, 0.3) * 0.55); }
 .ares[data-style="new"] .embers { transition: opacity 900ms ease; }
 
-/* ── compact ✓ line — what a finished tool card collapses to (SpringHeight
+/* â”€â”€ compact âœ“ line â€” what a finished tool card collapses to (SpringHeight
    animates the box between the full head and this slim row). */
 .ares[data-style="new"] .toolDoneLine {
   display: flex; align-items: center; gap: 8px;
@@ -4055,7 +4055,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .ares[data-style="new"] .toolDoneLine .doneTime { flex: none; margin-left: auto; padding-left: 10px; font-style: normal; color: var(--faint); }
 .ares[data-style="new"] .toolCard[data-compact="1"] { border-color: rgba(255, 255, 255, 0.04); }
 
-/* ── token-flow strip — the slim canvas pulse line under the composer while
+/* â”€â”€ token-flow strip â€” the slim canvas pulse line under the composer while
    streaming (one rAF loop owned by TokenFlowStrip; unmounted when idle). */
 .ares[data-style="new"] .tokenFlow {
   display: block;
@@ -4065,10 +4065,10 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
   pointer-events: none;
 }
 
-/* ── glass + depth — layered translucency over the living backdrop, sharper
+/* â”€â”€ glass + depth â€” layered translucency over the living backdrop, sharper
    depth shadows, and the ember accent. Palette flows from the existing theme
    tokens (color-mix over --panel/--bg keeps every war-band re-tint working).
-   Text colors are untouched — contrast stays AA. */
+   Text colors are untouched â€” contrast stays AA. */
 .ares[data-style="new"] .rail {
   background: color-mix(in srgb, var(--bg-raised) 64%, transparent);
   backdrop-filter: blur(16px) saturate(1.12);
@@ -4132,7 +4132,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
     inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
-/* ── specificity repairs — the forge-in rule above (.ares[data-style="new"]
+/* â”€â”€ specificity repairs â€” the forge-in rule above (.ares[data-style="new"]
    .chat > *) outweighs per-item animation rules that must keep their loops or
    their own entrances. Re-state them at higher specificity for the new skin. */
 .ares[data-style="new"] .chat > .toolCard[data-state="running"] {
@@ -4171,7 +4171,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .gwHouse { font-style: normal; font-size: 10px; font-weight: 800; letter-spacing: .12em; color: var(--ember, #e08b2e); border: 1px solid var(--ember, #e08b2e); border-radius: 4px; padding: 1px 5px; margin-right: 6px; }
 .gwFree { font-style: normal; font-size: 10px; font-weight: 700; color: var(--steel, #7fa6a3); }
 
-/* ARES brand dropdown — the account lives one click from the wordmark */
+/* ARES brand dropdown â€” the account lives one click from the wordmark */
 .brandBtn { cursor: pointer; background: none; border: none; padding: 0 8px 0 0; border-radius: 8px; transition: background 160ms; position: relative; }
 .brandBtn:hover, .brandBtn[data-open="1"] { background: color-mix(in srgb, var(--ember, #e08b2e) 10%, transparent); }
 .brandCredits { font-style: normal; font-weight: 800; font-size: 12px; color: var(--ember, #e08b2e); margin-left: 8px; padding: 2px 8px; border: 1px solid color-mix(in srgb, var(--ember, #e08b2e) 55%, transparent); border-radius: 999px; }
@@ -4181,7 +4181,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .amHead { display: flex; align-items: center; gap: 10px; padding: 12px 12px 8px; }
 .amWho { display: flex; flex-direction: column; line-height: 1.25; }
 .amWho strong { font-size: 14px; }
-/* wallet — the hero number */
+/* wallet â€” the hero number */
 .amWallet { margin: 2px 8px 8px; padding: 12px 14px; border-radius: 11px; background: linear-gradient(135deg, color-mix(in srgb, var(--ember, #e08b2e) 16%, transparent), color-mix(in srgb, var(--blood, #7a1f12) 14%, transparent)); border: 1px solid color-mix(in srgb, var(--ember, #e08b2e) 30%, var(--line)); }
 .amWalletBig { font-size: 30px; font-weight: 800; letter-spacing: -0.02em; color: var(--ember-hi, #ffd27a); line-height: 1; }
 .amWalletSub { font-size: 11px; color: var(--faint); margin-top: 4px; }
@@ -4202,7 +4202,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .amAction { margin: 4px 10px 12px; background: color-mix(in srgb, var(--ember, #e08b2e) 18%, transparent); border: 1px solid var(--ember, #e08b2e); color: var(--text); border-radius: 9px; padding: 9px 12px; font-size: 12.5px; font-weight: 700; cursor: pointer; transition: background 160ms; }
 .amAction:hover { background: color-mix(in srgb, var(--ember, #e08b2e) 32%, transparent); }
 
-/* gateway account — clickable model rows */
+/* gateway account â€” clickable model rows */
 .gwModelBtn { cursor: pointer; background: color-mix(in srgb, var(--panel) 60%, transparent); color: var(--text); text-align: left; width: 100%; transition: all 140ms; }
 .gwModelBtn:hover { border-color: color-mix(in srgb, var(--ember, #e08b2e) 45%, var(--line)); background: color-mix(in srgb, var(--ember, #e08b2e) 10%, transparent); }
 .gwModelBtn[data-active="1"] { border-color: var(--ember, #e08b2e); background: color-mix(in srgb, var(--ember, #e08b2e) 16%, transparent); }
@@ -4237,7 +4237,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .presetHint a:hover { text-decoration: underline; }
 
 /* connector directory (/mcp) */
-/* the whole panel scrolls as one — the gallery-only scroll clipped the
+/* the whole panel scrolls as one â€” the gallery-only scroll clipped the
    registry + custom-URL rows once there was more than a screenful of content */
 .directory { max-width: 720px; width: 92vw; max-height: 82vh; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; overflow-x: hidden; padding: 18px; }
 .dirHead { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; position: sticky; top: -18px; margin: -18px -18px 0; padding: 18px 18px 10px; background: var(--bg-raised); z-index: 2; }
@@ -4315,7 +4315,7 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .dirCustom .primary:disabled { opacity: 0.55; cursor: default; }
 .dirFootnote { margin: 0; font-size: 11px; color: var(--dim, #8a8f98); }
 
-/* ── linux perf-lite ─────────────────────────────────────────────────────────
+/* â”€â”€ linux perf-lite â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
    Set at boot (<html data-perf="lite">) on Linux, where WebKitGTK composites
    backdrop-filter and the animated edge-flame on the CPU and the app crawls.
    Strip the expensive layers, keep the look: panels go near-opaque so text
@@ -4333,7 +4333,7 @@ html[data-perf="lite"] .bugReport {
    WebKitGTK; halve their cadence rather than freezing feedback spinners. */
 html[data-perf="lite"] .brandBtn, html[data-perf="lite"] .hudVersion { animation: none; }
 
-/* ── daylight — the one LIGHT war-band. The forge at high noon: warm parchment
+/* â”€â”€ daylight â€” the one LIGHT war-band. The forge at high noon: warm parchment
    and iron ink instead of obsidian. Sets color-scheme:light so native controls,
    the caret, and scrollbars flip. Overrides --line to a readable strength (the
    accent-derived hairline is too faint on a light field) and softens the heavy
@@ -4347,7 +4347,7 @@ html[data-perf="lite"] .brandBtn, html[data-perf="lite"] .hudVersion { animation
   --line: rgba(70, 48, 40, 0.16);
   --line-strong: rgba(70, 48, 40, 0.30);
 }
-/* Light-mode surface fixes — dial back effects tuned for a black room. */
+/* Light-mode surface fixes â€” dial back effects tuned for a black room. */
 .ares[data-theme="daylight"] .screenFlame { opacity: 0.32; mix-blend-mode: multiply; }
 .ares[data-theme="daylight"] ::-webkit-scrollbar-thumb { background: rgba(70, 48, 40, 0.22); }
 .ares[data-theme="daylight"] ::-webkit-scrollbar-thumb:hover { background: rgba(70, 48, 40, 0.36); }
@@ -4363,19 +4363,19 @@ html[data-perf="lite"] .brandBtn, html[data-perf="lite"] .hudVersion { animation
   box-shadow: 0 18px 50px -20px rgba(40, 25, 20, 0.35);
 }
 
-/* model picker — brand glyph makes the list read like a gallery */
+/* model picker â€” brand glyph makes the list read like a gallery */
 .modelRow { display: flex; align-items: center; gap: 10px; }
 .modelGlyph { font-size: 16px; width: 22px; text-align: center; flex-shrink: 0;
   opacity: 0; animation: modelGlyphIn 220ms ease forwards; animation-delay: calc(var(--i, 0) * 18ms); }
 @keyframes modelGlyphIn { from { opacity: 0; transform: translateX(-4px); } to { opacity: 1; transform: none; } }
 
-/* daylight: the stage texture is a dark photo — drop it and keep only the faint
+/* daylight: the stage texture is a dark photo â€” drop it and keep only the faint
    astrolabe line-art so the main area is actually light. */
 .ares[data-theme="daylight"] .backdrop::before { display: none !important; }
 .ares[data-theme="daylight"] .backdrop { opacity: 0.35; }
 .ares[data-theme="daylight"] .astrolabe { opacity: 0.5; }
 
-/* ── micro-interaction layer (v0.25) — press feedback + staged entrances ────
+/* â”€â”€ micro-interaction layer (v0.25) â€” press feedback + staged entrances â”€â”€â”€â”€
    Small physical touches everywhere: pills compress under the pointer, the
    send button lifts, empty-stage starters cascade in. All guarded for
    reduced-motion; transforms only (no layout thrash). */
@@ -4396,326 +4396,4 @@ html[data-perf="lite"] .brandBtn, html[data-perf="lite"] .hudVersion { animation
 @media (prefers-reduced-motion: reduce) {
   .starters .starter { animation: none; }
   .send, .send:hover:not(:disabled), .send:active:not(:disabled) { transform: none; }
-}
-
-/* == Vanguard drive mode ====================================================
-   The engine-switch button and the one-shot shield/shockwave burst. Vanguard
-   signal orange rides on top of the normal Ares theme. */
-.vgDrive {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  margin-left: auto;
-  background: transparent;
-  color: #7d8893;
-  border: 1px solid rgba(255, 122, 26, 0.25);
-  border-radius: 999px;
-  font: inherit;
-  font-size: 10.5px;
-  letter-spacing: 0.18em;
-  padding: 5px 13px;
-  cursor: pointer;
-  transition: color 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
-}
-.vgDrive svg { width: 12px; height: 14px; }
-.vgDrive:hover { color: #ffa04d; border-color: rgba(255, 122, 26, 0.55); }
-.vgDrive[data-on="1"] {
-  color: #ffa04d;
-  border-color: rgba(255, 122, 26, 0.75);
-  box-shadow: 0 0 12px rgba(255, 122, 26, 0.25), inset 0 0 10px rgba(255, 122, 26, 0.08);
-}
-.vgDrive[data-on="1"] svg { filter: drop-shadow(0 0 5px rgba(255, 122, 26, 0.6)); }
-
-.vgBurst {
-  position: fixed;
-  inset: 0;
-  z-index: 90;
-  display: grid;
-  place-items: center;
-  pointer-events: none;
-  overflow: hidden;
-  animation: vgBurstFade 2.2s ease forwards;
-}
-@keyframes vgBurstFade {
-  0% { opacity: 0; }
-  8% { opacity: 1; }
-  78% { opacity: 1; }
-  100% { opacity: 0; }
-}
-.vgBurstWave {
-  position: absolute;
-  width: 30px;
-  height: 30px;
-  border-radius: 50%;
-  border: 2px solid rgba(255, 122, 26, 0.65);
-  box-shadow: 0 0 40px rgba(255, 122, 26, 0.35), inset 0 0 30px rgba(255, 122, 26, 0.2);
-  animation: vgShockwave 1.4s cubic-bezier(0.16, 0.8, 0.3, 1) forwards;
-}
-.vgBurstWave.two { animation-delay: 0.18s; border-width: 1px; }
-@keyframes vgShockwave {
-  from { transform: scale(1); opacity: 1; }
-  to { transform: scale(80); opacity: 0; }
-}
-.vgBurstCore {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 14px;
-  animation: vgCoreIn 650ms cubic-bezier(0.2, 1.4, 0.4, 1) both;
-}
-@keyframes vgCoreIn {
-  from { transform: scale(0.6); opacity: 0; }
-  to { transform: scale(1); opacity: 1; }
-}
-.vgBurstShield {
-  width: 84px;
-  height: 96px;
-  color: #ff7a1a;
-  filter: drop-shadow(0 0 26px rgba(255, 122, 26, 0.55));
-  animation: vgShieldPulse 1.1s ease-in-out infinite alternate;
-}
-@keyframes vgShieldPulse {
-  from { filter: drop-shadow(0 0 16px rgba(255, 122, 26, 0.4)); }
-  to { filter: drop-shadow(0 0 34px rgba(255, 122, 26, 0.75)); }
-}
-.vgBurstText {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  font-family: var(--mono);
-  text-shadow: 0 2px 18px rgba(0, 0, 0, 0.8);
-}
-.vgBurstText .a { font-size: 26px; font-weight: 700; letter-spacing: 0.3em; color: #ff6a44; }
-.vgBurstText .sep { font-size: 22px; color: #7d8893; }
-.vgBurstText .p { font-size: 12px; letter-spacing: 0.2em; color: #b9c2cb; text-transform: uppercase; }
-.vgBurstText .v { font-size: 26px; font-weight: 700; letter-spacing: 0.3em; color: #ffa04d; }
-@media (prefers-reduced-motion: reduce) {
-  .vgBurstWave, .vgBurstWave.two { animation-duration: 0.01s; }
-  .vgBurstShield { animation: none; }
-}
-
-/* == Vanguard boot intro ====================================================
-   Second beat of the launch sequence: plays after the Ares forge splash.
-   Shield draws in, wordmark reveals, quick clean fade. Click skips. */
-.vgIntro {
-  position: fixed;
-  inset: 0;
-  z-index: 80;
-  display: grid;
-  place-items: center;
-  background: #07090b;
-  color: #d7dde3;
-  font-family: var(--mono);
-  cursor: pointer;
-  overflow: hidden;
-  opacity: 0;
-  transition: opacity 320ms ease;
-}
-.vgIntro[data-stage="1"], .vgIntro[data-stage="2"] { opacity: 1; }
-.vgIntro[data-stage="3"] { opacity: 0; }
-.vgIntroGrid {
-  position: absolute;
-  inset: -1px;
-  background-image:
-    linear-gradient(rgba(255, 122, 26, 0.045) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 122, 26, 0.045) 1px, transparent 1px);
-  background-size: 44px 44px;
-  mask-image: radial-gradient(640px 420px at 50% 46%, #000 25%, transparent 72%);
-}
-.vgIntroStage { position: relative; display: flex; flex-direction: column; align-items: center; gap: 18px; }
-.vgIntroShield {
-  width: 96px;
-  height: 108px;
-  color: #ff7a1a;
-  filter: drop-shadow(0 0 22px rgba(255, 122, 26, 0.4));
-}
-.vgIntroShield .hull {
-  stroke-dasharray: 210;
-  stroke-dashoffset: 210;
-}
-.vgIntro[data-stage="1"] .vgIntroShield .hull,
-.vgIntro[data-stage="2"] .vgIntroShield .hull,
-.vgIntro[data-stage="3"] .vgIntroShield .hull {
-  animation: vgDraw 750ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
-}
-.vgIntroShield .mark {
-  stroke-dasharray: 70;
-  stroke-dashoffset: 70;
-}
-.vgIntro[data-stage="1"] .vgIntroShield .mark,
-.vgIntro[data-stage="2"] .vgIntroShield .mark,
-.vgIntro[data-stage="3"] .vgIntroShield .mark {
-  animation: vgDraw 480ms cubic-bezier(0.4, 0, 0.2, 1) 480ms forwards;
-}
-@keyframes vgDraw { to { stroke-dashoffset: 0; } }
-.vgIntroText { display: flex; flex-direction: column; align-items: center; gap: 6px; }
-.vgIntroText .pow {
-  font-size: 10px;
-  letter-spacing: 0.34em;
-  text-transform: uppercase;
-  color: #7d8893;
-  opacity: 0;
-  transform: translateY(6px);
-  transition: opacity 380ms ease, transform 380ms ease;
-}
-.vgIntroText .word {
-  font-size: clamp(26px, 4.4vw, 38px);
-  font-weight: 700;
-  letter-spacing: 0.3em;
-  margin-right: -0.3em;
-  color: #f3f6f8;
-  text-shadow: 0 0 26px rgba(255, 122, 26, 0.35);
-  opacity: 0;
-  transform: scale(0.96);
-  transition: opacity 420ms ease 60ms, transform 420ms cubic-bezier(0.2, 1.2, 0.4, 1) 60ms;
-}
-.vgIntroText .tag {
-  font-size: 9.5px;
-  letter-spacing: 0.22em;
-  text-transform: uppercase;
-  color: #55606b;
-  opacity: 0;
-  transition: opacity 360ms ease 180ms;
-}
-.vgIntro[data-stage="2"] .vgIntroText .pow,
-.vgIntro[data-stage="3"] .vgIntroText .pow { opacity: 1; transform: none; }
-.vgIntro[data-stage="2"] .vgIntroText .word,
-.vgIntro[data-stage="3"] .vgIntroText .word { opacity: 1; transform: none; }
-.vgIntro[data-stage="2"] .vgIntroText .tag,
-.vgIntro[data-stage="3"] .vgIntroText .tag { opacity: 1; }
-@media (prefers-reduced-motion: reduce) {
-  .vgIntroShield .hull, .vgIntroShield .mark { animation-duration: 0.01s !important; }
-}
-
-/* Vanguard engage popover — pick the build folder before switching engines */
-.vgDriveWrap { position: relative; margin-left: auto; display: flex; }
-.vgDriveWrap .vgDrive { margin-left: 0; }
-.vgEngage {
-  position: absolute;
-  top: calc(100% + 8px);
-  right: 0;
-  z-index: 30;
-  width: 340px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  background: #11151a;
-  border: 1px solid rgba(255, 122, 26, 0.4);
-  border-radius: 9px;
-  padding: 12px;
-  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 122, 26, 0.08);
-}
-.vgEngage label {
-  font-family: var(--mono);
-  font-size: 9.5px;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  color: #7d8893;
-}
-.vgEngage input {
-  background: #0b0d10;
-  color: #d7dde3;
-  border: 1px solid #1e242c;
-  border-radius: 7px;
-  font-family: var(--mono);
-  font-size: 12px;
-  padding: 8px 10px;
-}
-.vgEngage input:focus { outline: none; border-color: rgba(255, 122, 26, 0.55); }
-.vgEngage button {
-  align-self: flex-end;
-  background: rgba(255, 122, 26, 0.14);
-  color: #ffa04d;
-  border: 1px solid rgba(255, 122, 26, 0.5);
-  border-radius: 7px;
-  font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: 0.1em;
-  padding: 6px 14px;
-  cursor: pointer;
-}
-.vgEngage button:hover { filter: brightness(1.25); }
-
-/* == Vanguard active identity ================================================
-   When Vanguard drives the active session the UI shifts to signal orange:
-   chat text tints, the burst gains wireframe squares, and during work the
-   flame border gives way to a radiating square wireframe. */
-.ares[data-vanguard="1"] .turn.user .bubble {
-  border-color: rgba(255, 122, 26, 0.45);
-  background: rgba(255, 122, 26, 0.08);
-  color: #ffd9b8;
-}
-.ares[data-vanguard="1"] .turn.assistant .prose {
-  color: #f4e3d3;
-}
-.ares[data-vanguard="1"] .turn.assistant .prose strong,
-.ares[data-vanguard="1"] .turn.assistant .prose b { color: #ffa04d; }
-.ares[data-vanguard="1"] .turn.assistant .prose a { color: #ff7a1a; }
-.ares[data-vanguard="1"] .turn.assistant[data-streaming="1"] .prose::after { color: #ff7a1a; }
-.ares[data-vanguard="1"] .composer textarea,
-.ares[data-vanguard="1"] .composer input { caret-color: #ff7a1a; }
-
-/* burst: wireframe squares shooting outward with the shockwave rings */
-.vgBurstWire {
-  position: absolute;
-  width: 64px;
-  height: 64px;
-  border: 1px solid rgba(255, 122, 26, 0.75);
-  box-shadow: 0 0 24px rgba(255, 122, 26, 0.3), inset 0 0 18px rgba(255, 122, 26, 0.14);
-  animation: vgWireOut 1.5s cubic-bezier(0.16, 0.8, 0.3, 1) forwards;
-}
-.vgBurstWire.two { animation-delay: 0.22s; transform: rotate(45deg); border-width: 1px; opacity: 0.8; }
-@keyframes vgWireOut {
-  from { transform: scale(0.4) rotate(0deg); opacity: 1; }
-  to { transform: scale(30) rotate(18deg); opacity: 0; }
-}
-.vgBurstWire.two { animation-name: vgWireOutTwo; }
-@keyframes vgWireOutTwo {
-  from { transform: scale(0.4) rotate(45deg); opacity: 0.9; }
-  to { transform: scale(26) rotate(75deg); opacity: 0; }
-}
-
-/* working border: flames stand down, the wireframe stands up */
-.ares[data-vanguard="1"][data-working="1"] .screenFlame { display: none; }
-.vgWorkFrame { display: none; }
-.ares[data-vanguard="1"][data-working="1"] .vgWorkFrame {
-  display: block;
-  position: fixed;
-  inset: 0;
-  z-index: 60;
-  pointer-events: none;
-}
-.vgWorkFrame i {
-  position: absolute;
-  inset: 6px;
-  border: 1px solid rgba(255, 122, 26, 0.55);
-  animation: vgFrameRadiate 2.2s ease-out infinite;
-}
-.vgWorkFrame i:nth-child(2) { animation-delay: 0.73s; }
-.vgWorkFrame i:nth-child(3) { animation-delay: 1.46s; }
-@keyframes vgFrameRadiate {
-  0% { inset: 10px; opacity: 0.9; border-color: rgba(255, 122, 26, 0.75); }
-  100% { inset: 0px; opacity: 0; border-color: rgba(255, 160, 77, 0.2); }
-}
-.vgWorkFrame .c {
-  position: absolute;
-  width: 26px;
-  height: 26px;
-  border: 2px solid rgba(255, 122, 26, 0.85);
-  filter: drop-shadow(0 0 8px rgba(255, 122, 26, 0.5));
-  animation: vgCornerPulse 1.1s ease-in-out infinite alternate;
-}
-.vgWorkFrame .c.tl { top: 8px; left: 8px; border-right: none; border-bottom: none; }
-.vgWorkFrame .c.tr { top: 8px; right: 8px; border-left: none; border-bottom: none; }
-.vgWorkFrame .c.bl { bottom: 8px; left: 8px; border-right: none; border-top: none; }
-.vgWorkFrame .c.br { bottom: 8px; right: 8px; border-left: none; border-top: none; }
-@keyframes vgCornerPulse {
-  from { opacity: 0.55; }
-  to { opacity: 1; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .vgWorkFrame i { animation: none; opacity: 0.4; }
-  .vgWorkFrame .c { animation: none; }
-  .vgBurstWire, .vgBurstWire.two { animation-duration: 0.01s; }
 }

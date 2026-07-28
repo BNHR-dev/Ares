@@ -614,7 +614,7 @@ const ALLOWED_DAEMON_COMMANDS: &[&str] = &[
     "routing_mode", "session_delete", "session_history", "session_rename",
     "sessions_list", "set_permissions", "skill_invoke", "skill_toggle",
     "skillhub_install", "skillhub_list", "skillhub_publish", "skills_list",
-    "steer", "undo", "usage_stats", "vanguard_mode", "webview_result",
+    "steer", "undo", "usage_stats", "webview_result",
 ];
 
 #[tauri::command]

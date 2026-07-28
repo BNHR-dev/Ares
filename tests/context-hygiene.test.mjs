@@ -21,9 +21,19 @@ test("dynamic tool working set keeps browser turns lean", () => {
   assert.ok(selected.includes("Browser"));
   assert.ok(selected.includes("WebSearch"));
   assert.ok(selected.includes("ComputerUse"));
-  assert.ok(!selected.includes("Stripe"));
-  assert.ok(!selected.includes("Write"));
-  assert.ok(selected.length < tools.length / 2);
+  // "Lean" means the unrelated product integrations are gone — that is where the
+  // schema budget actually goes.
+  for (const unrelated of ["Stripe", "Gmail", "GoogleCalendar", "Spotify", "Weather", "Remind", "Deploy"]) {
+    assert.ok(!selected.includes(unrelated), `${unrelated} should stay pruned on a browser turn`);
+  }
+  // The coding core is deliberately NOT pruned any more — see the floor in
+  // selectToolsForTurn(). This assertion used to be `!includes("Write")`, but
+  // intent detection is keyword-based and a browser turn routinely becomes
+  // "…now save that to a file". Stranding the turn without Write surfaced as
+  // failed tool calls, not as a clean refusal. Leanness is measured against the
+  // integrations, never against core capability.
+  assert.ok(selected.includes("Write"));
+  assert.ok(selected.length < tools.length);
 });
 
 test("dynamic tool working set gives coding turns code tools without unrelated integrations", () => {

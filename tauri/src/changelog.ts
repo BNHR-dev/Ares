@@ -38,6 +38,38 @@ export interface ChangelogEntry {
 // from the "earlier updates" strip.
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.29.0",
+    date: "July 2026",
+    title: "One engine, and it can reach its tools",
+    tagline: "The second engine and its toggle are gone — and the core stopped silently hiding Read, Write and Edit on the work you actually asked for.",
+    highlights: [
+      {
+        icon: "🔧",
+        title: "It can always edit your files",
+        tag: "Safer",
+        blurb: "Asking to \"add a feature\", \"upgrade the deps\" or \"rename this everywhere\" used to hand the model a toolset with no file editing in it at all, so it guessed or failed the call. The coding tools are now always available, whatever you type.",
+      },
+      {
+        icon: "⚙️",
+        title: "One engine, not two",
+        tag: "Polished",
+        blurb: "The engine toggle is gone. Every session runs the Ares core — one conversation, one transcript, real token counts, and none of the hangs that came from bridging a second engine.",
+      },
+      {
+        icon: "🧭",
+        title: "The prompt leads with the work",
+        tag: "Polished",
+        blurb: "Coding turns now open with how to act, verify and report honestly instead of personality, and there is explicit guidance on getting tool calls right the first time.",
+      },
+      {
+        icon: "🔑",
+        title: "Kimi sign-in is built in",
+        tag: "New",
+        blurb: "Signing into a Kimi subscription is now handled by Ares itself, with tokens that refresh before they expire instead of failing partway through a task.",
+      },
+    ],
+  },
+  {
     version: "0.28.35",
     date: "July 2026",
     title: "It can run your app now",
@@ -102,67 +134,11 @@ export const CHANGELOG: ChangelogEntry[] = [
     ],
   },
   {
-    version: "0.28.33",
-    date: "July 2026",
-    title: "It can look things up now",
-    tagline: "Vanguard reads the web, runs your own slash commands, and lets your hooks see what a tool is actually about to do.",
-    highlights: [
-      {
-        icon: "🌐",
-        title: "Search and read the web",
-        tag: "New",
-        blurb: "Vanguard can look up documentation, errors, and package details itself instead of guessing from memory — public pages only, no cookies or logins.",
-      },
-      {
-        icon: "🔒",
-        title: "Locked down by default",
-        tag: "Safer",
-        blurb: "Web lookups refuse anything on your local network or private addresses, re-check every redirect, and cap how much they read — and a page is never treated as proof that work succeeded.",
-      },
-      {
-        icon: "⌨️",
-        title: "Your own slash commands",
-        tag: "New",
-        blurb: "Drop a markdown file in .vanguard/commands and it becomes a command with your own arguments — per project or everywhere you work.",
-      },
-      {
-        icon: "🪝",
-        title: "Hooks that can say no",
-        tag: "Safer",
-        blurb: "Automation hooks now see exactly which tool is running and with what, and can block a single risky call instead of killing the whole run.",
-      },
-    ],
-  },
-  {
     version: "0.28.32",
     date: "July 2026",
-    title: "One conversation, both engines",
-    tagline: "Vanguard finally remembers your session — same thread every toggle, context handed over, and no engine swaps mid-task.",
+    title: "A calmer chat surface",
+    tagline: "The voice orb stops covering the version, and live thinking reads as clean prose instead of stream fragments.",
     highlights: [
-      {
-        icon: "🧠",
-        title: "Vanguard keeps the thread",
-        tag: "New",
-        blurb: "Toggling Vanguard onto a conversation resumes the same engine session every time, and a brand-new one starts with a handoff of what you were already discussing.",
-      },
-      {
-        icon: "🔀",
-        title: "Model changes keep memory",
-        tag: "Safer",
-        blurb: "Switching models or lanes no longer silently restarts Vanguard's session — the conversation owns its history until you actually start fresh work.",
-      },
-      {
-        icon: "🛑",
-        title: "No engine swaps mid-task",
-        tag: "Safer",
-        blurb: "The Vanguard toggle politely refuses while a turn is running instead of stranding the work and answering your next message from an empty memory.",
-      },
-      {
-        icon: "🔁",
-        title: "The toggle survives restarts",
-        tag: "Polished",
-        blurb: "A session driven by Vanguard stays driven by Vanguard after you close the app — no more silent fallback to the classic engine.",
-      },
       {
         icon: "🫧",
         title: "The orb backs off",
@@ -181,7 +157,7 @@ export const CHANGELOG: ChangelogEntry[] = [
     version: "0.28.31",
     date: "July 2026",
     title: "Sessions that never go dark",
-    tagline: "A failed run is a conversation now, not a dead end — plus a calmer screen, a saner welcome, and Vanguard anywhere you have a terminal.",
+    tagline: "A failed run is a conversation now, not a dead end — plus a calmer screen and a saner welcome.",
     highlights: [
       {
         icon: "💬",
@@ -212,12 +188,6 @@ export const CHANGELOG: ChangelogEntry[] = [
         title: "Thinking reads top to bottom",
         tag: "Polished",
         blurb: "Long thinking traces wrap downward inside their block instead of shearing the layout sideways, and still expand or collapse with one click.",
-      },
-      {
-        icon: "⚔️",
-        title: "Vanguard in any terminal",
-        tag: "New",
-        blurb: "A new `vanguard` command opens the coding agent's own terminal UI in any project — PowerShell or Linux — no desktop shell needed.",
       },
     ],
   },

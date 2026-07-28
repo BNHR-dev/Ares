@@ -1,6 +1,6 @@
 // Extracted from entry.ts — daemon.
 
-import { authStatus, listSessions, loadSessionSnapshot, loadSessionRollout, deleteSession, renameSession, type Provider, classifyLane, runAnthropicLoginFlow, loadAnthropicTokens, sideQuery, sideQueryJson, QueryEngine, installGlobalCrashHandlers, EventRing, probeCredentialEncryption, connectMcpServer, disconnectMcpServer, setMcpServerEnabled, connectorNameFromUrl, runOpenAILoginFlow } from "@ares/core";
+import { authStatus, listSessions, loadSessionSnapshot, loadSessionRollout, deleteSession, renameSession, type Provider, classifyLane, runAnthropicLoginFlow, loadAnthropicTokens, sideQuery, sideQueryJson, QueryEngine, installGlobalCrashHandlers, EventRing, probeCredentialEncryption, connectMcpServer, disconnectMcpServer, setMcpServerEnabled, connectorNameFromUrl, runOpenAILoginFlow, runKimiLoginFlow, kimiAuthStatus } from "@ares/core";
 import { appendFile, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import path from "node:path";
@@ -27,8 +27,6 @@ import { gateToolPermission } from "../policyGate.js";
 import { embeddedBridge, setExtensionBrowserBridge } from "./browserBridge.js";
 import { BrowserBridgeServer } from "@ares/browser-extension-connector";
 import { garrisonCommand } from "./garrisonCmd.js";
-import { createVanguardDrive } from "./vanguardHost.js";
-import { bundledVanguardEngineVersion, currentVanguardEngine, updateVanguardEngine } from "./vanguardEngineUpdate.js";
 import { fileURLToPath } from "node:url";
 import { cleanCommandId } from "./permissions.js";
 import { aresGatewayBase, daemonModelCatalog, fetchAresGatewayMe, fetchCustomOpenAiModels, postAresGatewayReport, preflightProviderSelection, providerFamilyForSelection, selectProvider, type ProviderSelection } from "./providers.js";
@@ -206,11 +204,6 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
     /** The lane (task domain) this session is currently on, for sticky auto
      *  routing — the model only switches when the lane actually changes. */
     lane?: string;
-    /** Vanguard drive mode: sends route through the embedded Vanguard engine
-     *  while the session keeps its Ares identity, selection, and transcript. */
-    vanguardMode?: boolean;
-    /** Where the drive engine works for this session; defaults to the Ares workspace. */
-    vanguardWorkspace?: string;
   }
   const DEFAULT_SID = "__primary__";
   const sessions = new Map<string, DaemonEntry>();
@@ -295,148 +288,6 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
     if (!candidate) return undefined;
     return await stat(candidate).then((s) => (s.isDirectory() ? candidate : undefined)).catch(() => undefined);
   };
-
-  // Vanguard engine over-the-air updates: engine fixes ship far more often
-  // than app installers. A previously downloaded engine takes effect
-  // immediately; the rolling channel is checked in the background so a fresh
-  // engine is in place before (or at worst after) the first drive use, with
-  // the bundled engine as the permanent fallback.
-  {
-    const engineLog = (line: string): void => { process.stderr.write(`[vanguard-engine] ${line}\n`); };
-    const existingEngine = await currentVanguardEngine(live.context.home).catch(() => undefined);
-    if (existingEngine !== undefined) {
-      process.env.ARES_VANGUARD_ENGINE_DIR = existingEngine.dir;
-      tagEmit(undefined, { type: "vanguard_engine", version: existingEngine.version, updated: false });
-    }
-    void (async () => {
-      const bundledPackageJson = ((): string | undefined => {
-        try { return fileURLToPath(new URL("../vanguard/package.json", import.meta.url)); } catch { return undefined; }
-      })();
-      const bundledVersion = await bundledVanguardEngineVersion(bundledPackageJson);
-      const result = await updateVanguardEngine(live.context.home, bundledVersion, engineLog);
-      if (result !== undefined) {
-        process.env.ARES_VANGUARD_ENGINE_DIR = result.dir;
-        // The UI toasts fresh installs so an engine update is a visible
-        // moment, not a stderr whisper.
-        tagEmit(undefined, { type: "vanguard_engine", version: result.version, updated: result.installed });
-      }
-    })();
-  }
-
-  // Vanguard drive mode: the second engine. Loads nothing until a session
-  // with the mode enabled actually sends. Drive events persist into the same
-  // per-session rollout the native engine uses, so history, restore, and bug
-  // reports treat both engines identically.
-  let vanguardApprovalSequence = 0;
-  const vanguardDrive = createVanguardDrive(
-    tagEmit,
-    (sessionId, event) => {
-      const entry = sessions.get(sessionId ?? DEFAULT_SID) ?? primaryEntry;
-      void entry.live.session.recordExternalEvent(event as unknown as TurnEvent).catch(() => undefined);
-    },
-    async (sessionId, commandLine) => {
-      // Drive command approvals ride the Ares permission system: "free" mode
-      // approves outright; guarded mode renders the ordinary permission card
-      // and the owner's answer steers the parked Vanguard worker.
-      const approvalSettings = { ...DEFAULT_PERMISSIONS, ...((await loadUiSettings()).permissions ?? {}) };
-      if (approvalSettings.mode === "free") return "always";
-      vanguardApprovalSequence += 1;
-      const id = `vanguard-approval-${vanguardApprovalSequence}`;
-      tagEmit(sessionId, {
-        type: "permission_request",
-        id,
-        toolName: "Vanguard run_command",
-        input: { command: commandLine },
-        reason: `Vanguard wants to run: ${commandLine}`,
-      });
-      const decision = await commands.waitForPermission({ id } as ToolPermissionRequest);
-      tagEmit(sessionId, { type: "permission_response", id, decision });
-      return decision === "allow_always" ? "always" : decision === "allow_once" ? "once" : "deny";
-    },
-    {
-      // Vanguard sessions are connected to Ares sessions: the backing Vanguard
-      // session root is recorded beside the session's rollout, so reopening
-      // Ares reattaches the same contract/plan/journal instead of amnesia.
-      async load(sessionId) {
-        const file = driveBindingFile(sessionId);
-        if (file === undefined) return undefined;
-        try {
-          const parsed = JSON.parse(await readFile(file, "utf8")) as Record<string, unknown>;
-          const { sessionRoot, family, model, workspace } = parsed;
-          if (typeof sessionRoot !== "string" || typeof family !== "string"
-            || typeof model !== "string" || typeof workspace !== "string") return undefined;
-          return { sessionRoot, family, model, workspace };
-        } catch {
-          return undefined;
-        }
-      },
-      async save(sessionId, binding) {
-        const file = driveBindingFile(sessionId);
-        if (file === undefined) return;
-        await mkdir(path.dirname(file), { recursive: true });
-        // Merge, don't clobber: the same file carries the session's engine
-        // toggle (`enabled`), written by the vanguard_mode command.
-        let current: Record<string, unknown> = {};
-        try {
-          current = JSON.parse(await readFile(file, "utf8")) as Record<string, unknown>;
-        } catch { /* fresh file */ }
-        await writeFile(file, JSON.stringify({ ...current, ...binding }, null, 2), "utf8");
-      },
-    },
-    async (tag) => {
-      // Context handoff for a NEWLY minted engine session inside an existing
-      // conversation: the prior Ares exchange rides along with the first
-      // message so Vanguard never opens as a stranger.
-      const entry = sessions.get(tag ?? DEFAULT_SID) ?? primaryEntry;
-      const sid = entry.live.session.meta.id;
-      if (typeof sid !== "string" || sid.length === 0) return undefined;
-      const snap = await loadSessionSnapshot(entry.live.context.workspace, sid, { maxMessages: 14 }).catch(() => undefined);
-      if (snap === undefined || !Array.isArray(snap.messages) || snap.messages.length === 0) return undefined;
-      const lines: string[] = [];
-      let total = 0;
-      for (const message of snap.messages) {
-        const m = message as { role?: unknown; content?: unknown };
-        if (m.role !== "user" && m.role !== "assistant") continue;
-        const parts = Array.isArray(m.content) ? m.content : [m.content];
-        const text = parts
-          .map((part) => typeof part === "string"
-            ? part
-            : (part as { type?: unknown })?.type === "text" ? String((part as { text?: unknown }).text ?? "") : "")
-          .join(" ")
-          .replace(/\s+/gu, " ")
-          .trim();
-        if (text.length === 0) continue;
-        const line = `${String(m.role)}: ${text.length > 500 ? `${text.slice(0, 500)}…` : text}`;
-        total += line.length;
-        if (total > 6000) break;
-        lines.push(line);
-      }
-      if (lines.length === 0) return undefined;
-      return "[Context handoff — the conversation this session continues. Background only; the task is the final message below.]\n"
-        + lines.join("\n");
-    },
-  );
-  function driveBindingFile(sessionId: string | undefined): string | undefined {
-    const entry = sessions.get(sessionId ?? DEFAULT_SID) ?? primaryEntry;
-    const sid = entry.live.session.meta.id;
-    if (typeof sid !== "string" || sid.length === 0) return undefined;
-    return path.join(entry.live.context.workspace, ".ares", "sessions", sid, "vanguard.json");
-  }
-  // The engine choice survives daemon restarts: the primary session's toggle
-  // rehydrates from its stored binding file (secondary sessions rehydrate in
-  // resolveEntry when their card first reconnects).
-  void (async () => {
-    try {
-      const file = driveBindingFile(undefined);
-      if (file === undefined) return;
-      const parsed = JSON.parse(await readFile(file, "utf8")) as { enabled?: unknown; workspace?: unknown };
-      if (parsed.enabled === true) {
-        primaryEntry.vanguardMode = true;
-        if (typeof parsed.workspace === "string" && parsed.workspace.length > 0) primaryEntry.vanguardWorkspace = parsed.workspace;
-        tagEmit(undefined, { type: "vanguard_mode", enabled: true, workspace: primaryEntry.vanguardWorkspace ?? primaryEntry.live.context.workspace });
-      }
-    } catch { /* no stored binding — legacy default */ }
-  })();
 
   // Crash safety net. The desktop bridge is a long-lived process on a coworker's
   // machine; until now an uncaught error or stray rejection could kill it with
@@ -635,19 +486,6 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
     );
     const entry: DaemonEntry = { live: fresh, turnActive: false, pendingSteers: [], landingSteers: [] };
     sessions.set(sid, entry);
-    // Rehydrate this session's engine choice — the Vanguard toggle must
-    // survive daemon restarts and app reloads, not silently revert to legacy.
-    try {
-      const file = driveBindingFile(sid);
-      if (file !== undefined) {
-        const parsed = JSON.parse(await readFile(file, "utf8")) as { enabled?: unknown; workspace?: unknown };
-        if (parsed.enabled === true) {
-          entry.vanguardMode = true;
-          if (typeof parsed.workspace === "string" && parsed.workspace.length > 0) entry.vanguardWorkspace = parsed.workspace;
-          tagEmit(sid, { type: "vanguard_mode", enabled: true, workspace: entry.vanguardWorkspace ?? entry.live.context.workspace });
-        }
-      }
-    } catch { /* no stored binding */ }
     tagEmit(sid, { type: "session_opened", model: fresh.selection.model, provider: fresh.selection.provider.name });
     return entry;
   };
@@ -655,11 +493,6 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
   commands.onInterrupt = (command) => {
     const sid = command.sessionId || DEFAULT_SID;
     const entry = sessions.get(sid);
-    if (entry?.vanguardMode && vanguardDrive.isTurnActive(sid)) {
-      vanguardDrive.interrupt(sid);
-      tagEmit(command.sessionId, { type: "interrupted_by_user" });
-      return;
-    }
     if (!entry) {
       // Unknown/not-yet-spawned session id: do NOT silently interrupt the
       // primary (that was hitting the wrong target and leaving the real busy
@@ -830,55 +663,6 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
       const command = await commands.nextCommand();
       if (!command) break;
       if (command.type === "exit") break;
-      if (command.type === "vanguard_mode") {
-        // Flip the drive engine for one session. The ack is what the UI's
-        // shield button and shockwave overlay key off. An optional workspace
-        // pins where the engine works ("build it in THIS folder").
-        const entry = await resolveEntry(command.sessionId);
-        const wanted = (command as { enabled?: unknown }).enabled === true;
-        // Mid-turn engine swaps strand the running work: the old engine keeps
-        // going with nobody routing its steer/stop, and the next send answers
-        // from the other engine's empty memory. Refuse until the turn settles.
-        if (wanted !== (entry.vanguardMode === true)
-          && (entry.turnActive || vanguardDrive.isTurnActive(command.sessionId || DEFAULT_SID))) {
-          tagEmit(command.sessionId, { type: "daemon_error", error: "A turn is still running — stop it or let it finish before switching engines." });
-          tagEmit(command.sessionId, {
-            type: "vanguard_mode",
-            enabled: entry.vanguardMode === true,
-            workspace: entry.vanguardWorkspace ?? entry.live.context.workspace,
-          });
-          continue;
-        }
-        entry.vanguardMode = wanted;
-        const requestedWorkspace = (command as { workspace?: unknown }).workspace;
-        if (typeof requestedWorkspace === "string" && requestedWorkspace.trim() !== "") {
-          entry.vanguardWorkspace = path.resolve(requestedWorkspace.trim());
-        }
-        // The choice is durable: it rides the session's vanguard.json so a
-        // daemon restart or app reload cannot silently revert the engine.
-        void (async () => {
-          try {
-            const file = driveBindingFile(command.sessionId);
-            if (file === undefined) return;
-            await mkdir(path.dirname(file), { recursive: true });
-            let current: Record<string, unknown> = {};
-            try {
-              current = JSON.parse(await readFile(file, "utf8")) as Record<string, unknown>;
-            } catch { /* fresh file */ }
-            await writeFile(file, JSON.stringify({
-              ...current,
-              enabled: entry.vanguardMode === true,
-              ...(entry.vanguardWorkspace === undefined ? {} : { workspace: entry.vanguardWorkspace }),
-            }, null, 2), "utf8");
-          } catch { /* persistence is best-effort */ }
-        })();
-        tagEmit(command.sessionId, {
-          type: "vanguard_mode",
-          enabled: entry.vanguardMode === true,
-          workspace: entry.vanguardWorkspace ?? entry.live.context.workspace,
-        });
-        continue;
-      }
       if (command.type === "reasoning") {
         const level = command.level?.toLowerCase();
         if (!isReasoningLevel(level)) {
@@ -1628,22 +1412,20 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
         continue;
       }
       if (command.type === "kimi_login_start") {
-        // Kimi subscription sign-in (RFC 8628 device flow) through the embedded
-        // Vanguard module, which owns the token store the drive engine and the
-        // legacy kimi provider both read. The browser opens the verification
-        // page with the code pre-filled; we also emit the URL for the UI card.
+        // Kimi subscription sign-in (RFC 8628 device flow) against auth.kimi.com,
+        // owned by Ares itself. The verification URL goes to the UI card so the
+        // owner can approve in a browser; tokens land in ~/.ares/kimi-auth.json.
         const sid = command.sessionId;
-        void (async () => {
-          const vanguard = await import("vanguard") as {
-            oauthLogin: (p: string, o?: { force?: boolean; onAuthorizeUrl?: (url: string) => void }) => Promise<{ connected: boolean; detail?: string }>;
-          };
-          return vanguard.oauthLogin("kimi", {
-            force: true,
-            onAuthorizeUrl: (url) => tagEmit(sid, { type: "kimi_login_url", url }),
-          });
-        })()
-          .then((status) => {
-            tagEmit(sid, { type: "kimi_login_done", ok: status.connected, detail: status.detail ?? null });
+        void runKimiLoginFlow({
+          force: true,
+          onAuthorize: (auth) => tagEmit(sid, {
+            type: "kimi_login_url",
+            url: auth.verificationUriComplete ?? auth.verificationUri,
+            userCode: auth.userCode,
+          }),
+        })
+          .then(() => {
+            tagEmit(sid, { type: "kimi_login_done", ok: true, detail: "subscription" });
           })
           .catch((err: unknown) => {
             const msg = err instanceof Error ? err.message : String(err);
@@ -1652,16 +1434,14 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
         continue;
       }
       if (command.type === "kimi_auth_status") {
-        const status = await (async () => {
-          const vanguard = await import("vanguard") as {
-            oauthStatus: (p: string) => Promise<{ connected: boolean; detail?: string }>;
-          };
-          return vanguard.oauthStatus("kimi");
-        })().catch(() => null);
+        // An API key is a legitimate way to be configured, so the card reports
+        // green on either credential rather than only on the OAuth token.
+        const status = await kimiAuthStatus().catch(() => null);
+        const apiKey = ((await loadUiSettings()).kimiKey ?? "") !== "" || (process.env.KIMI_API_KEY ?? "") !== "";
         process.stdout.write(JSON.stringify({
           type: "kimi_auth_status",
-          configured: !!status?.connected,
-          detail: status?.detail ?? null,
+          configured: status?.connected === true || apiKey,
+          detail: status?.connected === true ? (status.detail ?? "subscription") : apiKey ? "api-key" : null,
         }) + "\n");
         continue;
       }
@@ -1854,13 +1634,6 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
           continue;
         }
         const entry = sessions.get(command.sessionId || DEFAULT_SID);
-        if (entry?.vanguardMode && vanguardDrive.isTurnActive(command.sessionId || DEFAULT_SID)) {
-          // Vanguard steering lands at the engine's next decision boundary and
-          // is journaled — no interrupt needed.
-          vanguardDrive.steerTurn(command.sessionId || DEFAULT_SID, text.trim());
-          tagEmit(command.sessionId, { type: "steer_queued", text: text.trim() });
-          continue;
-        }
         if (!entry?.turnActive) {
           tagEmit(command.sessionId, { type: "daemon_error", error: "there is no active turn to steer" });
           continue;
@@ -1884,79 +1657,6 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
       const goal = command.goal;
       const voiceMode = command.voice === true;
       const entry = await resolveEntry(command.sessionId);
-      if (entry.vanguardMode) {
-        // Vanguard is driving this session. Mid-turn sends steer the live run;
-        // otherwise the goal starts a fresh Vanguard turn in the background,
-        // rendered through the normal transcript via translated events.
-        if (vanguardDrive.isTurnActive(sid)) {
-          vanguardDrive.steerTurn(sid, goal.trim());
-          tagEmit(command.sessionId, { type: "steer_queued", text: goal.trim() });
-          continue;
-        }
-        const settings = await loadUiSettings();
-        // "Work in C:\X" just works: an absolute path in the goal that names a
-        // real directory (or a file inside one) re-pins this session's drive
-        // workspace — no prompt, no toggle dance. The ack refreshes the badge.
-        // Natural-language locations work too: "on my desktop", "in my
-        // documents" resolve through the OS known folders (OneDrive-redirected
-        // desktops included), so "make a folder on my desktop called X" builds
-        // exactly there instead of stating a workspace limitation.
-        let rebindTarget: string | undefined;
-        const mentioned = goal.match(/[A-Za-z]:[\\/][^\s"'`|<>*?]+/u)?.[0]?.replace(/[.,;:!?)\]]+$/u, "");
-        if (mentioned) {
-          const resolved = path.resolve(mentioned);
-          rebindTarget = await stat(resolved).then((s) => (s.isDirectory() ? resolved : path.dirname(resolved))).catch(() => undefined);
-        }
-        if (!rebindTarget) {
-          const known = goal.match(/\b(?:on|onto|in|into|to)\s+(?:my\s+|the\s+)?(desktop|documents|downloads)\b/iu)?.[1]?.toLowerCase();
-          if (known) rebindTarget = await resolveKnownFolder(known);
-        }
-        if (rebindTarget && rebindTarget !== (entry.vanguardWorkspace ?? entry.live.context.workspace)) {
-          entry.vanguardWorkspace = rebindTarget;
-          tagEmit(command.sessionId, { type: "vanguard_mode", enabled: true, workspace: rebindTarget });
-        }
-        // Auto-routing applies to drive turns exactly like native ones: the
-        // current message decides the lane, and a live lane assignment takes
-        // the wheel. The drive rebinds its engine session on model change.
-        let driveFamily = providerFamilyForSelection(entry.live.selection);
-        let rawModel = entry.live.selection.model;
-        let driveProviderName = entry.live.selection.provider.name;
-        let routeSource: "assigned" | "main" = "main";
-        if (settings.routingMode === "auto") {
-          const goalLane = classifyLane(goal);
-          const lane = goalLane !== "chat" ? goalLane
-            : goal.trim().split(/\s+/u).length < 8 ? classifyLane([entry.lane ?? "", goal].join("\n")) : "chat";
-          const assigned = settings.routing?.[lane];
-          if (assigned?.family && assigned.model && !isProviderDead(assigned.family)) {
-            driveFamily = assigned.family;
-            rawModel = assigned.model;
-            driveProviderName = assigned.family === "ollama" ? "ollama-cloud:assigned" : assigned.family;
-            routeSource = "assigned";
-          }
-          entry.lane = lane;
-          tagEmit(command.sessionId, { type: "route_resolved", model: rawModel, provider: driveFamily, lane, source: routeSource });
-        }
-        // Ollama Cloud models are addressed through the local daemon with a
-        // :cloud suffix; the Ares selection stores the bare id. Without the
-        // suffix the local daemon reports an unknown model and the turn dies.
-        const driveModel = driveFamily === "ollama"
-          && driveProviderName.startsWith("ollama-cloud")
-          && !rawModel.includes(":")
-          && !rawModel.endsWith("-cloud")
-          ? `${rawModel}:cloud`
-          : rawModel;
-        // A drive turn is a real turn: busy-state must be visible to the
-        // steer/stop routing, model_switch, and the engine-toggle guard —
-        // exactly like native turns.
-        entry.turnActive = true;
-        void vanguardDrive.runTurn(sid, command.sessionId, goal, {
-          workspace: entry.vanguardWorkspace ?? entry.live.context.workspace,
-          family: driveFamily,
-          model: driveModel,
-          settings,
-        }).finally(() => { entry.turnActive = false; });
-        continue;
-      }
       if (entry.turnActive) {
         // A send mid-turn IS steering — the owner talking over Ares ("hey
         // Ares, no—") must never bounce with an error. Same drain as steer.
@@ -2203,7 +1903,6 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
     }
   } finally {
     setExtensionBrowserBridge(null);
-    await vanguardDrive.shutdown().catch(() => undefined);
     await browserExtensionBridge?.close().catch(() => undefined);
     autotickLoop?.stop();
     uninstallCrashHandlers();

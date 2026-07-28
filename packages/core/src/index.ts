@@ -62,6 +62,27 @@ export {
 } from "./providers/anthropicAuth.js";
 
 export {
+  runKimiLoginFlow,
+  requestKimiDeviceAuthorization,
+  pollKimiDeviceToken,
+  refreshKimiTokens,
+  resolveKimiTokens,
+  resolveKimiAccessToken,
+  loadKimiTokens,
+  saveKimiTokens,
+  kimiAuthStatus,
+  kimiAuthFilePath,
+  kimiLogout,
+  fetchKimiModels,
+  KIMI_CODING_BASE_URL,
+  type KimiModel,
+  type KimiTokens,
+  type KimiAuthStatus,
+  type KimiDeviceAuthorization,
+  type KimiLoginOptions,
+} from "./providers/kimiAuth.js";
+
+export {
   sideQuery,
   sideQueryJson,
   extractFirstJson,
@@ -118,6 +139,10 @@ export {
   telemetryDir,
   type FrictionTurn,
   type FrictionSummary,
+  type FrictionSource,
+  type FrictionDiagnostic,
+  type FrictionSessionLocation,
+  type FrictionRecorderOptions,
 } from "./frictionLog.js";
 
 export {
@@ -147,12 +172,50 @@ export {
 
 export {
   CodingJournal,
+  normalizeFailure,
+  failureDigest,
   type CodingJournalOptions,
   type CodingJournalState,
   type CodingPhase,
   type CodingCheckRecord,
   type CodingFailureRecord,
 } from "./codingJournal.js";
+
+export {
+  registerSessionLocation,
+  listRegisteredSessionLocations,
+  readSessionLocation,
+  writeSessionLocationAtomic,
+  sessionLocationRegistryDir,
+  sessionLocationFile,
+  hashWorkspaceIdentity,
+  type SessionLocation,
+  type SessionLocationRecord,
+  type SessionLocationSource,
+  type SessionRolloutFormat,
+  type RegisterSessionLocationInput,
+  type SessionRegistryOptions,
+} from "./sessionRegistry.js";
+
+export {
+  runReliabilityTriage,
+  listReliabilityFindings,
+  loadReliabilityFinding,
+  resolveReliabilitySource,
+  updateReliabilityFindingStatus,
+  reliabilityTriagePaths,
+  type ReliabilityFindingStatus,
+  type ReliabilitySeverity,
+  type ReliabilityCategory,
+  type ReliabilitySignalKind,
+  type ReliabilityEvidence,
+  type ReliabilityFinding,
+  type ReliabilityTriageHealth,
+  type ReliabilityTriageCoverage,
+  type ReliabilityTriageRun,
+  type ReliabilityTriageOptions,
+  type ReliabilityTriagePaths,
+} from "./reliabilityTriage.js";
 
 export {
   HookManager,

@@ -281,7 +281,15 @@ export function selectToolsForTurn(tools: readonly EngineTool[], messages: reado
     if (userText.trim()) break;
   }
 
+  // The coding core is ALWAYS offered, whatever the turn looks like. Pruning is a
+  // token optimization and must never remove a core capability: intent detection
+  // below is keyword-based, so "add a dark mode toggle", "upgrade the deps" and
+  // "rename the User class" all read as non-coding. A turn that ships without Read
+  // or Edit cannot do the work, and the model surfaces that as a malformed or
+  // unknown tool call rather than a clean failure — which is indistinguishable
+  // from the model being bad at coding. Intent only ever ADDS to this floor.
   const wanted = new Set([
+    "read", "write", "edit", "glob", "grep", "bash", "powershell",
     "todowrite", "requestuseraction", "memory", "browser", "websearch",
     "webfetch", "imagesearch", "skillhub", "skillslist", "skillread",
   ]);
@@ -3006,6 +3014,11 @@ export async function* guardStreamStalls(
       }
       if (winner.done) return;
       const ev = winner.value;
+      // Wire keepalive: the provider proved it's alive (SSE ping mid-prefill,
+      // message_start before first token). Receiving it re-arms the deadline;
+      // it is NOT output — the pre-output window stays in force between pings
+      // — and it never reaches the consumer.
+      if (ev.type === "stream_heartbeat") continue;
       if (isModelOutputEvent(ev)) sawOutput = true;
       if (ev.type === "thinking_delta") {
         if (thinkingStartedAt === 0) thinkingStartedAt = now();

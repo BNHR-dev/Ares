@@ -1,6 +1,6 @@
 // Extracted from entry.ts — providers.
 
-import { MockEchoProvider, OpenAIResponsesProvider, OpenRouterProvider, DeepSeekProvider, AnthropicProvider, DEFAULT_ANTHROPIC_MODEL, OllamaCloudPool, DEFAULT_OLLAMA_SLOTS, OLLAMA_CLOUD_MODELS, fetchOllamaLibraryModels, fetchDeepSeekModels, fetchOpenRouterModels, fetchAnthropicModels, fetchCodexModels, loadAuthToken, MoaProvider, type MoaMember, type Provider } from "@ares/core";
+import { MockEchoProvider, OpenAIResponsesProvider, OpenRouterProvider, DeepSeekProvider, AnthropicProvider, DEFAULT_ANTHROPIC_MODEL, OllamaCloudPool, DEFAULT_OLLAMA_SLOTS, OLLAMA_CLOUD_MODELS, fetchOllamaLibraryModels, fetchDeepSeekModels, fetchOpenRouterModels, fetchAnthropicModels, fetchCodexModels, loadAuthToken, MoaProvider, fetchKimiModels, resolveKimiAccessToken, type MoaMember, type Provider } from "@ares/core";
 import path from "node:path";
 import { gzipSync } from "node:zlib";
 import { type SubModelPool } from "@ares/tools";
@@ -387,10 +387,9 @@ export async function daemonModelCatalog(provider: string): Promise<DaemonModelO
   }
 
   if (provider === "kimi") {
-    // Live discovery from the signed-in Kimi account (via the embedded
-    // Vanguard module, which owns the OAuth store) — surfaces the account's
+    // Live discovery from the signed-in Kimi account — surfaces the account's
     // real roster (kimi-for-coding, k3, ...). Static row otherwise so the
-    // picker is never empty.
+    // picker is never empty when the owner is signed out or offline.
     const KIMI_LABELS: Record<string, string> = {
       "kimi-for-coding": "Kimi for Coding",
       "kimi-for-coding-highspeed": "Kimi for Coding · Highspeed",
@@ -399,12 +398,8 @@ export async function daemonModelCatalog(provider: string): Promise<DaemonModelO
     const kimiLabel = (id: string): string =>
       KIMI_LABELS[id] ?? `Kimi ${id.replace(/^kimi-/u, "").replace(/\bk(\d)/u, "K$1")}`;
     try {
-      const vanguard = await import("vanguard") as {
-        fetchKimiModels: () => Promise<ReadonlyArray<{
-          id: string; contextLength?: number; supportsReasoning?: boolean; thinkingType?: string;
-        }> | null>;
-      };
-      const live = await vanguard.fetchKimiModels().catch(() => null);
+      const settings = await loadUiSettings();
+      const live = await fetchKimiModels(settings.kimiKey || process.env.KIMI_API_KEY || undefined).catch(() => null);
       if (live !== null && live.length > 0) {
         return live.map((model) => ({
           id: model.id,
@@ -419,7 +414,7 @@ export async function daemonModelCatalog(provider: string): Promise<DaemonModelO
         }));
       }
     } catch {
-      // vanguard module unavailable or signed out — fall through to static
+      // signed out or offline — fall through to the static row
     }
     return [{
       id: "kimi-for-coding",
@@ -667,15 +662,10 @@ export async function selectProvider(flags: Map<string, string>): Promise<Provid
     // Kimi's coding endpoint is plain Chat Completions with Bearer auth, so the
     // hardened OpenAI-compat client drives it directly. Credential order: the
     // Ares-stored key, the env key, then the subscription token minted by the
-    // Kimi OAuth sign-in (owned by the embedded Vanguard module's store).
+    // Kimi OAuth device flow (packages/core/src/providers/kimiAuth.ts).
     let kimiCredential = settings.kimiKey || process.env.KIMI_API_KEY || "";
     if (!kimiCredential) {
-      try {
-        const vanguard = await import("vanguard") as { resolveKimiAccessToken: () => Promise<string | null> };
-        kimiCredential = (await vanguard.resolveKimiAccessToken()) ?? "";
-      } catch {
-        // vanguard module unavailable — the empty key surfaces as no_auth
-      }
+      kimiCredential = (await resolveKimiAccessToken().catch(() => null)) ?? "";
     }
     return {
       provider: new OpenRouterProvider({

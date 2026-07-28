@@ -8,6 +8,8 @@
 // Full DAG fork/diff/rollback come in M4; M1 provides linear rollout.
 
 import { mkdir, appendFile, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import {
@@ -94,6 +96,10 @@ export interface SessionOptions {
   summarizeSpan?: (messages: readonly Message[]) => Promise<string>;
   /** See QueryEngineConfig.compactionThresholdTokens. */
   compactionThresholdTokens?: number;
+  /** Explicit friction directory for isolated tests/portable runtimes. */
+  telemetryDir?: string;
+  /** Explicit global home for the session-location registry. */
+  sessionRegistryHome?: string;
 }
 
 export class Session {
@@ -125,7 +131,19 @@ export class Session {
     const sessionDir = path.join(opts.workspace, ".ares", "sessions", sessionId);
     this.eventsPath = path.join(sessionDir, "events.jsonl");
     this.metaPath = path.join(sessionDir, "meta.json");
-    this.friction = new FrictionRecorder(sessionId);
+    this.friction = new FrictionRecorder(sessionId, {
+      dir: opts.telemetryDir,
+      source: "core",
+      workspace: opts.workspace,
+      provider: providerInfo.name,
+      model: providerInfo.model,
+      location: {
+        registryHome: opts.sessionRegistryHome,
+        rolloutPath: this.eventsPath,
+        metaPath: this.metaPath,
+        format: "core-rollout-v1",
+      },
+    });
     this.engine = new QueryEngine(
       {
         provider: opts.provider,
@@ -204,6 +222,7 @@ export class Session {
   ): Promise<void> {
     this.engine.setProvider(provider, model, context);
     this.meta.provider = { name: provider.name, model };
+    this.friction.updateContext({ provider: provider.name, model });
     await this.ensureSessionDir();
     await writeFile(this.metaPath, JSON.stringify(this.meta, null, 2) + "\n", "utf8");
   }
@@ -376,17 +395,6 @@ export class Session {
     return this.engine.history();
   }
 
-  /**
-   * Persist an externally-driven engine event (the Vanguard drive) into this
-   * session's rollout, so session history, restore after restart, and bug
-   * reports include the turn — a drive conversation must be exactly as
-   * durable as a native one.
-   */
-  async recordExternalEvent(event: TurnEvent): Promise<void> {
-    await this.ensureSessionDir();
-    this.persistEvent(event);
-  }
-
   private async ensureSessionDir(): Promise<void> {
     // ALWAYS ensure the directory exists (mkdir recursive is idempotent + cheap).
     // A resumed/opened session is constructed with metaWritten=true on the
@@ -407,6 +415,12 @@ export class Session {
    * ioChain so writes never interleave and the hot path never waits on disk.
    */
   private persistEvent(event: TurnEvent): void {
+    // Live-stream ephemera never lands in the rollout. Replay reconstructs
+    // history from turn_start/message_done/tool_end/tool_error/compaction;
+    // tool_progress exists only to animate the in-flight UI — and the browser
+    // tool's frames are ~85KB of base64 JPEG apiece, which once ballooned a
+    // session log to 355MB and froze every full-file reader in the app.
+    if (event.type === "tool_progress") return;
     const persistedEvent: TurnEvent =
       event.type === "turn_end"
         ? { ...event, provider: this.meta.provider.name, model: this.meta.provider.model }
@@ -437,7 +451,7 @@ export class Session {
 
   /** Await all pending rollout appends. */
   private async flush(): Promise<void> {
-    await this.ioChain;
+    await Promise.all([this.ioChain, this.friction.settle()]);
     if (this.ioError) {
       throw new Error(`session rollout persistence failed: ${this.ioError.message}`, { cause: this.ioError });
     }
@@ -494,18 +508,16 @@ export async function listSessions(workspace: string, limit = 20): Promise<Sessi
         const meta = await readSessionMeta(sessionDir);
         if (!meta) return null;
         const eventsPath = path.join(sessionDir, "events.jsonl");
-        const eventsText = await readFile(eventsPath, "utf8").catch(() => "");
-        const eventCount = eventsText.trim() ? eventsText.trim().split(/\r?\n/).length : 0;
+        const scan = await scanRolloutForListing(eventsPath);
         const updated = await stat(eventsPath).catch(() => null);
-        const preview = previewFromEvents(eventsText);
         return {
           id: meta.id,
           workspace: meta.workspace,
           provider: meta.provider,
           createdAt: meta.createdAt,
           updatedAt: updated?.mtime.toISOString() ?? meta.createdAt,
-          eventCount,
-          preview,
+          eventCount: scan.eventCount,
+          preview: scan.preview,
           label: meta.label,
         };
       }),
@@ -749,8 +761,50 @@ function truncateSummaryText(text: string): string {
   return text.length > 220 ? `${text.slice(0, 217)}...` : text;
 }
 
-function previewFromEvents(text: string): string {
-  return previewFromMessages(messagesFromRollout(parseRolloutEntries(text)));
+/**
+ * One bounded pass over a rollout for the session picker: count events and
+ * find the newest user words WITHOUT loading the file into memory. The picker
+ * lists every session on disk, so it must never pay for a pathological log —
+ * a filmstrip-heavy rollout once reached 355MB and a readFile-per-session
+ * listing froze the whole app. Only the last turn_start (and, if newer, the
+ * last compaction snapshot) is ever parsed.
+ */
+async function scanRolloutForListing(eventsPath: string): Promise<{ eventCount: number; preview: string }> {
+  let eventCount = 0;
+  let lastTurnStart = "";
+  let lastCompaction = "";
+  let compactionIsNewer = false;
+  try {
+    const lines = createInterface({ input: createReadStream(eventsPath, "utf8"), crlfDelay: Infinity });
+    for await (const line of lines) {
+      if (!line.trim()) continue;
+      eventCount += 1;
+      // The entry's own event tag is the only place this substring appears
+      // unescaped — the same text inside message content is quote-escaped.
+      if (line.includes('"event":{"type":"turn_start"')) {
+        lastTurnStart = line;
+        compactionIsNewer = false;
+      } else if (line.includes('"event":{"type":"compaction"')) {
+        lastCompaction = line;
+        compactionIsNewer = true;
+      }
+    }
+  } catch {
+    return { eventCount: 0, preview: "" };
+  }
+  const candidates = compactionIsNewer ? [lastCompaction, lastTurnStart] : [lastTurnStart, lastCompaction];
+  for (const raw of candidates) {
+    if (!raw) continue;
+    const event = parseRolloutEntries(raw)[0]?.event;
+    if (event?.type === "turn_start") {
+      const preview = previewFromMessages([event.userMessage]);
+      if (preview) return { eventCount, preview };
+    } else if (event?.type === "compaction" && Array.isArray(event.messages)) {
+      const preview = previewFromMessages(event.messages);
+      if (preview) return { eventCount, preview };
+    }
+  }
+  return { eventCount, preview: "" };
 }
 
 function previewFromMessages(messages: readonly Message[]): string {

@@ -379,16 +379,6 @@ function App() {
   // the rest batch larger to cut provider round-trips (the delay lever).
   const spokenChunkCount = useRef(0);
   const [view, setView] = useState<"chat" | "artifacts" | "helm">("chat");
-  // Vanguard drive mode per session, confirmed by the daemon's ack — plus the
-  // one-shot shield/shockwave burst played when a session switches engines.
-  const [vgModes, setVgModes] = useState<Record<string, boolean>>({});
-  const [vgBurst, setVgBurst] = useState(false);
-  const vgBurstTimer = useRef<number | null>(null);
-  // The Vanguard beat of the boot sequence — plays once, right after <Boot/>.
-  const [vgIntroDone, setVgIntroDone] = useState(false);
-  // Where each session's drive is working (from vanguard_mode acks) — shown
-  // in the header badge. The workspace follows chat ("work in C:\path").
-  const [vgWorkspaces, setVgWorkspaces] = useState<Record<string, string>>({});
   const [sessionQuery, setSessionQuery] = useState("");
   const [garrisonOpen, setGarrisonOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -1075,16 +1065,6 @@ function App() {
           setKimiAuth({ signingIn: false, connected: ke.configured === true, detail: typeof ke.detail === "string" ? ke.detail : null });
           return true;
         }
-        case "vanguard_engine": {
-          // Over-the-air Vanguard engine activity from the daemon: a fresh
-          // install gets a toast; a previously downloaded engine activating
-          // at boot stays quiet.
-          const ve = e as { version?: unknown; updated?: unknown };
-          if (ve.updated === true && typeof ve.version === "string") {
-            pushGatewayToast(`🛡 Vanguard engine updated to ${ve.version} — active for new drive sessions.`);
-          }
-          return true;
-        }
         case "consciousness_status": {
           const models = Array.isArray(e.models) ? (e.models as ConsciousnessModelVm[]) : [];
           setConsciousness((c) => ({
@@ -1381,20 +1361,6 @@ function App() {
       if (!mounted || buffered.seq <= lastSeq.current) return;
       lastSeq.current = buffered.seq;
       if (handleShellEvent(buffered.event)) return;
-      // Vanguard drive-mode ack: flip the per-session badge, and play the
-      // engine-switch burst when a session powers up.
-      if ((buffered.event as { type?: unknown }).type === "vanguard_mode") {
-        const ack = buffered.event as unknown as { sessionId?: string; enabled?: boolean; workspace?: string };
-        const owner = ack.sessionId ?? primarySessionRef.current ?? "__primary__";
-        setVgModes((prev) => ({ ...prev, [owner]: ack.enabled === true }));
-        if (typeof ack.workspace === "string") setVgWorkspaces((prev) => ({ ...prev, [owner]: ack.workspace! }));
-        if (ack.enabled === true) {
-          setVgBurst(true);
-          if (vgBurstTimer.current !== null) window.clearTimeout(vgBurstTimer.current);
-          vgBurstTimer.current = window.setTimeout(() => setVgBurst(false), 2200);
-        }
-        return;
-      }
       // Route the event to the session it belongs to (multi-session daemon
       // tags every event with sessionId). Untagged events go to the active card.
       const sid = (buffered.event as { sessionId?: string }).sessionId;
@@ -2299,7 +2265,6 @@ function App() {
       data-rail={railCollapsed ? "collapsed" : "open"}
       data-dragging={forgeDragging ? "1" : "0"}
       data-working={active?.busy ? "1" : "0"}
-      data-vanguard={vgModes[active?.id ?? "__primary__"] ? "1" : "0"}
       data-pill={pill ? "1" : "0"}
       data-ultra={prefs.ultra ? "1" : "0"}
       style={{ ["--forge-w" as string]: `${forgeWidth}px`, ["--heat" as string]: heat.toFixed(3), ["--draft" as string]: draft.toFixed(3) }}
@@ -2323,8 +2288,6 @@ function App() {
         />
       ) : null}
       {!bootGone ? <Boot /> : null}
-      {bootGone && !vgIntroDone ? <VanguardBootIntro onDone={() => setVgIntroDone(true)} /> : null}
-      {vgBurst ? <VanguardBurst /> : null}
       {native && !pill ? (
         <SkillDock
           voiceEnabled={prefs.voiceEnabled ?? false}
@@ -2399,7 +2362,6 @@ function App() {
       <div className="embers" aria-hidden="true" />
       <div className="workGlow" aria-hidden="true" />
       <ScreenFlame />
-      <div className="vgWorkFrame" aria-hidden="true"><i /><i /><i /><b className="c tl" /><b className="c tr" /><b className="c bl" /><b className="c br" /></div>
       {prefs.ultra ? <HackerRain active={active?.busy ?? false} /> : null}
       {strike > 0 ? <div className="strikeFlash" key={strike} aria-hidden="true" /> : null}
       {/* Turbulence filter that makes the composer's flame rim actually lick + flicker. */}
@@ -2662,30 +2624,8 @@ function App() {
             <span>
               {prefs.routingMode === "auto" ? `routing · ${liveModel}` : `${prefs.provider} / ${prefs.model}`}
               {prefs.routingMode === "auto" && routedLanes.length > 0 ? ` · ${routedLanes.length} lane${routedLanes.length === 1 ? "" : "s"}` : ""}
-              {vgModes[active?.id ?? "__primary__"]
-                ? ` · engine: VANGUARD${vgWorkspaces[active?.id ?? "__primary__"] ? ` · ${vgWorkspaces[active?.id ?? "__primary__"].split(/[\\/]/).filter(Boolean).pop()}` : ""}`
-                : ""}
             </span>
           </div>
-          {view === "chat" ? (
-            <button
-              className="vgDrive"
-              data-on={vgModes[active?.id ?? "__primary__"] ? "1" : "0"}
-              title={vgModes[active?.id ?? "__primary__"]
-                ? "Vanguard is driving — click to hand back to the Ares core"
-                : "Switch this session's engine to Vanguard — works wherever Ares works; say \"work in C:\\path\" to move it"}
-              onClick={() => {
-                const enabled = !vgModes[active?.id ?? "__primary__"];
-                daemonCmd({ type: "vanguard_mode", sessionId: active?.id, enabled });
-              }}
-            >
-              <svg viewBox="0 0 16 18" aria-hidden="true">
-                <path d="M8 1 15 3.6v5.2c0 4.4-2.9 7.1-7 8.2-4.1-1.1-7-3.8-7-8.2V3.6L8 1Z" fill="none" stroke="currentColor" strokeWidth="1.3" />
-                <path d="m5.2 6.2 2.8 5 2.8-5" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-              VANGUARD
-            </button>
-          ) : null}
         </header>
 
         {view === "helm" ? (
@@ -4179,67 +4119,6 @@ function kfmt(n: number): string {
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, "") + "M";
   if (n >= 1_000) return (n / 1_000).toFixed(1).replace(/\.0$/, "") + "k";
   return String(Math.round(n));
-}
-
-// ─── Vanguard drive mode ────────────────────────────────────────────────────────
-//
-// The one-shot engine-switch burst: shield, shockwave rings, and the banner
-// "ARES : powered by VANGUARD". Purely visual — the actual engine switch is
-// the daemon's vanguard_mode ack that triggers this overlay.
-
-// The boot-sequence second beat: after the Ares forge splash exits, the
-// Vanguard shield draws itself in, holds one breath, and hands over to the
-// app. Click anywhere to skip; plays once per launch.
-function VanguardBootIntro({ onDone }: { onDone: () => void }) {
-  const [stage, setStage] = useState(0);
-  useEffect(() => {
-    const beats = [
-      window.setTimeout(() => setStage(1), 60),    // grid + shield draw
-      window.setTimeout(() => setStage(2), 850),   // wordmark reveal
-      window.setTimeout(() => setStage(3), 2050),  // fade out
-      window.setTimeout(onDone, 2450),
-    ];
-    return () => beats.forEach((beat) => window.clearTimeout(beat));
-  }, [onDone]);
-  return (
-    <div className="vgIntro" data-stage={stage} onClick={onDone} role="button" aria-label="Skip Vanguard intro">
-      <div className="vgIntroGrid" />
-      <div className="vgIntroStage">
-        <svg className="vgIntroShield" viewBox="0 0 64 72" aria-hidden="true">
-          <path className="hull" d="M32 4 58 14v20c0 17.6-11.6 28.4-26 32.8C17.6 62.4 6 51.6 6 34V14L32 4Z" fill="none" stroke="currentColor" strokeWidth="2.2" />
-          <path className="mark" d="m20 24 12 22 12-22" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
-        <div className="vgIntroText">
-          <span className="pow">powered by</span>
-          <span className="word">VANGUARD</span>
-          <span className="tag">verification-first engine · armed</span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function VanguardBurst() {
-  return (
-    <div className="vgBurst" aria-hidden="true">
-      <div className="vgBurstWave" />
-      <div className="vgBurstWave two" />
-      <div className="vgBurstWire" />
-      <div className="vgBurstWire two" />
-      <div className="vgBurstCore">
-        <svg className="vgBurstShield" viewBox="0 0 64 72">
-          <path d="M32 4 58 14v20c0 17.6-11.6 28.4-26 32.8C17.6 62.4 6 51.6 6 34V14L32 4Z" fill="none" stroke="currentColor" strokeWidth="2.4" />
-          <path d="m20 24 12 22 12-22" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
-        <div className="vgBurstText">
-          <span className="a">ARES</span>
-          <span className="sep">:</span>
-          <span className="p">powered by</span>
-          <span className="v">VANGUARD</span>
-        </div>
-      </div>
-    </div>
-  );
 }
 
 function HelmView({

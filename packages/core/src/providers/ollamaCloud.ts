@@ -622,6 +622,7 @@ export class OllamaCloudPool {
                 cacheWriteTokens,
               };
             }
+            yield { type: "stream_heartbeat" };
             continue;
           }
           case "content_block_start": {
@@ -693,8 +694,11 @@ export class OllamaCloudPool {
             continue;
           }
           case "message_stop":
-          case "ping":
           case undefined:
+            continue;
+          case "ping":
+            // Keepalive during prefill → stall-guard liveness (see anthropic.ts).
+            yield { type: "stream_heartbeat" };
             continue;
           case "error": {
             yield {

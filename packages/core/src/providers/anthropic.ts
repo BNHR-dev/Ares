@@ -21,7 +21,7 @@
 //   content_block_stop    (tool_use → tool_use_input_done with parsed input)
 //   message_delta         (stop_reason + output token usage)
 //   message_stop          (assemble message_done)
-//   ping                  (ignored)
+//   ping                  (→ stream_heartbeat, arms the stall guard)
 //   error                 (terminal; overloaded/api errors are retriable)
 
 import type {
@@ -333,6 +333,16 @@ export class AnthropicProvider implements Provider {
             messageId = evt.message?.id ?? messageId;
             const u = evt.message?.usage;
             if (u) usage = mergeUsage(usage, u);
+            yield { type: "stream_heartbeat" };
+            continue;
+          }
+
+          case "ping": {
+            // Keepalive during prefill. A long cache-write prompt can sit in
+            // prefill past the stall guard's pre-output window while the server
+            // pings the whole time; swallowing pings made a live request read
+            // as dead air, and every guard cut re-billed the full prefill.
+            yield { type: "stream_heartbeat" };
             continue;
           }
 
@@ -426,7 +436,7 @@ export class AnthropicProvider implements Provider {
           }
 
           default:
-            continue; // ping + unknown event types (forward-compat)
+            continue; // unknown event types (forward-compat)
         }
       }
     }

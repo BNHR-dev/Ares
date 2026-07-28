@@ -7,8 +7,7 @@
   "description": "Ares v2 CLI: the `ares` binary. Ink-based TUI, slash commands, session DAG navigation.",
   "main": "dist/entry.js",
   "bin": {
-    "ares": "dist/entry.js",
-    "vanguard": "dist/vanguardBin.js"
+    "ares": "dist/entry.js"
   },
   "scripts": {
     "build": "tsc -b",
@@ -29,7 +28,6 @@
     "@ares/tools": "workspace:*",
     "ink": "^7.0.4",
     "react": "^19.2.6",
-    "vanguard": "file:../../vendor/vanguard",
     "ws": "^8.18.0",
     "zod": "^3.23.8"
   },

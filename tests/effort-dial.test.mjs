@@ -73,6 +73,47 @@ test("guard: a healthy stream passes through untouched", async () => {
   assert.deepEqual(events.map((e) => e.type), ["text_delta", "message_done"]);
 });
 
+test("guard: heartbeats keep a silent prefill alive and never reach the consumer", async () => {
+  // A long cache-write prefill sends only pings for longer than the idle
+  // window; the request is alive and must not be cut. Heartbeats are guard
+  // food, not output — the consumer never sees them.
+  let stalled = false;
+  async function* prefillThenAnswer() {
+    for (let i = 0; i < 5; i++) {
+      await new Promise((r) => setTimeout(r, 40));
+      yield { type: "stream_heartbeat" };
+    }
+    yield { type: "text_delta", text: "hi" };
+    yield msgDone("hi");
+  }
+  const events = [];
+  for await (const ev of guardStreamStalls(prefillThenAnswer(), { idleMs: 100, thinkCeilingMs: 10_000, onStall: () => (stalled = true) })) {
+    events.push(ev);
+  }
+  assert.equal(stalled, false);
+  assert.deepEqual(events.map((e) => e.type), ["text_delta", "message_done"]);
+});
+
+test("guard: heartbeats re-arm but do not widen the pre-output window", async () => {
+  // Pings prove liveness; they are not output. A stream that pings then goes
+  // truly dead is still cut on the SHORT pre-output window, not the generous
+  // post-output one.
+  let stalled = false;
+  async function* pingThenDie() {
+    yield { type: "stream_heartbeat" };
+    yield { type: "stream_heartbeat" };
+    await new Promise(() => {});
+  }
+  const startedAt = Date.now();
+  const events = [];
+  for await (const ev of guardStreamStalls(pingThenDie(), { idleMs: 100, activeIdleMs: 5_000, thinkCeilingMs: 10_000, onStall: () => (stalled = true) })) {
+    events.push(ev);
+  }
+  assert.ok(stalled);
+  assert.equal(events.at(-1).error.code, "stream_stall");
+  assert.ok(Date.now() - startedAt < 2_000, "cut on the pre-output window, not activeIdleMs");
+});
+
 // ── engine integration: stall → downgrade → same-turn retry ──────────
 
 test("engine: reasoning stall downgrades one notch and the turn completes", async () => {

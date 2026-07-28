@@ -92,12 +92,15 @@ test("AnthropicProvider: text-only stream → deltas, usage, cache token capture
     events.push(e);
   }
 
+  // message_start and ping surface as stream_heartbeat: pre-first-token
+  // liveness for the stall guard (a live cache-write prefill must not read
+  // as dead air). The guard consumes them; turn consumers never see them.
   assert.deepEqual(
     events.map((e) => e.type),
-    ["text_delta", "text_delta", "message_done"],
+    ["stream_heartbeat", "text_delta", "stream_heartbeat", "text_delta", "message_done"],
   );
-  assert.equal(events[0].text, "Hel");
-  assert.equal(events[1].text, "lo");
+  assert.equal(events[1].text, "Hel");
+  assert.equal(events[3].text, "lo");
 
   const done = events.at(-1);
   assert.equal(done.message.role, "assistant");
@@ -150,10 +153,10 @@ test("AnthropicProvider: tool-use stream → start, input deltas, parsed input_d
 
   assert.deepEqual(
     events.map((e) => e.type),
-    ["tool_use_start", "tool_use_input_delta", "tool_use_input_delta", "tool_use_input_done", "message_done"],
+    ["stream_heartbeat", "tool_use_start", "tool_use_input_delta", "tool_use_input_delta", "tool_use_input_done", "message_done"],
   );
-  assert.equal(events[0].id, "toolu_1");
-  assert.equal(events[0].name, "Read");
+  assert.equal(events[1].id, "toolu_1");
+  assert.equal(events[1].name, "Read");
 
   const inputDone = events.find((e) => e.type === "tool_use_input_done");
   assert.deepEqual(inputDone.input, { file_path: "a.txt" });

@@ -10,42 +10,7 @@ import { type PermissionSettings } from "../permissionPolicy.js";
 import { aresAgentHome } from "@ares/agent";
 import { mindPaths } from "@ares/mind";
 import { effectsPaths, type RailsContext } from "@ares/effects";
-
-export interface ParsedArgs {
-  command: string;
-  flags: Map<string, string>;
-  positionals: string[];
-}
-
-export function parseArgs(argv: string[]): ParsedArgs {
-  let command = "launcher";
-  let rest = argv;
-  if (argv[0] === "--help" || argv[0] === "-h") {
-    command = argv[0];
-    rest = argv.slice(1);
-  } else if (argv[0] && !argv[0].startsWith("--")) {
-    command = argv[0];
-    rest = argv.slice(1);
-  }
-  const flags = new Map<string, string>();
-  const positionals: string[] = [];
-  for (let i = 0; i < rest.length; i++) {
-    const arg = rest[i];
-    if (arg.startsWith("--")) {
-      const key = arg.slice(2);
-      const next = rest[i + 1];
-      if (next !== undefined && !next.startsWith("--")) {
-        flags.set(key, next);
-        i++;
-      } else {
-        flags.set(key, "true");
-      }
-    } else {
-      positionals.push(arg);
-    }
-  }
-  return { command, flags, positionals };
-}
+export { parseArgs, type ParsedArgs } from "./args.js";
 
 let cachedCliVersion: string | undefined;
 
@@ -175,6 +140,8 @@ export async function printHelp(): Promise<void> {
       "  ares login                  ChatGPT OAuth device-code flow.",
       "  ares doctor                 Show provider auth + Ollama Cloud health.",
       "  ares friction [--days N]    Telemetry report: tool errors, edit tiers, stalls, cache health.",
+      "  ares triage [scan|list]      Cluster local failures into a durable, human-gated reliability queue.",
+      "  ares triage show <id>        Inspect redacted evidence and source pointers for one finding.",
       "  ares help                   Print this help.",
       "",
       "Env vars:",
@@ -183,6 +150,9 @@ export async function printHelp(): Promise<void> {
       "                              Override Ollama Cloud slot models.",
       "  ARES_HOME                   Override auth/config dir (default ~/.ares).",
       "  ARES_RESUME_MESSAGES        Max replay messages before compaction (default 80, 0=all).",
+      "  ARES_SELF_TRIAGE             Set to 0 to disable automatic post-turn reliability scans.",
+      "  ARES_SELF_TRIAGE_INTERVAL_MS Minimum automatic scan cadence (default 6 hours).",
+      "  ARES_TRIAGE_WORKSPACES       Extra workspace roots (OS path-delimiter separated).",
       "  ARES_THEME                  UI theme: cyberpunk, minimal, matrix, neon, split, professional, amber, dashboard, light.",
       "",
       "Flags:",

@@ -362,7 +362,13 @@ export class CodingJournal {
     this.activateFromObservedWork();
     this.active = true;
     const latest = compact(raw.replace(/\s+/g, " "), 360);
-    const signature = createHash("sha256").update(`${tool}\0${normalizeFailure(raw)}`).digest("hex").slice(0, 12);
+    // Keep the schema-v1 journal digest byte-compatible with existing files.
+    // Reliability telemetry uses the newer shared normalizer below, but a
+    // silent journal hash migration would reset recurrence counts mid-session.
+    const signature = createHash("sha256")
+      .update(`${tool}\0${normalizeCodingJournalFailure(raw)}`)
+      .digest("hex")
+      .slice(0, 12);
     const existing = this.state.failures.find((failure) => failure.signature === signature && failure.tool === tool);
     if (existing) {
       existing.count++;
@@ -456,7 +462,36 @@ function isManualVerification(name: string, input: unknown): boolean {
   return /(^|\s)(test|check|verify|lint|build|typecheck)(\s|$)|\b(vitest|jest|pytest|cargo\s+(?:test|check)|go\s+test|tsc|eslint|ruff|mypy|node\s+--test|pnpm\s+test|npm\s+test)\b/i.test(command);
 }
 
-function normalizeFailure(text: string): string {
+/**
+ * Canonicalize a diagnostic before hashing it. This is the shared failure
+ * identity seam for the friction envelope and reliability triage. The coding
+ * journal retains its schema-v1 legacy digest until an explicit migration.
+ */
+export function normalizeFailure(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[a-z]:\\[^\s:]+|\/(?:[^\s/:]+\/)+[^\s:]+/gi, "<path>")
+    .replace(/\b[0-9a-f]{8}-[0-9a-f-]{27,}\b/gi, "<id>")
+    .replace(/\b[0-9a-f]{16,}\b/gi, "<id>")
+    // No word boundary: volatile values commonly carry units (30000ms, 90s),
+    // where digit->letter is not a boundary and would fragment one failure.
+    .replace(/\d+(?:\.\d+)?/g, "#")
+    .replace(/["'`][^"'`\r\n]{1,160}["'`]/g, "<value>")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 1_000);
+}
+
+/** Stable, bounded hash used as the on-disk diagnostic correlation key. */
+export function failureDigest(scope: string, text: string, length = 16): string {
+  const boundedLength = Math.min(64, Math.max(8, Math.floor(length)));
+  return createHash("sha256")
+    .update(`${scope.trim().toLowerCase()}\0${normalizeFailure(text)}`)
+    .digest("hex")
+    .slice(0, boundedLength);
+}
+
+function normalizeCodingJournalFailure(text: string): string {
   return text
     .toLowerCase()
     .replace(/[a-z]:\\[^\s:]+|\/(?:[^\s/:]+\/)+[^\s:]+/gi, "<path>")

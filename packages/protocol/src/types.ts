@@ -106,6 +106,10 @@ export type StreamEvent =
   | { type: "tool_use_input_delta"; id: string; deltaJson: string }
   | { type: "tool_use_input_done"; id: string; input: unknown }
   | { type: "message_done"; message: Message; usage: Usage; stopReason: StopReason }
+  // Wire keepalive (SSE ping / message_start): proof the provider is alive
+  // before its first token. The stall guard consumes these to arm its idle
+  // timer; they carry no content and never reach turn consumers.
+  | { type: "stream_heartbeat" }
   | { type: "error"; error: StreamError };
 
 export type StopReason =

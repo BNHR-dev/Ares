@@ -49,6 +49,8 @@ pnpm ares help                          # list commands
 pnpm ares chat --provider mock          # interactive terminal chat (no API key)
 pnpm ares run --goal "fix failing tests"
 pnpm ares doctor                        # provider/runtime health
+pnpm ares triage scan --deep            # backfill + cluster local reliability failures
+pnpm ares triage list                    # review active reliability candidates
 pnpm ares garrison serve                # start the always-on daemon + gateway
 pnpm ares attach                        # attach a thin client to the gateway
 pnpm ares mind consolidate              # prune, dedupe, crystallize memory
@@ -70,6 +72,26 @@ pnpm desktop:installer                  # build the .exe (bundles a self-contain
 - **You are responsible for what you authorize.** Bypass/"unleashed" mode is a loud, audited, opt-in power-user choice. Treat desktop control and real-world connectors accordingly.
 
 See `docs/DEVELOPMENT.md` for the full permission-mode and verification policy.
+
+### Self-triage reliability loop
+
+Ares keeps a local, redacted failure envelope for each completed Core and
+Garrison turn when telemetry is enabled, registers workspace rollouts under the
+active Ares home, and periodically reconciles those records with crash logs.
+The scanner joins both default durable homes (`~/.ares` and the Windows desktop
+home), registered session pointers, the current workspace, and the default
+desktop workspace. For pre-registry sessions in any other workspace, pass
+`--workspaces PATH1;PATH2` on Windows (`:` on POSIX), or persist the same list in
+`ARES_TRIAGE_WORKSPACES`. Stable signatures become durable findings under
+`<ARES_HOME>/triage`; recurrence thresholds keep auth problems, page-state
+misses, and old test pollution out of the product-repair queue.
+
+`ares triage show <id>` resolves the local evidence pointer for review.
+`acknowledge`, `dismiss`, and `resolve` are bookkeeping only: log text is never
+executed and no fixer, shell, model, worktree, commit, or push is launched. The
+repair gate intentionally stays closed until an authenticated, isolated Git
+worktree runner exists. Set `ARES_SELF_TRIAGE=0` to disable automatic scans or
+`ARES_SELF_TRIAGE_INTERVAL_MS` to change the six-hour cadence.
 
 ## Browser & CDP attach
 
