@@ -41,6 +41,7 @@ export class FileExtensionAuditJournal {
         return (await readAudit(this.file)).map((entry) => entry.event);
     }
 }
+const MAX_HOOK_PAYLOAD_BYTES = 32 * 1024;
 export class HookRunner {
     workspace;
     policy;
@@ -58,36 +59,47 @@ export class HookRunner {
         this.#redact = createSecretRedactor(environment);
         this.#environment = { ...environment };
     }
-    async run(when, signal) {
+    async run(when, signal, context) {
         const outcomes = [];
         for (const hook of this.hooks.filter((candidate) => candidate.when === when)
             .sort((a, b) => compareOrdinal(a.name, b.name))) {
             this.policy.authorizeHook(hook.name);
             this.policy.authorizeCommand(hook.command);
-            const outcome = await this.#execute(hook, signal);
+            const outcome = await this.#execute(hook, signal, context);
             outcomes.push(outcome);
             await this.audit.record({
                 type: "hook.outcome",
                 name: hook.name,
                 status: outcome.timedOut ? "timed-out" : outcome.passed ? "passed" : "failed",
-                detail: outcome,
+                detail: { ...outcome, ...(context === undefined ? {} : { tool: context.tool }) },
             });
             if (!outcome.passed && hook.failure === "fail-closed") {
+                if (context !== undefined)
+                    return outcomes;
                 throw new Error(`Hook '${hook.name}' failed under fail-closed policy.`);
             }
         }
         return outcomes;
     }
-    async #execute(hook, signal) {
+    async #execute(hook, signal, context) {
         const cwd = await this.workspace.existing(hook.cwd ?? ".");
+        const payload = context === undefined ? undefined : boundedPayload(hook.when, context);
         return new Promise((resolve) => {
             const child = spawn(hook.command, [...hook.args], {
                 cwd,
                 shell: false,
                 windowsHide: true,
-                env: safeEnvironment(this.#environment),
-                stdio: ["ignore", "pipe", "pipe"],
+                env: {
+                    ...safeEnvironment(this.#environment),
+                    VANGUARD_HOOK_WHEN: hook.when,
+                    ...(context === undefined ? {} : { VANGUARD_HOOK_TOOL: context.tool }),
+                },
+                stdio: [payload === undefined ? "ignore" : "pipe", "pipe", "pipe"],
             });
+            if (payload !== undefined && child.stdin !== null) {
+                child.stdin.on("error", () => undefined);
+                child.stdin.end(payload);
+            }
             let stdout = Buffer.alloc(0);
             let stderr = Buffer.alloc(0);
             let settled = false;
@@ -112,8 +124,8 @@ export class HookRunner {
                 });
             };
             const abort = () => { child.kill(); finish(null); };
-            child.stdout.on("data", (chunk) => { stdout = append(stdout, chunk); });
-            child.stderr.on("data", (chunk) => { stderr = append(stderr, chunk); });
+            child.stdout?.on("data", (chunk) => { stdout = append(stdout, chunk); });
+            child.stderr?.on("data", (chunk) => { stderr = append(stderr, chunk); });
             child.on("error", (error) => {
                 stderr = append(stderr, Buffer.from(error.message));
                 finish(null);
@@ -127,6 +139,24 @@ export class HookRunner {
             signal.addEventListener("abort", abort, { once: true });
         });
     }
+}
+function boundedPayload(when, context) {
+    const fit = (value) => {
+        if (value === undefined)
+            return undefined;
+        const serialized = JSON.stringify(value);
+        if (serialized !== undefined && Buffer.byteLength(serialized) <= MAX_HOOK_PAYLOAD_BYTES)
+            return value;
+        return { truncated: true, bytes: serialized === undefined ? 0 : Buffer.byteLength(serialized) };
+    };
+    const output = fit(context.output);
+    return `${JSON.stringify({
+        when,
+        tool: context.tool,
+        input: fit(context.input) ?? null,
+        ...(context.ok === undefined ? {} : { ok: context.ok }),
+        ...(output === undefined ? {} : { output }),
+    })}\n`;
 }
 function safeEnvironment(environment) {
     const names = process.platform === "win32"

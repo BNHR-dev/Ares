@@ -38,6 +38,38 @@ export interface ChangelogEntry {
 // from the "earlier updates" strip.
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.28.33",
+    date: "July 2026",
+    title: "It can look things up now",
+    tagline: "Vanguard reads the web, runs your own slash commands, and lets your hooks see what a tool is actually about to do.",
+    highlights: [
+      {
+        icon: "🌐",
+        title: "Search and read the web",
+        tag: "New",
+        blurb: "Vanguard can look up documentation, errors, and package details itself instead of guessing from memory — public pages only, no cookies or logins.",
+      },
+      {
+        icon: "🔒",
+        title: "Locked down by default",
+        tag: "Safer",
+        blurb: "Web lookups refuse anything on your local network or private addresses, re-check every redirect, and cap how much they read — and a page is never treated as proof that work succeeded.",
+      },
+      {
+        icon: "⌨️",
+        title: "Your own slash commands",
+        tag: "New",
+        blurb: "Drop a markdown file in .vanguard/commands and it becomes a command with your own arguments — per project or everywhere you work.",
+      },
+      {
+        icon: "🪝",
+        title: "Hooks that can say no",
+        tag: "Safer",
+        blurb: "Automation hooks now see exactly which tool is running and with what, and can block a single risky call instead of killing the whole run.",
+      },
+    ],
+  },
+  {
     version: "0.28.32",
     date: "July 2026",
     title: "One conversation, both engines",

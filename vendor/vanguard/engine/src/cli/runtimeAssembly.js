@@ -1,7 +1,7 @@
 import path from "node:path";
 import { logicalRunEvents } from "../kernel/logicalHistory.js";
 import { SESSION_EXCLUDED_DIRECTORIES, TreeSnapshotCache, snapshotTree } from "../runtime/treeSnapshot.js";
-import { AdaptiveCommandVerifier, AgentKernel, CheckpointTool, CommandVerifier, adaptiveVerifyMode, isAdaptiveVerifyCommand, CreativeDirectionVerifier, RenderableArtifactVerifier, DeleteFileTool, HeadlessRenderTool, CodeIntelTool, RepoMemoryStore, RepoMemoryTool, ScoutDelegateTool, ImageInspectionTool, JournalEvidenceResolver, GlobTool, ListFilesTool, ProcessTool, prewarmExecutionRuntime, ReadFileTool, ReplaceTextTool, ReviewChangesTool, RunCheckpointLedger, SearchTextTool, WorkspaceBoundary, WorkspaceIntegrityVerifier, WorkspaceMutationPolicy, WorkspaceVersionLedger, WriteFileTool, contractCriterionIds, normalizeContract, FixedCommandTool, PlanLedger, PlanTool, PostEditSyntaxChecker, PublicRunEventPresenter, RepositoryMapTool, StickyContextPolicy, SyntaxCheckTool, SyntaxCommandRunner, UsageLedger, resolveExtensions, ExtensionPermissionPolicy, FileExtensionAuditJournal, HookRunner, McpStdioClient, loadWorkspaceSkills, latestDurableStateAnchor, DelegationCoordinator, CliDelegateRunner, TransactionalDelegateMerger, createDelegationTools, } from "../index.js";
+import { AdaptiveCommandVerifier, AgentKernel, CheckpointTool, CommandVerifier, adaptiveVerifyMode, isAdaptiveVerifyCommand, CreativeDirectionVerifier, RenderableArtifactVerifier, DeleteFileTool, HeadlessRenderTool, CodeIntelTool, RepoMemoryStore, RepoMemoryTool, ScoutDelegateTool, ImageInspectionTool, JournalEvidenceResolver, GlobTool, ListFilesTool, ProcessTool, prewarmExecutionRuntime, ReadFileTool, ReplaceTextTool, ReviewChangesTool, RunCheckpointLedger, SearchTextTool, WorkspaceBoundary, WorkspaceIntegrityVerifier, WorkspaceMutationPolicy, WorkspaceVersionLedger, WebFetchTool, WebSearchTool, WriteFileTool, contractCriterionIds, normalizeContract, FixedCommandTool, PlanLedger, PlanTool, PostEditSyntaxChecker, PublicRunEventPresenter, RepositoryMapTool, StickyContextPolicy, SyntaxCheckTool, SyntaxCommandRunner, UsageLedger, resolveExtensions, ExtensionPermissionPolicy, FileExtensionAuditJournal, HookRunner, McpStdioClient, loadWorkspaceSkills, latestDurableStateAnchor, DelegationCoordinator, CliDelegateRunner, TransactionalDelegateMerger, createDelegationTools, } from "../index.js";
 import { boundedEnvironmentInteger, commandAliases } from "./options.js";
 import { commandApprover } from "./userChannel.js";
 import { createModel } from "./modelFactory.js";
@@ -20,6 +20,8 @@ export function buildConversationRuntime(session, options, fileJournal, userChan
         new HeadlessRenderTool(source),
         new ImageInspectionTool(source),
         new CodeIntelTool(source),
+        new WebSearchTool(),
+        new WebFetchTool(),
     ];
     const kernel = new AgentKernel({
         model: createModel(options, createStreamPresenter(markActivity)),
@@ -132,9 +134,25 @@ export async function buildExecutionRuntime(session, options, fileJournal, inter
         name: tool.name,
         definition: tool.definition,
         execute: async (input, context) => {
-            await hookRunner.run("before-tool", context.signal);
+            const before = await hookRunner.run("before-tool", context.signal, { tool: tool.name, input });
+            const blocking = before.find((outcome) => outcome.blocked);
+            if (blocking !== undefined) {
+                return {
+                    ok: false,
+                    output: {
+                        error: `Blocked by the '${blocking.hook}' before-tool hook.`,
+                        hook: blocking.hook,
+                        ...(blocking.stderr.trim().length === 0 ? {} : { detail: blocking.stderr.trim().slice(0, 2_000) }),
+                    },
+                };
+            }
             const result = await tool.execute(input, context);
-            await hookRunner.run("after-tool", context.signal);
+            await hookRunner.run("after-tool", context.signal, {
+                tool: tool.name,
+                input,
+                ok: result.ok,
+                ...(result.output === undefined ? {} : { output: result.output }),
+            });
             return result;
         },
     };
@@ -231,6 +249,8 @@ export async function buildExecutionRuntime(session, options, fileJournal, inter
         new ReadFileTool(workspace, 1_000_000, versions),
         new RepositoryMapTool(workspace, { includeInstructions: !options.disableExtensions }),
         new CodeIntelTool(workspace),
+        new WebSearchTool(),
+        new WebFetchTool(),
     ];
     const postMutationSyntaxChecker = new PostEditSyntaxChecker(new SyntaxCommandRunner(), workspace);
     const profileTools = options.agentProfile === "coder" ? [
@@ -260,6 +280,8 @@ export async function buildExecutionRuntime(session, options, fileJournal, inter
             new ScoutDelegateTool(createModel(options), executionObserveTools),
             new CodeIntelTool(workspace),
             new RepositoryMapTool(workspace, { includeInstructions: !options.disableExtensions }),
+            new WebSearchTool(),
+            new WebFetchTool(),
             ...profileTools,
         ].map(withToolHooks),
         verifiers,

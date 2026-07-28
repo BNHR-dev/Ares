@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { emitKeypressEvents } from "node:readline";
 import { detectProjectVerification } from "./runtime/projectVerification.js";
+import { expandPromptCommand, loadPromptCommands } from "./extensions/promptCommands.js";
 import { isCleanGitRepository } from "./runtime/gitTree.js";
 import { VanguardEngine } from "./engine/vanguardEngine.js";
 import { PROVIDER_CHOICES, catalogModels, contextWindowTokens, defaultContextBytes, credentialVariable, defaultModel, parseSelectableProvider, providerChoice, supportsOAuth, } from "./inference/modelCatalog.js";
@@ -32,6 +33,7 @@ export async function runTui(startDirectory) {
     const engine = new VanguardEngine({ logger: () => { } });
     let sessionId;
     let contracted = false;
+    const promptCommands = await loadPromptCommands({ workspaceRoot: config.workspace }).catch(() => []);
     const ui = freshUiState(config);
     const terminalWidth = () => Math.max(40, process.stdout.columns ?? 100);
     const renderer = new InlineRenderer(process.stdout, terminalWidth);
@@ -148,6 +150,7 @@ export async function runTui(startDirectory) {
                     + ` ${ansi.violet}/verify${ansi.reset}        ${ansi.dim}what completion must prove: build or tests${ansi.reset}\n`
                     + ` ${ansi.violet}/status${ansi.reset}        ${ansi.dim}session, provider, and mode details${ansi.reset}\n`
                     + ` ${ansi.violet}/exit${ansi.reset}          ${ansi.dim}leave Vanguard (also: exit, quit)${ansi.reset}\n`
+                    + customCommandHelp(promptCommands)
                     + ` ${ansi.dim}Anything else is a message: chat, ask about the repo, or request work.${ansi.reset}\n`
                     + ` ${ansi.dim}While a task runs: type to steer, Enter sends, ↑↓ history, Ctrl+K commands, Ctrl+C interrupts.${ansi.reset}\n`
                     + ` ${ansi.dim}Composer editing: Ctrl+A/E line ends, Ctrl+←→ word jumps, Ctrl+W deletes a word, Ctrl+U clears to start.${ansi.reset}\n`
@@ -189,7 +192,13 @@ export async function runTui(startDirectory) {
                     + ` ${ansi.dim}session${ansi.reset}   ${sessionId ?? "starts with your first message"}\n`);
                 continue;
             }
-            if (input.length === 0) {
+            let message = input;
+            const custom = matchPromptCommand(promptCommands, input);
+            if (custom !== undefined) {
+                message = expandPromptCommand(custom.command, custom.argumentText);
+                fx.note(`/${custom.command.name} · ${custom.command.scope} command`);
+            }
+            if (message.length === 0) {
                 continue;
             }
             try {
@@ -218,7 +227,7 @@ export async function runTui(startDirectory) {
                     sessionId = created.sessionId;
                 }
                 currentSessionId = sessionId;
-                const turn = await runEngineTurn(engine, sessionId, input, config, ui, fx, terminalWidth, contracted, input);
+                const turn = await runEngineTurn(engine, sessionId, message, config, ui, fx, terminalWidth, contracted, input);
                 contracted = turn.contracted;
                 if (turn.outcome?.status === "waiting_for_user") {
                     const question = turn.outcome.question ?? "Vanguard needs your answer to continue.";
@@ -952,6 +961,22 @@ async function selectOrExit(options) {
         }
         throw error;
     }
+}
+function matchPromptCommand(commands, input) {
+    const match = /^\/([a-z][a-z0-9_-]{0,31})(?:\s+([\s\S]*))?$/u.exec(input.trim());
+    if (match === null)
+        return undefined;
+    const command = commands.find((candidate) => candidate.name === match[1]);
+    return command === undefined ? undefined : { command, argumentText: match[2] ?? "" };
+}
+function customCommandHelp(commands) {
+    if (commands.length === 0)
+        return "";
+    return ` ${ansi.dim}Your commands (.vanguard/commands):${ansi.reset}\n`
+        + commands
+            .map((command) => ` ${ansi.violet}/${command.name.padEnd(13)}${ansi.reset} ${ansi.dim}${bounded(command.description, 80)}${ansi.reset}`)
+            .join("\n")
+        + "\n";
 }
 function printCommandList(fx) {
     fx.print(` ${ansi.bold}Commands${ansi.reset}  ${ansi.dim}(insert with /, run with Enter)${ansi.reset}\n`

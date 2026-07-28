@@ -30,6 +30,18 @@ export interface HookOutcome {
     readonly stderr: string;
     readonly timedOut: boolean;
 }
+/**
+ * The call a tool-scoped hook is deciding about. Delivered on stdin as one
+ * JSON line so a hook can inspect the actual arguments — without it a
+ * `before-tool` hook could only ever block every call or none.
+ */
+export interface HookToolContext {
+    readonly tool: string;
+    readonly input: JsonValue;
+    /** Present only for `after-tool`: the result the tool produced. */
+    readonly ok?: boolean;
+    readonly output?: JsonValue;
+}
 export declare class HookRunner {
     #private;
     private readonly workspace;
@@ -38,5 +50,5 @@ export declare class HookRunner {
     private readonly audit;
     private readonly maxOutputBytes;
     constructor(workspace: WorkspaceBoundary, policy: ExtensionPermissionPolicy, hooks: readonly HookDeclaration[], audit: ExtensionAuditPort, environment?: NodeJS.ProcessEnv, maxOutputBytes?: number);
-    run(when: HookWhen, signal: AbortSignal): Promise<readonly HookOutcome[]>;
+    run(when: HookWhen, signal: AbortSignal, context?: HookToolContext): Promise<readonly HookOutcome[]>;
 }

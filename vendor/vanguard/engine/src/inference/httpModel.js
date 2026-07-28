@@ -257,6 +257,7 @@ export class HttpModelAdapter {
             started: (attempt) => safely(() => source.started?.(attempt)),
             delta: (text) => safely(() => source.delta(text)),
             thinking: (text) => safely(() => source.thinking?.(text)),
+            activity: () => safely(() => source.activity?.()),
             reset: () => safely(() => source.reset?.()),
             committed: () => safely(() => source.committed?.()),
             failed: (reason) => safely(() => source.failed?.(reason)),
