@@ -55,6 +55,12 @@ interface DaemonModelOption {
   /** Ollama library meta: human pull count + relative updated age. */
   pulls?: string;
   updated?: string;
+  /** The reasoning-effort ladder this model ACTUALLY supports, newest-known
+   *  first-party truth. The desktop renders exactly these rungs instead of a
+   *  hardcoded low/medium/high — Kimi K3 offers only high/max, and showing it
+   *  a "low" it will silently ignore is a lie about what the dial does.
+   *  Omitted = unknown; the client falls back to its heuristic ladder. */
+  effortLevels?: string[];
 }
 
 export const TERMINAL_PROVIDERS = ["ollama", "openai", "anthropic", "deepseek", "kimi", "openrouter", "ares", "custom", "moa", "mock"] as const;
@@ -287,7 +293,70 @@ export function defaultTerminalModel(provider: string, settings: UiSettings): st
 }
 
 /** Build a live model catalog without exposing provider keys to the webview. */
+/**
+ * The reasoning-effort ladder a model ACTUALLY honours.
+ *
+ * This is the single source of truth for the effort dial. It is deliberately
+ * here (daemon-side, beside discovery) and not in the desktop: the desktop must
+ * never guess a ladder from a model-id regex, because a rung the model ignores
+ * is a dial that lies. Kimi K3 is the worked example — it exposes high/max
+ * only, so offering "low" renders a control that silently does nothing.
+ *
+ * Order is always coldest → hottest; the desktop renders exactly these rungs.
+ * Returns [] when the model does no extended thinking at all (dial hidden), and
+ * undefined when we genuinely don't know (client keeps its fallback).
+ */
+export function effortLadderFor(
+  provider: string,
+  modelId: string,
+  live?: { supportsReasoning?: boolean; supportedParameters?: string[] },
+): string[] | undefined {
+  const p = provider.toLowerCase();
+  const m = modelId.toLowerCase();
+
+  // Live capability wins over any table: OpenRouter publishes supported
+  // parameters per model, and Kimi reports supportsReasoning per model.
+  if (live?.supportsReasoning === false) return [];
+  if (live?.supportedParameters) {
+    return live.supportedParameters.includes("reasoning") ? ["off", "low", "medium", "high"] : [];
+  }
+
+  if (p === "kimi" || /^k\d|kimi/.test(m)) {
+    // Kimi's thinking models expose two rungs, not a five-step ladder.
+    return /highspeed|no-?think/.test(m) ? [] : ["high", "max"];
+  }
+  if (p === "deepseek" || /deepseek-v4|deepseek-v3\.2/.test(m)) return ["off", "high", "max"];
+  if (p === "anthropic" || /claude|fable|mythos|opus|sonnet|haiku/.test(m)) {
+    if (/haiku/.test(m)) return ["off", "low", "medium", "high"];
+    // The Claude 5 family (and late Opus 4.x) carry the full adaptive ladder.
+    if (/(?:fable|mythos)-?5|opus-5|sonnet-5|opus-4-[78]/.test(m)) return ["low", "medium", "high", "xhigh", "max"];
+    return ["off", "low", "medium", "high", "max"];
+  }
+  if (p === "openai" || /^gpt-|^o[134](?:-|$)/.test(m)) {
+    return /mini|spark/.test(m)
+      ? ["off", "minimal", "low", "medium", "high"]
+      : ["off", "minimal", "low", "medium", "high", "xhigh"];
+  }
+  if (p === "ollama") {
+    // Only the thinking-tagged builds honour an effort hint at all.
+    return /think|reason|qwen3|deepseek|glm|minimax|gpt-oss|nemotron|cogito/.test(m)
+      ? ["off", "low", "medium", "high"]
+      : [];
+  }
+  return undefined; // unknown — let the client fall back
+}
+
+/** Public entry: discovery + the effort ladder stamped onto every row. */
 export async function daemonModelCatalog(provider: string): Promise<DaemonModelOption[]> {
+  const rows = await daemonModelCatalogRaw(provider);
+  return rows.map((row) =>
+    row.effortLevels
+      ? row
+      : { ...row, effortLevels: effortLadderFor(provider, row.id, { supportsReasoning: row.capabilities?.includes("reasoning") === false ? false : undefined }) },
+  );
+}
+
+async function daemonModelCatalogRaw(provider: string): Promise<DaemonModelOption[]> {
   const settings = await loadUiSettings();
 
   if (provider === "mock") {
@@ -365,6 +434,9 @@ export async function daemonModelCatalog(provider: string): Promise<DaemonModelO
       ],
       // OpenRouter ships a rich blurb per model — the heart of the discovery UI.
       description: model.description?.trim() || undefined,
+      // ...and publishes the parameters each model accepts, so the effort
+      // ladder here is genuinely native rather than inferred from its id.
+      effortLevels: effortLadderFor("openrouter", model.id, { supportedParameters: model.supportedParameters ?? [] }),
       contextLength: model.contextLength || undefined,
       pricing: {
         input: model.promptPrice != null ? Number(model.promptPrice) * 1e6 : undefined,
@@ -411,6 +483,10 @@ export async function daemonModelCatalog(provider: string): Promise<DaemonModelO
           ].filter(Boolean).join(" · "),
           group: "Kimi",
           capabilities: model.supportsReasoning === false ? ["tools"] : ["tools", "reasoning"],
+          // Kimi reports per-model thinking support — feed it straight in so a
+          // no-think build hides the dial and a thinking build shows the two
+          // rungs it actually honours, rather than a fabricated 6-step ladder.
+          effortLevels: effortLadderFor("kimi", model.id, { supportsReasoning: model.supportsReasoning !== false && model.thinkingType !== "no" }),
           ...(model.contextLength !== undefined ? { contextLength: model.contextLength } : {}),
         }));
       }

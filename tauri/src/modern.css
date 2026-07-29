@@ -60,9 +60,11 @@
   --mint-text: #a7d9b4;
   --crimson: #c9564a;
 
-  --r-sm: 9px;
-  --r-md: 13px;
-  --r-lg: 16px;
+  /* Softer geometry throughout. The squared-off 9/13/16 set read as "stale
+     dashboard"; frosted glass wants generous, continuous curvature. */
+  --r-sm: 12px;
+  --r-md: 18px;
+  --r-lg: 24px;
 
   --display: "Cinzel", "Palatino Linotype", Palatino, Georgia, serif;
   --font: "Manrope", ui-sans-serif, "Segoe UI", system-ui, sans-serif;
@@ -78,11 +80,13 @@
      over it, and a bright specular hairline along the top edge where the
      light catches. The blur is what makes it read as glass rather than a
      flat tinted card — without it this is just a lighter rectangle. */
-  --glass-fill: linear-gradient(180deg, rgba(255, 244, 232, 0.075), rgba(255, 240, 226, 0.028));
-  --glass-edge: rgba(255, 238, 220, 0.14);
-  --glass-spec: inset 0 1px 0 rgba(255, 245, 232, 0.16);
-  --glass-blur: blur(30px) saturate(150%);
-  --glass-lift: 0 10px 32px -12px rgba(0, 0, 0, 0.6);
+  --glass-fill: linear-gradient(158deg, rgba(255, 246, 236, 0.11) 0%, rgba(255, 240, 226, 0.045) 42%, rgba(255, 236, 220, 0.022) 100%);
+  --glass-edge: rgba(255, 240, 224, 0.16);
+  /* a true frosted edge: bright specular along the top, a faint bounce along
+     the bottom — the pair is what reads as a THICK pane rather than a tint */
+  --glass-spec: inset 0 1px 0 rgba(255, 248, 238, 0.2), inset 0 -1px 0 rgba(255, 210, 170, 0.05);
+  --glass-blur: blur(40px) saturate(165%);
+  --glass-lift: 0 14px 40px -14px rgba(0, 0, 0, 0.62);
 
   font-family: var(--font);
   color: var(--text);
@@ -139,11 +143,14 @@
 .ares[data-style="modern"] .backdrop .astrolabe,
 .ares[data-style="modern"] .backdrop .depthField { display: none; }
 
-/* the room is quiet at rest; ember only when Ares actually works */
-.ares[data-style="modern"]::after {
-  background: radial-gradient(150% 120% at 50% 116%, rgba(var(--ember-rgb), 0.1), transparent 48%);
-  box-shadow: inset 0 0 80px rgba(var(--ember-rgb), 0.07);
-}
+/* THE VEIL IS GONE in Modern. `.ares::after` was a full-screen layer with
+   mix-blend-mode:screen at z-index 40 — i.e. composited ABOVE the titlebar and
+   status bar. Two problems: (1) a screen-blend layer over a backdrop-filtered
+   bar makes Chromium re-composite that bar every frame, which is the titlebar
+   "flicker"; (2) fading a screen blend in and out is luminance modulation of
+   the entire UI, the exact thing the effects overhaul exists to remove.
+   Working state is carried by the header ring and the static rim instead. */
+.ares[data-style="modern"]::after { display: none !important; }
 
 /* ── titlebar ────────────────────────────────────────────────────────────── */
 
@@ -200,6 +207,17 @@
 .ares[data-style="modern"] .pill[data-state="starting"]::before { background: var(--ember-hi); box-shadow: 0 0 8px var(--ember-hi); }
 
 /* the circular tool row at the right of the titlebar (search / forge / settings) */
+/* The window-drag strip is a full-height invisible band across the titlebar.
+   It must stay draggable, but it should never look or behave like a control:
+   no hover/active feedback of its own, and it never paints. (This is the
+   "invisible bar sitting there" — it is intentional, just made inert.) */
+.ares[data-style="modern"] .titleDrag {
+  background: none;
+  border: none;
+  box-shadow: none;
+  cursor: default;
+}
+
 .ares[data-style="modern"] .titleTools { display: flex; align-items: center; gap: 9px; margin-left: 8px; }
 .ares[data-style="modern"] .titleIcon {
   width: 30px; height: 30px;
@@ -690,6 +708,139 @@
 
 .ares[data-style="modern"] .working .workingLabel { color: var(--ember-text); }
 
+/* ── the artifact card ───────────────────────────────────────────────────
+   Was a thin strip with a bare "PREVIEW ▸". Now it reads as a THING you made:
+   an ember coin, the filename leading, its nature underneath, and a real
+   affordance on the right that lights up on hover. */
+.ares[data-style="modern"] .artifact {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  padding: 14px 16px;
+  border-radius: var(--r-md);
+  text-align: left;
+  transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+}
+.ares[data-style="modern"] .artifact > i { display: none; } /* legacy bullet */
+/* the base sheet flexes every child to 1fr, which stretched the coin into an
+   ellipse and blew the CTA to 300px — pin each child's role explicitly */
+.ares[data-style="modern"] .artifact > .medallion { flex: 0 0 auto; }
+.ares[data-style="modern"] .artifact > .artifactGo { flex: 0 0 auto; }
+.ares[data-style="modern"] .artifact > span { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1 1 auto; }
+.ares[data-style="modern"] .artifact strong {
+  font: 400 13.5px/1.3 var(--mono);
+  color: var(--gold-hi);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ares[data-style="modern"] .artifact em { font-style: normal; font-size: 11.5px; color: var(--faint); }
+.ares[data-style="modern"] .artifactGo {
+  flex: none;
+  padding: 7px 15px;
+  border-radius: 999px;
+  border: 1px solid rgba(200, 155, 94, 0.28);
+  font: 500 11.5px/1 var(--font);
+  letter-spacing: 0.04em;
+  color: rgba(232, 200, 147, 0.85);
+  transition: border-color 160ms ease, background 160ms ease, color 160ms ease;
+}
+.ares[data-style="modern"] .artifact:hover {
+  border-color: rgba(255, 150, 80, 0.45);
+  transform: translateY(-1px);
+}
+.ares[data-style="modern"] .artifact:hover .artifactGo {
+  border-color: rgba(255, 160, 90, 0.7);
+  background: rgba(226, 102, 52, 0.16);
+  color: var(--accent-hi);
+}
+
+/* ── the gate (approval card) ────────────────────────────────────────────
+   Restructured: a shield coin + headline on top, the exact command in mono
+   on its own full-width line (it's the thing being judged, so it gets the
+   most legible slot), and the three verdicts as real buttons underneath.
+   The old one crushed all three into a single row and ellipsised the
+   command — you were approving something you couldn't fully read. */
+.ares[data-style="modern"] .gate {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch; /* base centers children — the command must be full width */
+  gap: 12px;
+  width: auto;
+  max-width: 100%;
+  /* base runs `gateGlow` on an undecided gate: a 2.4s pulsing box-shadow, i.e.
+     exactly the kind of luminance oscillation the effects overhaul removed.
+     Keep the entrance, drop the pulse. */
+  animation: transcriptIn 360ms cubic-bezier(0.2, 0.9, 0.3, 1) both;
+  padding: 16px 18px;
+  border-radius: var(--r-md);
+  border: 1px solid rgba(226, 102, 52, 0.34);
+  background: linear-gradient(158deg, rgba(255, 246, 236, 0.08), rgba(143, 29, 29, 0.16) 60%, rgba(56, 13, 9, 0.2));
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-spec), var(--glass-lift);
+}
+.ares[data-style="modern"] .gate .gateIcon { display: none; }
+.ares[data-style="modern"] .gateTop { display: flex; align-items: center; gap: 12px; }
+.ares[data-style="modern"] .gateBody { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.ares[data-style="modern"] .gateBody strong {
+  font: 600 10px/1 var(--display);
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--ember-text);
+}
+.ares[data-style="modern"] .gateReason { font-size: 13px; color: rgba(240, 227, 205, 0.86); }
+.ares[data-style="modern"] .gateReason b { font-weight: 500; color: var(--gold-hi); }
+.ares[data-style="modern"] .gateTarget {
+  display: block;
+  padding: 10px 13px;
+  border-radius: 12px;
+  border: 1px solid rgba(200, 155, 94, 0.16);
+  background: rgba(0, 0, 0, 0.34);
+  font: 400 12px/1.6 var(--mono);
+  color: rgba(239, 227, 207, 0.82);
+  word-break: break-word;
+}
+.ares[data-style="modern"] .gateActions { display: flex; gap: 9px; }
+.ares[data-style="modern"] .gateActions button {
+  flex: 1;
+  padding: 9px 12px;
+  border-radius: 12px;
+  font: 500 12.5px/1 var(--font);
+  border: 1px solid rgba(200, 155, 94, 0.22);
+  background: rgba(255, 255, 255, 0.03);
+  color: rgba(239, 227, 207, 0.8);
+  transition: border-color 140ms ease, background 140ms ease, color 140ms ease;
+}
+.ares[data-style="modern"] .gateActions button:hover { border-color: rgba(200, 155, 94, 0.5); color: var(--text); }
+.ares[data-style="modern"] .gateAllow {
+  border-color: rgba(226, 102, 52, 0.5) !important;
+  background: rgba(143, 29, 29, 0.42) !important;
+  color: #f6e6cd !important;
+}
+.ares[data-style="modern"] .gateAllow:hover { background: rgba(180, 45, 32, 0.55) !important; }
+.ares[data-style="modern"] .gateDeny:hover { border-color: rgba(201, 86, 74, 0.55); color: var(--crimson); }
+.ares[data-style="modern"] .gateDecided {
+  font: 400 10.5px/1 var(--mono);
+  font-style: normal;
+  color: var(--faint);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+/* the YOLO posture segment — unmistakable when armed */
+.ares[data-style="modern"] .permSeg[data-yolo="1"] span {
+  color: var(--ember-text);
+  font-weight: 500;
+  letter-spacing: 0.1em;
+}
+.ares[data-style="modern"] .permSeg[data-yolo="1"],
+.ares[data-style="modern"] .permSeg[data-yolo="1"]:hover {
+  background: linear-gradient(180deg, rgba(143, 29, 29, 0.34), rgba(50, 12, 9, 0.18));
+  box-shadow: inset 0 0 20px rgba(255, 106, 48, 0.12);
+}
+
 /* the per-turn model/lane stamp — a quiet mono tag, not a boxed badge */
 .ares[data-style="modern"] .modelBadge {
   display: inline-flex;
@@ -1058,7 +1209,36 @@
    body so long code blocks never swim */
 .ares[data-style="modern"] .toolCard,
 .ares[data-style="modern"] .diffCard {
-  background: linear-gradient(180deg, rgba(255, 244, 232, 0.06), rgba(10, 8, 7, 0.5));
+  background: linear-gradient(158deg, rgba(255, 246, 236, 0.075), rgba(10, 8, 7, 0.52));
+}
+
+/* Every frosted pane carries a faint sheen along its top-left shoulder — the
+   highlight a real slab of glass catches from the room's key light. Painted
+   as a pseudo-element so it never tints the content, and skipped where the
+   surface is a control (buttons keep their own states). */
+.ares[data-style="modern"] .toolCard,
+.ares[data-style="modern"] .diffCard,
+.ares[data-style="modern"] .hmStat,
+.ares[data-style="modern"] .hmPanel,
+.ares[data-style="modern"] .vaultCard,
+.ares[data-style="modern"] .usageCard,
+.ares[data-style="modern"] .gate,
+.ares[data-style="modern"] .palette,
+.ares[data-style="modern"] .settingsShell { position: relative; }
+.ares[data-style="modern"] .toolCard::before,
+.ares[data-style="modern"] .diffCard::before,
+.ares[data-style="modern"] .hmStat::before,
+.ares[data-style="modern"] .hmPanel::before,
+.ares[data-style="modern"] .vaultCard::before,
+.ares[data-style="modern"] .usageCard::before,
+.ares[data-style="modern"] .gate::before,
+.ares[data-style="modern"] .settingsShell::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(150deg, rgba(255, 248, 240, 0.055) 0%, rgba(255, 248, 240, 0) 34%);
 }
 
 /* hover: the lens catches more light and the ember rim wakes up */
@@ -1077,13 +1257,20 @@
   backdrop-filter: var(--glass-blur);
   box-shadow: var(--glass-spec);
 }
+/* Edge chrome is deliberately NOT backdrop-filtered. A blurred bar re-samples
+   whatever moves behind it every frame (embers, the scrolling transcript), and
+   pinned against the window edge it buys almost no depth for that cost — it
+   just shimmers. Opaque tint, same palette, zero churn. */
 .ares[data-style="modern"] .titlebar,
 .ares[data-style="modern"] .statusBar {
-  background: linear-gradient(180deg, rgba(255, 244, 232, 0.05), rgba(10, 9, 8, 0.66));
-  -webkit-backdrop-filter: blur(24px) saturate(140%);
-  backdrop-filter: blur(24px) saturate(140%);
+  background: linear-gradient(180deg, #14110f, #0b0a09);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   box-shadow: var(--glass-spec);
+  transition: none;
 }
+/* the working border-color swap on the titlebar was another luminance blink */
+.ares[data-style="modern"][data-working="1"] .titlebar { border-bottom-color: var(--line); }
 
 /* WebKitGTK composites backdrop-filter on the CPU — strip the blur there and
    fall back to an opaque tint so Linux does not turn into a slideshow. */

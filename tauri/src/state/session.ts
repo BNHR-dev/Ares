@@ -25,9 +25,47 @@ export const EFFORT_META: Record<ReasoningLevel, { label: string; hint: string }
   max: { label: "Max", hint: "the provider's absolute capability ceiling" },
 };
 
+/**
+ * Effort ladders DISCOVERED from the daemon's model catalog, keyed
+ * "provider/model". The daemon derives these from each model's real capability
+ * (OpenRouter's supported-parameters, Kimi's supportsReasoning, the per-family
+ * table in providers.ts) — see effortLadderFor there. This registry is the
+ * bridge: the effort panel renders exactly what was discovered, so a newly
+ * released model brings its own correct ladder with it and nothing here needs
+ * hand-editing.
+ */
+const discoveredLadders = new Map<string, ReasoningLevel[]>();
+
+/** Record ladders from a model_catalog frame. Unknown rungs are dropped so a
+ *  future provider string can never inject a level the app can't render. */
+export function recordEffortLadders(
+  provider: string,
+  models: Array<{ id?: string; effortLevels?: string[] }>,
+): void {
+  for (const model of models) {
+    if (!model?.id || !Array.isArray(model.effortLevels)) continue;
+    const ladder = model.effortLevels.filter((level): level is ReasoningLevel =>
+      (REASONING_LEVELS as string[]).includes(level),
+    );
+    discoveredLadders.set(`${provider.toLowerCase()}/${model.id.toLowerCase()}`, ladder);
+  }
+}
+
+/** The discovered ladder for a model, or undefined if we've never seen it. */
+export function discoveredEffortLadder(provider: string, model: string): ReasoningLevel[] | undefined {
+  return discoveredLadders.get(`${provider.toLowerCase()}/${model.toLowerCase()}`);
+}
+
 export function effortLevelsFor(provider: string, model: string): ReasoningLevel[] {
+  // Native truth first: whatever the daemon discovered for THIS model.
+  const discovered = discoveredEffortLadder(provider, model);
+  if (discovered) return discovered;
+
+  // Fallback heuristic — only for models we have not discovered yet (offline,
+  // signed out, or a provider that publishes nothing). Kept deliberately small.
   const p = provider.toLowerCase();
   const m = model.toLowerCase();
+  if (p === "kimi" || /^k\d(?:-|$)|kimi/.test(m)) return ["high", "max"];
   if (/deepseek-v4|deepseek-v3\.2/.test(m) || p === "deepseek") return ["off", "high", "max"];
   if (/claude|fable|mythos|opus|sonnet/.test(m) || p === "anthropic") {
     if (/(?:fable|mythos)-?5|opus-4-[78]|sonnet-5/.test(m)) return ["low", "medium", "high", "xhigh", "max"];

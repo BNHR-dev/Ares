@@ -58,6 +58,7 @@ import {
   REASONING_LEVELS,
   EFFORT_META,
   effortLevelsFor,
+  recordEffortLadders,
   effortWireLabel,
   PREVIEW_SANDBOX,
   PREVIEWABLE,
@@ -1173,14 +1174,17 @@ function App() {
         case "usage_stats":
           setUsageStats((e.stats as UsageStats | null) ?? null);
           return true;
-        case "model_catalog":
+        case "model_catalog": {
+          const catalogModels = Array.isArray(e.models) ? e.models : [];
+          // Capture each model's NATIVE effort ladder before the event fans out
+          // — done here (not in the picker) so the effort panel is correct even
+          // if the model browser was never opened this session.
+          recordEffortLadders(String(e.provider ?? ""), catalogModels as Array<{ id?: string; effortLevels?: string[] }>);
           window.dispatchEvent(new CustomEvent("ares:model-catalog", {
-            detail: {
-              provider: e.provider,
-              models: Array.isArray(e.models) ? e.models : [],
-            },
+            detail: { provider: e.provider, models: catalogModels },
           }));
           return true;
+        }
         case "operator_status":
           setOpStatus({
             activeCount: typeof e.activeCount === "number" ? e.activeCount : 0,
@@ -2810,6 +2814,30 @@ function App() {
                 <i className="dot" data-state="running" /><b>missions</b><span>{opStatus.activeCount}</span>
               </button>
             ) : null}
+            {/* YOLO: one click between "ask me about the dangerous things" and
+                "act on everything, never ask". This is the SAME posture the
+                Permissions pane writes — free + sensitive auto-approved — just
+                reachable without opening settings, because it's the toggle
+                you flip mid-task. Deliberately reads YOLO when armed so it can
+                never be mistaken for the guarded default. */}
+            <button
+              className="statusSeg permSeg"
+              data-yolo={permissions.mode === "free" ? "1" : "0"}
+              onClick={() => {
+                const next: PermSettings = permissions.mode === "free"
+                  ? { ...permissions, mode: "guarded", sensitive: false }
+                  : { ...permissions, mode: "free", sensitive: true, fleetsInherit: true };
+                setPermissions(next);
+                daemonCmd({ type: "set_permissions", permissions: next });
+              }}
+              title={
+                permissions.mode === "free"
+                  ? "YOLO is ON — Ares acts on everything without asking, including credentials, payments and destructive commands. Click to return to guarded."
+                  : "Guarded — Ares asks before sensitive actions. Click to arm YOLO (auto-approve everything, no prompts)."
+              }
+            >
+              <b>perms</b><span>{permissions.mode === "free" ? "YOLO" : "guarded"}</span>
+            </button>
             <button className="statusSeg" onClick={cycleFlame} title="working-state effects — glow (static ember rim) / minimal (header indicator only) / off. Nothing flashes in any mode.">
               <b>effects</b><span>{prefs.flameMode}</span>
             </button>
@@ -3659,10 +3687,45 @@ function EffortPopover({
   onPick: (level: ReasoningLevel) => void;
   onClose: () => void;
 }) {
+  // Ask the daemon for THIS provider's catalog on open, so the ladder reflects
+  // the live roster even if the model browser was never opened. The registry
+  // is populated by the model_catalog frame; the tick re-renders when it lands.
+  const [, setCatalogTick] = useState(0);
+  useEffect(() => {
+    const bump = () => setCatalogTick((n) => n + 1);
+    window.addEventListener("ares:model-catalog", bump);
+    void invoke("ares_daemon_command", { command: { type: "model_catalog", provider } }).catch(() => null);
+    return () => window.removeEventListener("ares:model-catalog", bump);
+  }, [provider]);
+
   const levels = effortLevelsFor(provider, model);
   const selected = levels.includes(value) ? value : null;
   const activeIndex = selected ? levels.indexOf(selected) : -1;
   const fill = activeIndex < 0 || levels.length < 2 ? 0 : (activeIndex / (levels.length - 1)) * 100;
+
+  // A model with no extended thinking gets an honest empty state instead of a
+  // ladder of rungs it would silently ignore.
+  if (levels.length === 0) {
+    return (
+      <div className="paletteScrim" onClick={onClose}>
+        <div className="palette reasoningPop" onClick={(e) => e.stopPropagation()}>
+          <div className="effortHead">
+            <ProviderLogo brand={provider} className="effortProviderMark" />
+            <span>
+              <strong>Reasoning effort</strong>
+              <em>{provider} / {model}</em>
+            </span>
+            <button className="close" onClick={onClose} aria-label="Close">×</button>
+          </div>
+          <div className="effortWire" data-warning="1">
+            <i />
+            <span>{model} does no extended thinking, so there is no effort to set. Pick a reasoning-capable model to use this dial.</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="paletteScrim" onClick={onClose}>
       <div className="palette reasoningPop" onClick={(e) => e.stopPropagation()}>
@@ -5701,14 +5764,16 @@ const ItemView = React.memo(function ItemView({
     );
   }
   if (item.kind === "artifact") {
+    const holo = HOLO_SPEC_FILE.test(item.path);
     return (
       <button className="artifact" onClick={() => onArtifact(item.path, item.label)}>
+        <Medallion glyph={holo ? "skills" : "artifacts"} size={40} tone="ember" />
         <i aria-hidden="true" />
         <span>
           <strong>{item.label}</strong>
-          <em>{HOLO_SPEC_FILE.test(item.path) ? "hologram spec — open on the holotable" : "artifact forged — open in the panel"}</em>
+          <em>{holo ? "hologram spec — open on the holotable" : "artifact forged — open in the panel"}</em>
         </span>
-        <span className="artifactGo">PREVIEW ▸</span>
+        <span className="artifactGo">{holo ? "Open" : "Preview"}</span>
       </button>
     );
   }
@@ -5823,22 +5888,21 @@ const ItemView = React.memo(function ItemView({
   if (item.kind === "permission") {
     return (
       <div className="gate" data-decided={item.decided ? "1" : "0"}>
-        <span className="gateIcon" aria-hidden="true">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6z" />
-          </svg>
-        </span>
-        <div className="gateBody">
-          <strong>Approval needed</strong>
-          <span className="gateReason">
-            <b>{item.toolName}</b> · {item.reason || "wants to act"}
-          </span>
+        <div className="gateTop">
+          <Medallion glyph="shield" size={34} tone="ember" />
+          <div className="gateBody">
+            <strong>Approval needed</strong>
+            <span className="gateReason">{item.toolName} wants to act</span>
+          </div>
+          {item.decided ? <em className="gateDecided">{item.decided.replace(/_/gu, " ")}</em> : null}
         </div>
-        {item.decided ? (
-          <em className="gateDecided">{item.decided}</em>
-        ) : (
+        {/* The reason carries the actual command/target. It is the thing being
+            judged, so it gets the widest, most legible slot — verbatim and
+            monospaced, never ellipsised the way the old single-row card did. */}
+        <code className="gateTarget">{item.reason || "wants to act"}</code>
+        {item.decided ? null : (
           <div className="gateActions">
-            <button className="gateAllow" onClick={() => onPermission(item.id, "allow_once")}>Allow</button>
+            <button className="gateAllow" onClick={() => onPermission(item.id, "allow_once")}>Allow once</button>
             <button className="gateAlways" onClick={() => onPermission(item.id, "allow_always")}>Always</button>
             <button className="gateDeny" onClick={() => onPermission(item.id, "deny")}>Deny</button>
           </div>

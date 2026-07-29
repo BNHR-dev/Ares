@@ -24,6 +24,11 @@ export interface ModelOption {
   /** Ollama library meta: human pull count ("225.9K") + relative updated age. */
   pulls?: string;
   updated?: string;
+  /** The reasoning-effort rungs this model actually honours, discovered by the
+   *  daemon (see effortLadderFor). The effort panel renders EXACTLY these —
+   *  never a hardcoded ladder. [] = no extended thinking, so the dial hides;
+   *  undefined = not yet discovered, client falls back to its heuristic. */
+  effortLevels?: string[];
 }
 
 export const OLLAMA_CLOUD_MODELS: ModelOption[] = [
