@@ -4151,6 +4151,131 @@ function kfmt(n: number): string {
   return String(Math.round(n));
 }
 
+/**
+ * HELM, modern skin — the design's reading of the same room: a medallion
+ * header, a row of struck stat tiles, then the operator's durable goals beside
+ * the trust rails it has actually earned. Every number here is live; nothing
+ * is a mock. The Forged/Legacy temple (ScryingBasin and friends) is untouched
+ * below and still renders for those skins.
+ */
+function HelmModern({
+  daemon,
+  opStatus,
+  usage,
+  keyStatus,
+  sessions,
+  onOpenSession,
+  onToggleAutotick,
+  onRefresh,
+}: {
+  daemon: DaemonState;
+  opStatus: { activeCount: number; goals: Array<{ id: string; statement: string; status: string; progress: number }>; autotick: boolean; trust?: Array<{ domain: string; level: number; proven: number }> } | null;
+  usage: UsageStats | null;
+  keyStatus: Record<string, boolean>;
+  sessions: SessionVm[];
+  onOpenSession: (id: string) => void;
+  onToggleAutotick: () => void;
+  onRefresh: () => void;
+}) {
+  const goals = opStatus?.goals ?? [];
+  const activeGoals = goals.filter((g) => g.status === "active");
+  const trust = opStatus?.trust ?? [];
+  const services = [
+    { id: "anthropic", label: "Anthropic" }, { id: "openrouter", label: "OpenRouter" },
+    { id: "deepseek", label: "DeepSeek" }, { id: "ollama", label: "Ollama" }, { id: "brave", label: "Brave" },
+  ];
+  const connected = services.filter((s) => keyStatus[s.id]).length;
+  const freshIn = Math.max(0, (usage?.tokensIn ?? 0) - (usage?.cacheReadTokens ?? 0));
+  const reusedPct = usage && usage.tokensIn > 0 ? Math.round((usage.cacheReadTokens / usage.tokensIn) * 100) : 0;
+  const recent = sessions.filter((s) => s.loaded !== false || s.items.length > 0).slice(0, 5);
+
+  const stats = [
+    { label: "Missions", value: String(opStatus?.activeCount ?? 0), sub: opStatus?.autotick ? "hunting unattended" : "attended only" },
+    { label: "Sessions", value: String(sessions.length), sub: "rehydrated from rollout" },
+    { label: "Tokens", value: kfmt(freshIn + (usage?.tokensOut ?? 0)), sub: `${reusedPct}% reused from cache` },
+    { label: "Providers", value: `${connected}/${services.length}`, sub: "keys installed" },
+  ];
+
+  return (
+    <div className="hm">
+      <header className="hmHead">
+        <Medallion glyph="helm" size={54} tone="ember" />
+        <div className="hmHeadText">
+          <h2>HELM</h2>
+          <p>The agent's own state — mind, operator, rails.</p>
+        </div>
+        <span className="hmDaemon" data-state={daemon}>
+          <i />{daemon === "running" ? "Garrison ready" : daemon}
+        </span>
+        <button className="hmGhost" onClick={onRefresh}>Re-scry</button>
+      </header>
+
+      <div className="hmStats">
+        {stats.map((s) => (
+          <div className="hmStat" key={s.label}>
+            <div className="hmStatLabel">{s.label}</div>
+            <div className="hmStatValue">{s.value}</div>
+            <div className="hmStatSub">{s.sub}</div>
+          </div>
+        ))}
+      </div>
+
+      <div className="hmPanels">
+        <section className="hmPanel">
+          <div className="hmPanelLabel">Durable goals · Operator</div>
+          {activeGoals.length === 0 ? (
+            <p className="hmEmpty">No missions march. Queue one and Ares hunts unattended.</p>
+          ) : (
+            activeGoals.slice(0, 5).map((g) => (
+              <div className="hmGoal" key={g.id}>
+                <div className="hmGoalTop">
+                  <span className="hmDiamond" aria-hidden="true">◈</span>
+                  <span className="hmGoalText">{compact(g.statement, 62)}</span>
+                  <span className="hmGoalPct">{Math.round((g.progress ?? 0) * 100)}%</span>
+                </div>
+                <span className="hmBar"><i style={{ width: `${Math.round((g.progress ?? 0) * 100)}%` }} /></span>
+              </div>
+            ))
+          )}
+          <button className="hmToggle" data-on={opStatus?.autotick ? "1" : "0"} onClick={onToggleAutotick}>
+            <span>Unattended hunt</span>
+            <i className="hmSwitch" data-on={opStatus?.autotick ? "1" : "0"} />
+          </button>
+        </section>
+
+        <section className="hmPanel">
+          <div className="hmPanelLabel">The rails · earned trust</div>
+          {trust.length === 0 ? (
+            <p className="hmEmpty">No domain has proven itself yet. Trust is earned per domain, by result.</p>
+          ) : (
+            trust.slice(0, 6).map((t) => (
+              <div className="hmRail" key={t.domain}>
+                <span className="hmRailStage">{t.domain}</span>
+                <span className="hmRailPips">
+                  {[1, 2, 3, 4, 5].map((p) => <i key={p} data-lit={p <= t.level ? "1" : "0"} />)}
+                </span>
+                <span className="hmRailVerdict">{t.proven} proven</span>
+              </div>
+            ))
+          )}
+          <div className="hmPanelLabel hmPanelLabelInner">Recent sessions</div>
+          {recent.length === 0 ? (
+            <p className="hmEmpty">Nothing engraved yet.</p>
+          ) : (
+            recent.map((s) => (
+              <button className="hmSession" key={s.id} onClick={() => onOpenSession(s.id)}>
+                <Medallion glyph="sessions" size={26} />
+                <span className="hmSessionTitle">{compact(s.title, 44)}</span>
+                <span className="hmRailVerdict">{s.items.length} items</span>
+              </button>
+            ))
+          )}
+        </section>
+      </div>
+    </div>
+  );
+}
+
 function HelmView({
   daemon,
   opStatus,
@@ -4173,6 +4298,7 @@ function HelmView({
   onRefresh: () => void;
 }) {
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const modern = useUiStyle() === "modern";
   const busy = Boolean(active?.busy);
   const activity = active?.activity ?? "";
   const [stir, setStir] = useState(0);
@@ -4220,6 +4346,24 @@ function HelmView({
   const connected = services.filter((s) => keyStatus[s.id]).length;
   const daily = usage?.daily ?? [];
   const peak = Math.max(1, ...daily.map((d) => d.in + d.out));
+
+  // The modern skin reads HELM the way the design does — struck tiles and
+  // ledgers, not the molten temple. Hooks above already ran, so this early
+  // return is stable across renders.
+  if (modern) {
+    return (
+      <HelmModern
+        daemon={daemon}
+        opStatus={opStatus}
+        usage={usage}
+        keyStatus={keyStatus}
+        sessions={sessions}
+        onOpenSession={onOpenSession}
+        onToggleAutotick={onToggleAutotick}
+        onRefresh={onRefresh}
+      />
+    );
+  }
 
   return (
     <div className="helm-root" ref={rootRef} onMouseMove={onMove} data-daemon={daemon}>

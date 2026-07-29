@@ -596,7 +596,7 @@
 .ares[data-style="modern"] .toolCard[data-state="error"] .toolCardIcon { background: var(--crimson); box-shadow: 0 0 9px var(--crimson); }
 .ares[data-style="modern"] .toolCard[data-state="error"] { border-color: rgba(201, 86, 74, 0.34); }
 
-/* tool steps — a mono ledger, one line each */
+/* tool steps — a mono ledger, one line each; the live row is washed in ember */
 .ares[data-style="modern"] .toolStep,
 .ares[data-style="modern"] .toolCardBody .step {
   display: flex;
@@ -607,6 +607,21 @@
   font: 400 12.5px/1.4 var(--mono);
 }
 .ares[data-style="modern"] .toolStep .name { color: var(--gold-hi); }
+.ares[data-style="modern"] .toolStep[data-state="running"],
+.ares[data-style="modern"] .toolCardBody .step[data-state="running"] { background: rgba(255, 106, 48, 0.05); }
+.ares[data-style="modern"] .toolStep[data-state="running"] .result { animation: emberPulse 1.6s ease-in-out infinite; }
+
+/* the running spinner: a bronze ring with one quadrant cut out */
+.ares[data-style="modern"] .toolSpin,
+.ares[data-style="modern"] .micSpin {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(255, 178, 77, 0.85);
+  border-top-color: transparent;
+  animation: spinSlow 0.8s linear infinite;
+  background: none;
+}
 
 /* verdict chips */
 .ares[data-style="modern"] .chip,
@@ -855,7 +870,49 @@
   backdrop-filter: blur(26px) saturate(1.25);
   box-shadow: 0 22px 50px rgba(0, 0, 0, 0.72), inset 0 1px 0 rgba(255, 236, 214, 0.09);
 }
-.ares[data-style="modern"] .paletteScrim { background: rgba(4, 3, 3, 0.62); }
+.ares[data-style="modern"] .paletteScrim {
+  background: rgba(4, 3, 3, 0.66);
+  -webkit-backdrop-filter: blur(3px);
+  backdrop-filter: blur(3px);
+}
+
+/* the palette: a search rule over a list of struck rows */
+.ares[data-style="modern"] .palette { overflow: hidden; }
+.ares[data-style="modern"] .palette > input {
+  width: 100%;
+  padding: 16px 20px 16px 46px;
+  border: none;
+  border-bottom: 1px solid rgba(200, 155, 94, 0.14);
+  border-radius: 0;
+  background: transparent
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='17' height='17' viewBox='0 0 48 48' fill='none' stroke='%23d9ab6e' stroke-width='1.7'%3E%3Ccircle cx='20' cy='20' r='13'/%3E%3Ccircle cx='20' cy='20' r='9.2' stroke-opacity='.6' stroke-width='1.1'/%3E%3Ccircle cx='20' cy='20' r='4.2' stroke='%23a02b1e' stroke-width='2.2'/%3E%3Cpath d='M29.6 29.6 41 41' stroke-width='2.2' stroke-linecap='round'/%3E%3C/svg%3E")
+    no-repeat 20px center;
+  font-size: 15.5px;
+}
+.ares[data-style="modern"] .palette > input:focus { outline: none; }
+.ares[data-style="modern"] .paletteList { padding: 8px; gap: 1px; }
+.ares[data-style="modern"] .paletteList button {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  padding: 11px 13px;
+  border-radius: 11px;
+  border: none;
+  background: transparent;
+  font-size: 13.5px;
+  color: rgba(240, 227, 205, 0.92);
+}
+.ares[data-style="modern"] .paletteList button[data-on="1"],
+.ares[data-style="modern"] .paletteList button:hover { background: rgba(200, 155, 94, 0.09); }
+.ares[data-style="modern"] .paletteList button > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ares[data-style="modern"] .paletteList button em {
+  font-style: normal;
+  margin-left: auto;
+  font: 400 10.5px/1 var(--mono);
+  color: rgba(232, 200, 147, 0.4);
+  white-space: nowrap;
+}
+.ares[data-style="modern"] .paletteEmpty { color: var(--faint); font-size: 13px; padding: 22px; text-align: center; }
 
 /* ── settings: the same room, not a different app ────────────────────────── */
 
@@ -870,24 +927,29 @@
   text-transform: uppercase;
   color: #f3e6cf;
 }
+.ares[data-style="modern"] .settingsNav {
+  background: rgba(0, 0, 0, 0.25);
+}
 .ares[data-style="modern"] .settingsNav button {
   display: flex;
   align-items: center;
   gap: 10px;
-  border-radius: var(--r-sm);
-  border: 1px solid transparent;
-  padding: 8px 11px;
+  border-radius: 10px;
+  border: none;
+  border-left: 2px solid transparent;
+  padding: 9px 12px;
   font-size: 13px;
   color: rgba(240, 227, 205, 0.78);
   transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
 }
-.ares[data-style="modern"] .settingsNav button:hover { background: rgba(200, 155, 94, 0.07); color: var(--text); }
+.ares[data-style="modern"] .settingsNav button:hover { background: rgba(200, 155, 94, 0.08); color: var(--text); }
 .ares[data-style="modern"] .settingsNav button[data-on="1"] {
   background: rgba(200, 155, 94, 0.1);
-  border-color: rgba(200, 155, 94, 0.28);
+  border-left-color: #e2662f;
   color: var(--gold-hi);
   box-shadow: none;
 }
+.ares[data-style="modern"] .settingsNav button .glyph { display: none; }
 .ares[data-style="modern"] .settingsMain { background: transparent; }
 .ares[data-style="modern"] .fieldLabel {
   font: 600 9.5px/1 var(--display);
@@ -921,6 +983,486 @@
 }
 .ares[data-style="modern"] .displayModes button strong { color: var(--gold-hi); font-weight: 600; }
 .ares[data-style="modern"] .displayModes button span { color: var(--faint); }
+
+/* ── HELM (modern) ───────────────────────────────────────────────────────── */
+
+/* HELM is its own room — the chat session header has no business over it.
+   The view renders no composer, so with the header gone the stage holds two
+   items; re-declare the rows or the status bar would take the flexible one. */
+.ares[data-style="modern"] .stage[data-view="helm"] > .stageHead { display: none; }
+.ares[data-style="modern"] .stage[data-view="helm"] { grid-template-rows: minmax(0, 1fr) auto; }
+
+.ares[data-style="modern"] .hm {
+  position: relative;
+  height: 100%;
+  overflow-y: auto;
+  padding: 32px 40px 40px;
+}
+.ares[data-style="modern"] .hm::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: url("/backdrop-helm.png"), url("/backdrop.jpg");
+  background-size: cover;
+  background-position: center;
+  opacity: 0.07;
+  pointer-events: none;
+}
+.ares[data-style="modern"] .hm > * { position: relative; }
+
+.ares[data-style="modern"] .hmHead { display: flex; align-items: center; gap: 16px; }
+.ares[data-style="modern"] .hmHeadText { flex: 1; min-width: 0; }
+.ares[data-style="modern"] .hmHeadText h2 {
+  margin: 0;
+  font: 600 25px/1.1 var(--display);
+  letter-spacing: 0.16em;
+  color: #f3e6cf;
+}
+.ares[data-style="modern"] .hmHeadText p { margin: 4px 0 0; font-size: 13px; color: var(--faint); }
+.ares[data-style="modern"] .hmDaemon {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(200, 155, 94, 0.2);
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.ares[data-style="modern"] .hmDaemon i { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); }
+.ares[data-style="modern"] .hmDaemon[data-state="running"] i { background: var(--steel); box-shadow: 0 0 8px var(--steel); }
+.ares[data-style="modern"] .hmGhost {
+  padding: 7px 15px;
+  border-radius: 10px;
+  border: 1px solid rgba(200, 155, 94, 0.24);
+  font-size: 12.5px;
+  color: rgba(239, 227, 207, 0.8);
+  transition: border-color 140ms ease;
+}
+.ares[data-style="modern"] .hmGhost:hover { border-color: rgba(200, 155, 94, 0.5); }
+
+.ares[data-style="modern"] .hmStats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 16px;
+  margin: 24px 0 16px;
+}
+.ares[data-style="modern"] .hmStat,
+.ares[data-style="modern"] .hmPanel {
+  border: 1px solid rgba(200, 155, 94, 0.16);
+  border-radius: var(--r-lg);
+  background: linear-gradient(180deg, #131110, #0b0a09);
+}
+.ares[data-style="modern"] .hmStat { padding: 18px; }
+.ares[data-style="modern"] .hmStatLabel,
+.ares[data-style="modern"] .hmPanelLabel {
+  font: 600 9.5px/1 var(--display);
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: rgba(232, 200, 147, 0.5);
+}
+.ares[data-style="modern"] .hmStatValue { font: 600 29px/1.1 var(--display); color: #f6ecda; margin: 10px 0 4px; }
+.ares[data-style="modern"] .hmStatSub { font-size: 12px; color: var(--faint); }
+
+.ares[data-style="modern"] .hmPanels {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+  gap: 16px;
+}
+.ares[data-style="modern"] .hmPanel { padding: 20px; }
+.ares[data-style="modern"] .hmPanelLabel { margin-bottom: 12px; display: block; }
+.ares[data-style="modern"] .hmPanelLabelInner { margin-top: 20px; }
+.ares[data-style="modern"] .hmEmpty { margin: 0; font-size: 12.5px; line-height: 1.6; color: var(--faint); }
+
+.ares[data-style="modern"] .hmGoal { padding: 11px 0; border-bottom: 1px solid rgba(200, 155, 94, 0.09); }
+.ares[data-style="modern"] .hmGoalTop { display: flex; align-items: center; gap: 10px; font-size: 13.5px; color: rgba(240, 227, 205, 0.9); }
+.ares[data-style="modern"] .hmDiamond { color: var(--ember-hi); }
+.ares[data-style="modern"] .hmGoalText { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ares[data-style="modern"] .hmGoalPct { font: 400 11px/1 var(--mono); color: var(--faint); }
+.ares[data-style="modern"] .hmBar { display: block; height: 3px; margin-top: 9px; border-radius: 3px; background: rgba(200, 155, 94, 0.13); }
+.ares[data-style="modern"] .hmBar i { display: block; height: 3px; border-radius: 3px; background: linear-gradient(90deg, var(--blood), var(--ember-hi)); }
+
+.ares[data-style="modern"] .hmToggle {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  margin-top: 14px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(226, 102, 52, 0.3);
+  background: rgba(143, 29, 29, 0.12);
+  font-size: 12.5px;
+  color: var(--ember-text);
+}
+.ares[data-style="modern"] .hmToggle span { flex: 1; text-align: left; }
+.ares[data-style="modern"] .hmSwitch {
+  position: relative;
+  width: 42px; height: 23px;
+  flex: none;
+  border-radius: 999px;
+  border: 1px solid rgba(200, 155, 94, 0.28);
+  background: rgba(200, 155, 94, 0.12);
+  transition: background 180ms ease, border-color 180ms ease;
+}
+.ares[data-style="modern"] .hmSwitch::after {
+  content: "";
+  position: absolute;
+  top: 2px; left: 2px;
+  width: 17px; height: 17px;
+  border-radius: 50%;
+  background: #f0e3cd;
+  transition: left 180ms ease;
+}
+.ares[data-style="modern"] .hmSwitch[data-on="1"] { background: rgba(226, 102, 52, 0.45); border-color: rgba(255, 150, 80, 0.7); }
+.ares[data-style="modern"] .hmSwitch[data-on="1"]::after { left: 21px; }
+
+.ares[data-style="modern"] .hmRail,
+.ares[data-style="modern"] .hmSession {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 9px 0;
+  border-bottom: 1px solid rgba(200, 155, 94, 0.09);
+  font-size: 13px;
+  text-align: left;
+}
+.ares[data-style="modern"] .hmRailStage { font: 400 11.5px/1 var(--mono); color: rgba(232, 200, 147, 0.7); width: 104px; flex: none; }
+.ares[data-style="modern"] .hmRailPips { display: flex; gap: 4px; flex: 1; }
+.ares[data-style="modern"] .hmRailPips i { width: 14px; height: 3px; border-radius: 2px; background: rgba(200, 155, 94, 0.16); }
+.ares[data-style="modern"] .hmRailPips i[data-lit="1"] { background: var(--ember-hi); }
+.ares[data-style="modern"] .hmRailVerdict { font: 400 11px/1 var(--mono); color: var(--faint); margin-left: auto; }
+.ares[data-style="modern"] .hmSession { border-radius: 10px; padding: 8px 6px; border-bottom: 1px solid rgba(200, 155, 94, 0.09); }
+.ares[data-style="modern"] .hmSession:hover { background: rgba(200, 155, 94, 0.06); }
+.ares[data-style="modern"] .hmSessionTitle { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: rgba(240, 227, 205, 0.9); }
+
+/* ── the toggle (one spec, used everywhere) ──────────────────────────────── */
+
+.ares[data-style="modern"] .toggle {
+  position: relative;
+  width: 42px;
+  height: 23px;
+  flex: none;
+  border-radius: 999px;
+  border: 1px solid rgba(200, 155, 94, 0.28);
+  background: rgba(200, 155, 94, 0.12);
+  transition: background 180ms ease, border-color 180ms ease;
+}
+.ares[data-style="modern"] .toggle::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  background: #f0e3cd;
+  transition: left 180ms ease;
+}
+.ares[data-style="modern"] .toggle[data-on="1"] { background: rgba(226, 102, 52, 0.45); border-color: rgba(255, 150, 80, 0.7); }
+.ares[data-style="modern"] .toggle[data-on="1"]::after { left: 21px; }
+/* the base control paints its own knob/label — silence it under the new skin */
+.ares[data-style="modern"] .toggle > * { display: none; }
+
+/* ── diff cards ──────────────────────────────────────────────────────────── */
+
+.ares[data-style="modern"] .diffHead {
+  padding: 10px 15px;
+  border-bottom: 1px solid rgba(200, 155, 94, 0.13);
+  background: transparent;
+}
+.ares[data-style="modern"] .diffFiles { font: 400 12px/1.4 var(--mono); color: var(--gold-hi); }
+.ares[data-style="modern"] .diffBody { font: 400 12.5px/1.75 var(--mono); padding: 10px 0; }
+.ares[data-style="modern"] .diffBody .ctx,
+.ares[data-style="modern"] .diffBody .diffCtx { color: rgba(239, 227, 207, 0.42); }
+.ares[data-style="modern"] .diffBody .del,
+.ares[data-style="modern"] .diffBody .diffDel { background: rgba(201, 86, 74, 0.12); color: #e2a49c; }
+.ares[data-style="modern"] .diffBody .add,
+.ares[data-style="modern"] .diffBody .diffAdd { background: rgba(94, 194, 122, 0.1); color: var(--mint-text); }
+
+/* ── accent gallery (Appearance) ─────────────────────────────────────────── */
+
+.ares[data-style="modern"] .themeGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  gap: 14px;
+}
+.ares[data-style="modern"] .themeCard {
+  border-radius: 14px;
+  padding: 14px;
+  background: linear-gradient(180deg, #151212, #0a0908);
+  border: 1px solid rgba(200, 155, 94, 0.16);
+  transition: border-color 150ms ease;
+}
+.ares[data-style="modern"] .themeCard:hover { border-color: rgba(200, 155, 94, 0.42); }
+.ares[data-style="modern"] .themeCard[data-on="1"] { border-color: rgba(255, 150, 80, 0.7); }
+.ares[data-style="modern"] .themeSwatch { height: 44px; border-radius: 9px; border: none; }
+
+/* ── Usage pane ──────────────────────────────────────────────────────────── */
+
+.ares[data-style="modern"] .usageStats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 16px;
+  margin-bottom: 16px;
+}
+.ares[data-style="modern"] .usageCard { padding: 18px; }
+/* the design leads with a Cinzel micro-label and answers in a big Cinzel
+   numeral — the app's markup is <span>label</span><strong>value</strong>, so
+   order them explicitly rather than relying on source order. */
+.ares[data-style="modern"] .usageCard { display: flex; flex-direction: column; gap: 0; }
+.ares[data-style="modern"] .usageCard > span {
+  order: 1;
+  font: 600 9.5px/1 var(--display);
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: rgba(232, 200, 147, 0.5);
+}
+.ares[data-style="modern"] .usageCard > strong {
+  order: 2;
+  margin-top: 10px;
+  font: 600 27px/1.1 var(--display);
+  color: #f6ecda;
+}
+
+.ares[data-style="modern"] .usageTable {
+  border: 1px solid rgba(200, 155, 94, 0.16);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+  background: linear-gradient(180deg, #131110, #0b0a09);
+  padding: 4px 20px;
+}
+.ares[data-style="modern"] .usageRow {
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(200, 155, 94, 0.09);
+  font-size: 13px;
+  background: transparent;
+}
+.ares[data-style="modern"] .usageModel { font: 400 12px/1.3 var(--mono); color: var(--gold-hi); }
+.ares[data-style="modern"] .usageProv,
+.ares[data-style="modern"] .usageCalls,
+.ares[data-style="modern"] .usageTok { font: 400 11.5px/1 var(--mono); color: rgba(239, 227, 207, 0.55); }
+.ares[data-style="modern"] .usageCost { font: 400 11.5px/1 var(--mono); color: rgba(232, 200, 147, 0.8); }
+
+/* the daily bar chart — ember out, banked coals in */
+.ares[data-style="modern"] .usageChart {
+  border: 1px solid rgba(200, 155, 94, 0.16);
+  border-radius: var(--r-lg);
+  background: linear-gradient(180deg, #131110, #0b0a09);
+  padding: 22px;
+  gap: 10px;
+}
+.ares[data-style="modern"] .usageBar i,
+.ares[data-style="modern"] .usageBar span { border-radius: 4px 4px 0 0; }
+.ares[data-style="modern"] .usageBar > :first-child { background: linear-gradient(180deg, var(--ember-hi), var(--ember)); }
+.ares[data-style="modern"] .usageBar > :nth-child(2) { background: linear-gradient(180deg, #7a3a2a, #3c1d16); border-radius: 0 0 4px 4px; }
+
+/* ── Skills & tools ──────────────────────────────────────────────────────── */
+
+.ares[data-style="modern"] .skillRow,
+.ares[data-style="modern"] .toolRow,
+.ares[data-style="modern"] .engineRow {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 15px 0;
+  border-bottom: 1px solid rgba(200, 155, 94, 0.08);
+}
+.ares[data-style="modern"] .engineInfo strong,
+.ares[data-style="modern"] .skillRow strong {
+  font: 400 13.5px/1.3 var(--font);
+  font-weight: 500;
+  color: #f0e3cd;
+}
+.ares[data-style="modern"] .engineInfo span,
+.ares[data-style="modern"] .skillRow span {
+  font-size: 12px;
+  color: var(--faint);
+  line-height: 1.5;
+}
+.ares[data-style="modern"] .engineRow input[type="number"] {
+  padding: 7px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(200, 155, 94, 0.24);
+  background: rgba(0, 0, 0, 0.3);
+  font: 400 12px/1 var(--mono);
+  color: rgba(232, 200, 147, 0.9);
+}
+
+/* the segmented range/tab control the design uses in every header */
+.ares[data-style="modern"] .segment {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid rgba(200, 155, 94, 0.16);
+  border-radius: 10px;
+  background: transparent;
+}
+.ares[data-style="modern"] .segment button {
+  padding: 6px 14px;
+  border: none;
+  border-radius: 7px;
+  font: 400 11.5px/1 var(--mono);
+  color: rgba(239, 227, 207, 0.6);
+  background: transparent;
+}
+.ares[data-style="modern"] .segment button[data-on="1"] { background: rgba(200, 155, 94, 0.12); color: var(--gold-hi); }
+.ares[data-style="modern"] .usageHead { display: flex; align-items: center; gap: 16px; margin-bottom: 20px; }
+.ares[data-style="modern"] .usageHead .paneTitle { flex: 1; margin: 0; }
+.ares[data-style="modern"] .paneEmpty { color: var(--faint); font-size: 13px; }
+
+/* ── Artifacts (the vault) ───────────────────────────────────────────────── */
+
+/* The base sheet hides the composer on this view, but the modern `.composer`
+   rule matches with equal specificity and loads later — so it won re-display.
+   Restate the hide here. */
+.ares[data-style="modern"] .stage[data-view="artifacts"] > .composer { display: none; }
+
+.ares[data-style="modern"] .vault { padding: 32px 40px 40px; background: transparent; }
+
+/* the hero collapses into the design's one-line header */
+.ares[data-style="modern"] .vaultHero {
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 20px;
+  padding: 0;
+  border: none;
+  background: transparent;
+}
+.ares[data-style="modern"] .vaultEyebrow,
+.ares[data-style="modern"] .vaultHero p { display: none; }
+.ares[data-style="modern"] .vaultHero h2 {
+  margin: 0;
+  font: 600 25px/1.1 var(--display);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: #f3e6cf;
+}
+.ares[data-style="modern"] .vaultMetric {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  border: none;
+  background: transparent;
+  padding: 0;
+}
+.ares[data-style="modern"] .vaultMetric strong { font: 400 12px/1 var(--mono); color: var(--gold-hi); }
+.ares[data-style="modern"] .vaultMetric span { font-size: 12px; color: var(--faint); text-transform: lowercase; letter-spacing: 0; }
+
+/* search + the filter pill group */
+.ares[data-style="modern"] .vaultHead { gap: 14px; margin-bottom: 18px; border: none; padding: 0; }
+.ares[data-style="modern"] .vaultHead input {
+  border: 1px solid rgba(200, 155, 94, 0.16);
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.012);
+  padding: 9px 13px;
+  font-size: 13px;
+}
+.ares[data-style="modern"] .vaultHead input:focus { border-color: rgba(200, 155, 94, 0.42); outline: none; }
+.ares[data-style="modern"] .vaultHead nav {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid rgba(200, 155, 94, 0.16);
+  border-radius: 10px;
+}
+.ares[data-style="modern"] .vaultHead nav button {
+  padding: 6px 14px;
+  border: none;
+  border-radius: 7px;
+  font-size: 12px;
+  text-transform: capitalize;
+  color: rgba(239, 227, 207, 0.6);
+  background: transparent;
+}
+.ares[data-style="modern"] .vaultHead nav button[data-on="1"] {
+  background: rgba(200, 155, 94, 0.12);
+  color: var(--gold-hi);
+}
+.ares[data-style="modern"] .vaultHead nav button em {
+  font-style: normal;
+  margin-left: 5px;
+  font: 400 10.5px/1 var(--mono);
+  color: rgba(239, 227, 207, 0.35);
+}
+
+.ares[data-style="modern"] .vaultLabel {
+  font: 600 9.5px/1 var(--display);
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: rgba(232, 200, 147, 0.5);
+  margin: 22px 0 12px;
+}
+
+/* the card grid — an icon plate over a name and its provenance */
+.ares[data-style="modern"] .vaultGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(224px, 1fr));
+  gap: 16px;
+}
+.ares[data-style="modern"] .vaultCard {
+  margin: 0;
+  border: 1px solid rgba(200, 155, 94, 0.16);
+  border-radius: 14px;
+  overflow: hidden;
+  background: #0b0a09;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+.ares[data-style="modern"] .vaultCard:hover {
+  border-color: rgba(255, 150, 80, 0.45);
+  box-shadow: 0 0 30px rgba(255, 106, 48, 0.08);
+}
+.ares[data-style="modern"] .vaultCard img {
+  width: 100%;
+  height: 128px;
+  object-fit: cover;
+  display: block;
+  border-bottom: 1px solid rgba(200, 155, 94, 0.12);
+  background: linear-gradient(140deg, #181413, #0a0908);
+}
+.ares[data-style="modern"] .vaultCard figcaption { padding: 12px 14px; display: flex; flex-direction: column; gap: 3px; }
+.ares[data-style="modern"] .vaultCard figcaption strong {
+  font: 400 13px/1.3 var(--font);
+  color: rgba(240, 227, 205, 0.9);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ares[data-style="modern"] .vaultCard figcaption button {
+  font: 400 11px/1 var(--mono);
+  color: var(--faint);
+  text-align: left;
+  padding: 0;
+}
+.ares[data-style="modern"] .vaultCard figcaption button:hover { color: var(--gold-hi); }
+
+/* file + link rows share the card frame, one line each */
+.ares[data-style="modern"] .vaultTable {
+  border: 1px solid rgba(200, 155, 94, 0.16);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+  background: linear-gradient(180deg, #121010, #0a0908);
+}
+.ares[data-style="modern"] .vaultRow {
+  gap: 14px;
+  padding: 13px 18px;
+  border-bottom: 1px solid rgba(200, 155, 94, 0.08);
+  background: transparent;
+}
+.ares[data-style="modern"] .vaultRow:hover { background: rgba(200, 155, 94, 0.05); }
+.ares[data-style="modern"] .vaultName { font-size: 13.5px; color: rgba(240, 227, 205, 0.92); }
+.ares[data-style="modern"] .vaultLoc { font: 400 11.5px/1 var(--mono); color: var(--faint); }
+.ares[data-style="modern"] .vaultSession {
+  font: 400 10.5px/1 var(--mono);
+  color: rgba(232, 200, 147, 0.7);
+  padding: 3px 9px;
+  border: 1px solid rgba(200, 155, 94, 0.18);
+  border-radius: 999px;
+}
+.ares[data-style="modern"] .vaultEmpty { color: var(--faint); }
+.ares[data-style="modern"] .vaultEmpty strong { font: 600 15px/1.2 var(--display); letter-spacing: 0.1em; color: #f3e6cf; }
 
 /* ── boot ────────────────────────────────────────────────────────────────── */
 
@@ -979,6 +1521,22 @@
 @keyframes emberPulse { 0%, 100% { opacity: 0.45; } 50% { opacity: 1; } }
 @keyframes emberSweep { 0% { background-position: 0% 50%; } 100% { background-position: 200% 50%; } }
 @keyframes riseIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+@keyframes spinSlow { to { transform: rotate(360deg); } }
+
+/* ── responsive: desktop-first, but the shell must survive a narrow window ── */
+
+/* below 940px the rail steps aside; the titlebar toggle brings it back */
+@media (max-width: 940px) {
+  .ares[data-style="modern"]:not([data-rail="collapsed"]) { grid-template-columns: 0 minmax(0, 1fr); }
+  .ares[data-style="modern"]:not([data-rail="collapsed"]) .rail { transform: translateX(-100%); opacity: 0; pointer-events: none; }
+  .ares[data-style="modern"] .hm,
+  .ares[data-style="modern"] .vault { padding: 24px 20px 28px; }
+}
+/* below 1160px the forge panel yields the floor to the transcript */
+@media (max-width: 1160px) {
+  .ares[data-style="modern"][data-panel="1"] { grid-template-columns: 274px minmax(0, 1fr); }
+  .ares[data-style="modern"][data-panel="1"] .forge { display: none; }
+}
 
 @media (prefers-reduced-motion: reduce) {
   .ares[data-style="modern"] .composer::after,
