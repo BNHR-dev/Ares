@@ -82,6 +82,7 @@ export const OPENAI_MODELS: ModelOption[] = [
 
 export const ANTHROPIC_MODELS: ModelOption[] = [
   { id: "claude-fable-5", label: "Claude Fable 5", hint: "flagship — adaptive extended thinking", group: "Anthropic", capabilities: ["tools", "reasoning", "vision"] },
+  { id: "claude-opus-5", label: "Claude Opus 5", hint: "newest Opus — deepest reasoning", group: "Anthropic", capabilities: ["tools", "reasoning", "vision"] },
   { id: "claude-sonnet-5", label: "Claude Sonnet 5", hint: "frontier Sonnet — coding + agents", group: "Anthropic", capabilities: ["tools", "reasoning", "vision"] },
   { id: "claude-opus-4-8", label: "Claude Opus 4.8", hint: "deep reasoning workhorse — 1M context", group: "Anthropic", capabilities: ["tools", "reasoning", "vision"] },
   { id: "claude-opus-4-7", label: "Claude Opus 4.7", hint: "prior Opus — deep reasoning", group: "Anthropic", capabilities: ["tools", "reasoning", "vision"] },
@@ -205,11 +206,20 @@ export function useModelCatalog(provider: string, native: boolean) {
         return;
       }
       if (provider === "openai") {
+        // Same live-list pattern as anthropic: the daemon asks the signed-in
+        // ChatGPT/Codex account for the REAL model ids and we merge them in.
         setModels(OPENAI_MODELS);
+        requestDaemonCatalog();
         return;
       }
       if (provider === "anthropic") {
+        // Seed with the curated list, then ask the daemon for the LIVE model
+        // list (it queries the Anthropic models API with the stored key and
+        // falls back to its own static catalog when unauthed/offline). This
+        // branch used to return without asking — which meant a newly released
+        // model never appeared until someone hand-edited this file.
         setModels(ANTHROPIC_MODELS);
+        requestDaemonCatalog();
         return;
       }
       if (provider === "ares") {

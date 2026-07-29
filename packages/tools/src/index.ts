@@ -97,6 +97,7 @@ export { DeployTool, type DeployOutput } from "./Deploy.js";
 export { StripeTool, type StripeOutput } from "./Stripe.js";
 export { EmailTool, type EmailOutput } from "./Email.js";
 export { RequestUserActionTool, type RequestUserActionOutput } from "./RequestUserAction.js";
+export { SetUiEffectTool, type SetUiEffectOutput } from "./SetUiEffect.js";
 export { makeEnterPlanModeTool, makeExitPlanModeTool, type PlanModeState } from "./PlanMode.js";
 export { WeatherTool, getWeatherText, type WeatherOutput, type WeatherCondition, type WeatherForecast } from "./Weather.js";
 export { RemindTool, setRemindScheduler, type RemindOutput, type SchedulerLike } from "./Remind.js";
@@ -125,6 +126,7 @@ import { DeployTool } from "./Deploy.js";
 import { StripeTool } from "./Stripe.js";
 import { EmailTool } from "./Email.js";
 import { RequestUserActionTool } from "./RequestUserAction.js";
+import { SetUiEffectTool } from "./SetUiEffect.js";
 import { WeatherTool } from "./Weather.js";
 import { RemindTool } from "./Remind.js";
 import { ConnectTool } from "./Connect.js";
@@ -157,6 +159,7 @@ export const DEFAULT_TOOLS = process.platform === "win32"
       StripeTool,
       EmailTool,
       RequestUserActionTool,
+      SetUiEffectTool,
       WeatherTool,
       RemindTool,
       ConnectTool,
@@ -186,6 +189,7 @@ export const DEFAULT_TOOLS = process.platform === "win32"
       StripeTool,
       EmailTool,
       RequestUserActionTool,
+      SetUiEffectTool,
       WeatherTool,
       RemindTool,
       ConnectTool,

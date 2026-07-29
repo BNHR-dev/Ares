@@ -2081,29 +2081,69 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 /* right edge â€” tongues pointing left */
 .screenFlame .edge-right { top: 0; right: 0; height: var(--flame-edge); width: 100vh; transform-origin: 100% 0; transform: rotate(-90deg) translateY(calc(-1 * var(--flame-edge))); }
 
-/* â”€â”€ flame modes (status-bar toggle: immersive Â· clean Â· combat) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-   immersive = the default volumetric tongues above.
-   clean     = no tongues; just a soft ember rim that breathes, so the border
-               stops "bullying" the interface.
-   combat    = taller, hotter, more saturated tongues for full war-state. */
-.ares[data-flame="clean"] .screenFlame .fStrip { display: none; }
-.ares[data-flame="clean"] .screenFlame {
+/* ── EFFECTS (status-bar toggle: glow · minimal · off) ─────────────────────
+   Photosensitive-safe by construction. The old modes (immersive/combat flame
+   tongues, breathing rims, the per-action strikeFlash) oscillated luminance —
+   a real seizure trigger. Nothing in ANY mode flashes now:
+   glow    = a STATIC ember rim while working + slow ember drift. No tongues,
+             no breathing — the box-shadow is constant.
+   minimal = no rim, no embers, no veil; only the stageWork ring (smooth
+             rotation, constant luminance) says "working".
+   off     = the hard kill switch: nothing renders, nothing animates. */
+.ares[data-flame="glow"] .screenFlame .fStrip { display: none; }
+.ares[data-flame="glow"] .screenFlame {
   box-shadow: inset 0 0 64px -12px rgba(var(--ember-rgb), 0.26), inset 0 0 0 1px rgba(var(--ember-rgb), 0.10);
-  animation: rimBreathe 3.8s ease-in-out infinite;
+  animation: none;
 }
-@keyframes rimBreathe {
-  0%, 100% { box-shadow: inset 0 0 52px -16px rgba(var(--ember-rgb), 0.16), inset 0 0 0 1px rgba(var(--ember-rgb), 0.08); }
-  50% { box-shadow: inset 0 0 78px -8px rgba(var(--ember-rgb), 0.32), inset 0 0 0 1px rgba(var(--ember-rgb), 0.14); }
-}
-.ares[data-flame="combat"] .screenFlame { --flame-edge: 42px; filter: saturate(1.22) brightness(1.16); }
-/* off = nothing renders and nothing animates: no tongues, no rim, no embers,
-   no work glow. A hard visual kill switch so photosensitive users are never
-   exposed to the fire motion at all (mirrors html[data-perf="lite"]). */
+/* the ember particles keep their smooth upward drift but never the "roar"
+   speed-up; the veil and stage glow hold a constant opacity while working */
+.ares[data-flame="glow"] .embers { animation-duration: 34s !important; }
+.ares[data-flame="glow"][data-working="1"] .embers { opacity: 0.5; animation-duration: 26s !important; }
+.ares[data-flame="glow"][data-working="1"]::after { animation: none; }
+.ares[data-flame="glow"] .workGlow { animation: none !important; }
+.ares[data-flame="glow"] .workGlow::before { display: none; } /* the sweeping hot line */
+.ares[data-flame="minimal"] .screenFlame,
+.ares[data-flame="minimal"] .embers,
+.ares[data-flame="minimal"] .workGlow { display: none !important; animation: none !important; }
+.ares[data-flame="minimal"]::after { display: none; }
 .ares[data-flame="off"] .screenFlame,
 .ares[data-flame="off"] .embers,
 .ares[data-flame="off"] .workGlow { display: none !important; animation: none !important; }
+.ares[data-flame="off"]::after { display: none; }
+
+/* ── the stageWork ring — the one working animation ─────────────────────────
+   A conic ember arc rotating at --fx-period (default 2.8s ≈ 0.36Hz, far under
+   any flash threshold; luminance is constant, only ANGLE changes). Ares can
+   retint/pace it via SetUiEffect: --fx-hue rotates the palette, --fx-period
+   slows or quickens the sweep. */
+.stageWork {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  margin-left: auto;
+  max-width: 40%;
+  filter: hue-rotate(var(--fx-hue, 0deg));
+}
+.stageWork em {
+  font: 500 11px/1.3 var(--mono);
+  font-style: normal;
+  color: var(--ember-hi);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stageWorkRing {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  border-radius: 50%;
+  background: conic-gradient(from 0deg, transparent 0 40%, rgba(var(--ember-rgb), 0.9) 78%, var(--ember-hi) 100%);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px));
+  animation: spin360 var(--fx-period, 2.8s) linear infinite;
+}
 @media (prefers-reduced-motion: reduce) {
-  .ares[data-flame="clean"] .screenFlame { animation: none; }
+  .stageWorkRing { animation: none; }
 }
 @keyframes flameLick {
   from { transform: scaleY(0.9) translateY(1px); }

@@ -221,6 +221,13 @@
 
 .ares[data-style="modern"] { grid-template-columns: 274px minmax(0, 1fr); }
 .ares[data-style="modern"][data-panel="1"] { grid-template-columns: 274px minmax(0, 1fr) minmax(0, var(--forge-w, 480px)); }
+/* Collapsed states must be RE-declared: the base sheet's [data-rail="collapsed"]
+   rules tie with the two above on specificity, and this file loads later — so
+   without these, collapsing slid the rail away but left its 274px column as a
+   dead gutter (the "collapse kind of breaks it" bug). */
+.ares[data-style="modern"][data-rail="collapsed"] { grid-template-columns: 0 minmax(0, 1fr); }
+.ares[data-style="modern"][data-panel="1"][data-rail="collapsed"] { grid-template-columns: 0 minmax(0, 1fr) minmax(0, var(--forge-w, 480px)); }
+.ares[data-style="modern"][data-rail="collapsed"] .rail { padding: 0; border: 0; }
 
 .ares[data-style="modern"] .rail {
   padding: 16px 12px 0;

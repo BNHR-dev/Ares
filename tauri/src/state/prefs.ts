@@ -21,10 +21,17 @@ export interface Prefs {
   routingMode: "manual" | "auto";
   /** Tool-call rendering: product = concise summaries; technical = raw input/output. */
   toolDisplay: "product" | "technical";
-  /** Screen flame border intensity while working — immersive (default tongues),
-   *  clean (no border, just a soft ember rim), combat (hotter, taller), or
-   *  off (no flame, no embers, no glow — safe for photosensitive users). */
-  flameMode: "immersive" | "clean" | "combat" | "off";
+  /** Working-state EFFECTS. Photosensitive-safe by design: nothing flashes,
+   *  nothing strobes. "glow" = a STATIC ember rim + slow ember drift while
+   *  working; "minimal" = only the small header indicator; "off" = nothing.
+   *  (Key name kept as flameMode for stored-prefs compatibility; old values
+   *  immersive/combat→glow and clean→minimal migrate on load.) */
+  flameMode: "glow" | "minimal" | "off";
+  /** Agent-tunable effect accent — Ares sets this via its SetUiEffect tool
+   *  when the owner asks for a different working animation ("make it blue",
+   *  "calmer"). hue rotates the ember palette of the glow + header ring;
+   *  speed paces the ring; label is a short caption shown while working. */
+  uiEffect?: { hue?: number; speed?: "calm" | "steady" | "brisk"; label?: string };
   /** Pinned session ids (shown in their own rail section). */
   pinned: string[];
   /** Accent theme for the desktop chrome. */
@@ -95,7 +102,7 @@ export function loadPrefs(): Prefs {
     routing: {},
     routingMode: "manual",
     toolDisplay: "product",
-    flameMode: IS_LINUX ? "clean" : "immersive",
+    flameMode: IS_LINUX ? "minimal" : "glow",
     pinned: [],
     theme: "rage",
     uiStyle: "modern",
@@ -121,7 +128,24 @@ export function loadPrefs(): Prefs {
       // only when the user explicitly toggled it (which saves routingMode).
       routingMode: raw.routingMode === "auto" ? "auto" : "manual",
       toolDisplay: raw.toolDisplay === "technical" ? "technical" : "product",
-      flameMode: raw.flameMode === "clean" || raw.flameMode === "combat" || raw.flameMode === "immersive" || raw.flameMode === "off" ? raw.flameMode : fallback.flameMode,
+      // Effects migration: the old strobing modes map onto their safe
+      // equivalents — immersive/combat carried the glow, clean was quiet.
+      flameMode:
+        raw.flameMode === "glow" || raw.flameMode === "minimal" || raw.flameMode === "off"
+          ? raw.flameMode
+          : raw.flameMode === "clean"
+            ? "minimal"
+            : raw.flameMode === "immersive" || raw.flameMode === "combat"
+              ? "glow"
+              : fallback.flameMode,
+      uiEffect:
+        raw.uiEffect && typeof raw.uiEffect === "object"
+          ? {
+              hue: typeof raw.uiEffect.hue === "number" && Number.isFinite(raw.uiEffect.hue) ? ((raw.uiEffect.hue % 360) + 360) % 360 : undefined,
+              speed: raw.uiEffect.speed === "calm" || raw.uiEffect.speed === "brisk" ? raw.uiEffect.speed : "steady",
+              label: typeof raw.uiEffect.label === "string" ? raw.uiEffect.label.slice(0, 24) : undefined,
+            }
+          : undefined,
       pinned: Array.isArray(raw.pinned) ? raw.pinned.filter((p): p is string => typeof p === "string") : [],
       theme: themeOk ? (raw.theme as ThemeName) : "rage",
       // Glass-revamp migration: pre-V2 saves stored "new" as the mere DEFAULT,

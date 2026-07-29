@@ -344,7 +344,8 @@ function App() {
     setGatewayToasts((t) => [...t, { id, text }]);
     setTimeout(() => setGatewayToasts((t) => t.filter((x) => x.id !== id)), 6500);
   }, []);
-  const [strike, setStrike] = useState(0);
+  // (the old strikeFlash counter is gone — a full-screen flash per agent
+  // action was a photosensitive hazard; see the Effects overhaul)
   // The embedded live browser: latest JPEG frame Ares streamed while driving its
   // own browser (cursor, clicks, navigation) — shown in the Forge "Live" tab.
   const [liveBrowser, setLiveBrowser] = useState<{ frame: string; at: number } | null>(null);
@@ -1442,6 +1443,20 @@ function App() {
         })();
         return;
       }
+      // Ares restyling its own working effect: the SetUiEffect tool's whole
+      // implementation is this hook — the daemon-side tool just validates and
+      // returns ok, and the UI applies + persists the accent when the call
+      // streams through. Clamped hard so a wild model can't strobe anything:
+      // hue is a palette rotation, speed picks among three slow ring periods.
+      if (buffered.event.type === "tool_start" && buffered.event.name === "SetUiEffect") {
+        const raw = (buffered.event.input ?? {}) as { hue?: unknown; speed?: unknown; label?: unknown };
+        const hue = typeof raw.hue === "number" && Number.isFinite(raw.hue) ? ((Math.round(raw.hue) % 360) + 360) % 360 : undefined;
+        const speed = raw.speed === "calm" || raw.speed === "brisk" || raw.speed === "steady" ? raw.speed : undefined;
+        const label = typeof raw.label === "string" && raw.label.trim() ? raw.label.trim().slice(0, 24) : undefined;
+        const p: Prefs = { ...prefsRef.current, uiEffect: { ...prefsRef.current.uiEffect, hue, speed: speed ?? prefsRef.current.uiEffect?.speed ?? "steady", label } };
+        setPrefs(p);
+        savePrefs(p);
+      }
       const fold = (s: SessionVm) => {
         const next = foldEvent(s, buffered.event);
         if (next.title === "New session") {
@@ -1781,9 +1796,9 @@ function App() {
     });
   };
 
-  const FLAME_MODES: Prefs["flameMode"][] = ["immersive", "clean", "combat", "off"];
+  const EFFECT_MODES: Prefs["flameMode"][] = ["glow", "minimal", "off"];
   const cycleFlame = () => {
-    const next = FLAME_MODES[(FLAME_MODES.indexOf(prefs.flameMode) + 1) % FLAME_MODES.length];
+    const next = EFFECT_MODES[(EFFECT_MODES.indexOf(prefs.flameMode) + 1) % EFFECT_MODES.length];
     const p = { ...prefs, flameMode: next };
     setPrefs(p);
     savePrefs(p);
@@ -2200,7 +2215,7 @@ function App() {
   // activity ticker so it fires once per tool, decoupled from event internals.
   const activity = active?.activity;
   useEffect(() => {
-    if (active?.busy && activity) setStrike((n) => n + 1);
+    // no-op: action strikes no longer flash the screen
   }, [activity]);
 
   // In pill mode presence belongs to the DESKTOP, not inside the controller.
@@ -2269,7 +2284,16 @@ function App() {
       data-working={active?.busy ? "1" : "0"}
       data-pill={pill ? "1" : "0"}
       data-ultra={prefs.ultra ? "1" : "0"}
-      style={{ ["--forge-w" as string]: `${forgeWidth}px`, ["--heat" as string]: heat.toFixed(3), ["--draft" as string]: draft.toFixed(3) }}
+      style={{
+        ["--forge-w" as string]: `${forgeWidth}px`,
+        ["--heat" as string]: heat.toFixed(3),
+        ["--draft" as string]: draft.toFixed(3),
+        // agent-set effect accent: rotates the ember palette of the glow +
+        // header ring; pace maps to the ring's rotation period (all smooth
+        // rotation/drift — never opacity flashing)
+        ["--fx-hue" as string]: `${prefs.uiEffect?.hue ?? 0}deg`,
+        ["--fx-period" as string]: prefs.uiEffect?.speed === "calm" ? "4.6s" : prefs.uiEffect?.speed === "brisk" ? "1.6s" : "2.8s",
+      }}
     >
       <AresSigils />
       {pill ? (
@@ -2366,7 +2390,9 @@ function App() {
       <div className="workGlow" aria-hidden="true" />
       <ScreenFlame />
       {prefs.ultra ? <HackerRain active={active?.busy ?? false} /> : null}
-      {strike > 0 ? <div className="strikeFlash" key={strike} aria-hidden="true" /> : null}
+      {/* strikeFlash intentionally NOT rendered: a 480ms full-screen flash on
+          every agent action is a photosensitive-seizure hazard. Working state
+          is carried by the static glow + the header indicator instead. */}
       {/* Turbulence filter that makes the composer's flame rim actually lick + flicker. */}
       <svg width="0" height="0" style={{ position: "absolute" }} aria-hidden="true">
         <defs>
@@ -2651,6 +2677,16 @@ function App() {
               {prefs.routingMode === "auto" && routedLanes.length > 0 ? ` · ${routedLanes.length} lane${routedLanes.length === 1 ? "" : "s"}` : ""}
             </span>
           </div>
+          {/* THE working signal — a small, contained, smoothly rotating ring
+              beside the session title. Rotation only: luminance never flashes,
+              so it is photosensitive-safe in every effects mode except "off".
+              Ares can recolor/pace it via SetUiEffect (--fx-hue/--fx-period). */}
+          {active?.busy && prefs.flameMode !== "off" ? (
+            <span className="stageWork" title={active.activity ?? "working"}>
+              <i className="stageWorkRing" aria-hidden="true" />
+              <em>{prefs.uiEffect?.label ?? active.activity ?? "working"}</em>
+            </span>
+          ) : null}
         </header>
 
         {view === "helm" ? (
@@ -2774,8 +2810,8 @@ function App() {
                 <i className="dot" data-state="running" /><b>missions</b><span>{opStatus.activeCount}</span>
               </button>
             ) : null}
-            <button className="statusSeg" onClick={cycleFlame} title="screen flame border — immersive / clean / combat / off (off disables all flame and ember motion)">
-              <b>flame</b><span>{prefs.flameMode}</span>
+            <button className="statusSeg" onClick={cycleFlame} title="working-state effects — glow (static ember rim) / minimal (header indicator only) / off. Nothing flashes in any mode.">
+              <b>effects</b><span>{prefs.flameMode}</span>
             </button>
           </div>
           <span className="grow" />
