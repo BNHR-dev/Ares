@@ -485,6 +485,11 @@
   background: transparent;
   border-bottom: 1px solid var(--line);
 }
+/* The stage's own reveal chevron is redundant now that the sidebar toggle
+   lives in the titlebar and the rail's auto-hide bug is gone — two controls
+   for one panel, one of which appeared and vanished. The titlebar one wins
+   because it is always present, in a fixed place. */
+.ares[data-style="modern"] .railReveal { display: none; }
 
 /* ── the sanctum (empty state) ───────────────────────────────────────────── */
 
@@ -1060,18 +1065,27 @@
    left of centre even with justify-content:center */
 .ares[data-style="modern"] .statusBar .grow { display: none; }
 /* The capsule must stay CENTRED, so it can never be allowed to outgrow its
-   column — an overflowing capsule reads as "off-centre" even though it is
-   technically centred. Shed the least-useful ink first: the labels, then the
-   two segments whose state is already obvious elsewhere. */
-@container (max-width: 1080px) {
+   column — an overflowing capsule reads as "off-centre" even when it is
+   technically centred. Shed the least-useful ink first: the labels, then
+   segments whose state is visible elsewhere.
+
+   Shedding order is by data-seg, most expendable first: effects → route →
+   perms → effort. The model and Garrison chips are the last to go, because
+   "which model am I talking to" is the whole point of the readout. */
+@container (max-width: 940px) {
   .ares[data-style="modern"] .statusBar .statusSeg b { display: none; }
 }
-@container (max-width: 860px) {
-  .ares[data-style="modern"] .statusBar .statusSeg[title*="routing"],
-  .ares[data-style="modern"] .statusBar .statusSeg[title*="effects"] { display: none; }
+@container (max-width: 760px) {
+  .ares[data-style="modern"] .statusBar .statusSeg[data-seg="effects"] { display: none; }
 }
-@container (max-width: 700px) {
-  .ares[data-style="modern"] .statusBar .statusSeg[title*="reasoning"] { display: none; }
+@container (max-width: 660px) {
+  .ares[data-style="modern"] .statusBar .statusSeg[data-seg="route"] { display: none; }
+}
+@container (max-width: 560px) {
+  .ares[data-style="modern"] .statusBar .statusSeg[data-seg="perms"] { display: none; }
+}
+@container (max-width: 470px) {
+  .ares[data-style="modern"] .statusBar .statusSeg[data-seg="effort"] { display: none; }
 }
 .ares[data-style="modern"] .statusSeg {
   display: flex;

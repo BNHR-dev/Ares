@@ -2806,16 +2806,21 @@ function App() {
 
         <footer className="statusBar">
           <div className="statusGroup">
-            <button className="statusSeg" onClick={() => setGarrisonOpen(true)} title="Garrison panel — status, log, restart">
+            {/* data-seg drives the responsive shedding order in modern.css.
+                It used to key off these buttons' `title` text, which broke the
+                moment a title changed with state: in auto-routing the MODEL
+                segment's title contains the word "routing", so the rule meant
+                to hide the route chip hid the model instead. */}
+            <button className="statusSeg" data-seg="garrison" onClick={() => setGarrisonOpen(true)} title="Garrison panel — status, log, restart">
               <i className="dot" data-state={daemon} /><b>garrison</b><span>{daemon}</span>
             </button>
-            <button className="statusSeg" onClick={() => setModelPopOpen(true)} title={prefs.routingMode === "auto" ? "auto-routing — model that handled the last turn" : "switch provider / model"}>
+            <button className="statusSeg" data-seg="model" onClick={() => setModelPopOpen(true)} title={prefs.routingMode === "auto" ? "auto-routing — model that handled the last turn" : "switch provider / model"}>
               <b>model</b><span>{liveModel}</span>
             </button>
-            <button className="statusSeg effortStatus" onClick={() => setReasoningOpen(true)} title="Set the active model's native reasoning effort">
+            <button className="statusSeg effortStatus" data-seg="effort" onClick={() => setReasoningOpen(true)} title="Set the active model's native reasoning effort">
               <b>effort</b><span>{EFFORT_META[effectiveEffort(prefs.provider, prefs.model, prefs.reasoning)].label.toLowerCase()}</span>
             </button>
-            <button className="statusSeg" onClick={() => setRoutingOpen(true)} title="per-lane model routing">
+            <button className="statusSeg" data-seg="route" onClick={() => setRoutingOpen(true)} title="per-lane model routing">
               <b>route</b><span>{prefs.routingMode === "auto" ? `auto · ${routedLanes.length}` : routedLanes.length > 0 ? `ready · ${routedLanes.length}` : "off"}</span>
             </button>
             {opStatus?.activeCount ? (
@@ -2838,6 +2843,7 @@ function App() {
                 never be mistaken for the guarded default. */}
             <button
               className="statusSeg permSeg"
+              data-seg="perms"
               data-yolo={permissions.mode === "free" ? "1" : "0"}
               onClick={() => {
                 const next: PermSettings = permissions.mode === "free"
@@ -2854,7 +2860,7 @@ function App() {
             >
               <b>perms</b><span>{permissions.mode === "free" ? "YOLO" : "guarded"}</span>
             </button>
-            <button className="statusSeg" onClick={cycleFlame} title="working-state effects — glow (static ember rim) / minimal (header indicator only) / off. Nothing flashes in any mode.">
+            <button className="statusSeg" data-seg="effects" onClick={cycleFlame} title="working-state effects — glow (static ember rim) / minimal (header indicator only) / off. Nothing flashes in any mode.">
               <b>effects</b><span>{prefs.flameMode}</span>
             </button>
           </div>
