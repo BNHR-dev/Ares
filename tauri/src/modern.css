@@ -72,6 +72,18 @@
   --coin: radial-gradient(120% 120% at 34% 24%, #1b1817, #0a0908);
   --coin-ember: radial-gradient(120% 120% at 34% 24%, #241d19, #0b0a09);
 
+  /* ── the glass ────────────────────────────────────────────────────────
+     Panels are lenses, not paint: a warm translucency that lets the room and
+     the helm behind them bleed through, a heavy blur so text stays readable
+     over it, and a bright specular hairline along the top edge where the
+     light catches. The blur is what makes it read as glass rather than a
+     flat tinted card — without it this is just a lighter rectangle. */
+  --glass-fill: linear-gradient(180deg, rgba(255, 244, 232, 0.075), rgba(255, 240, 226, 0.028));
+  --glass-edge: rgba(255, 238, 220, 0.14);
+  --glass-spec: inset 0 1px 0 rgba(255, 245, 232, 0.16);
+  --glass-blur: blur(30px) saturate(150%);
+  --glass-lift: 0 10px 32px -12px rgba(0, 0, 0, 0.6);
+
   font-family: var(--font);
   color: var(--text);
   background: var(--bg);
@@ -220,6 +232,7 @@
 .ares[data-style="modern"] .railBrand {
   display: block;
   flex: none;
+  pointer-events: none; /* decorative — never steal the collapse click */
   text-align: center;
   padding: 8px 0 18px;
   font: 600 21px/1 var(--display);
@@ -232,6 +245,12 @@
   order: -1;
   align-self: flex-end;
   margin-bottom: -26px; /* float it over the wordmark row */
+  /* the wordmark is pulled up over this button by that negative margin and,
+     being later in the DOM, was painting on top and swallowing every click.
+     Lift the button above it; the wordmark is decorative, so it stops taking
+     pointer events entirely (see .railBrand). */
+  position: relative;
+  z-index: 2;
   font: 500 9px/1 var(--mono);
   letter-spacing: 0.1em;
   color: rgba(232, 200, 147, 0.4);
@@ -536,7 +555,22 @@
   line-height: 1.6;
   box-shadow: none;
 }
-.ares[data-style="modern"] .turn.assistant { font-size: 14.5px; line-height: 1.75; color: rgba(240, 229, 210, 0.93); }
+/* the agent answers from the gutter: helm coin, then the content column */
+.ares[data-style="modern"] .turn.assistant {
+  display: flex;
+  gap: 14px;
+  font-size: 14.5px;
+  line-height: 1.75;
+  color: rgba(240, 229, 210, 0.93);
+}
+.ares[data-style="modern"] .turn.assistant .turnMark { margin-top: 2px; }
+.ares[data-style="modern"] .turn.assistant .turnBody {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
 
 /* thinking reads as a margin note, not a card */
 .ares[data-style="modern"] .thought,
@@ -983,6 +1017,89 @@
 }
 .ares[data-style="modern"] .displayModes button strong { color: var(--gold-hi); font-weight: 600; }
 .ares[data-style="modern"] .displayModes button span { color: var(--faint); }
+
+/* ── the glass, applied ──────────────────────────────────────────────────── */
+
+/* Every panel in the app is one material. Declared in a single place so the
+   card frame, the HELM tiles, the vault tiles and the settings tiles can
+   never drift apart again. */
+.ares[data-style="modern"] .toolCard,
+.ares[data-style="modern"] .notice,
+.ares[data-style="modern"] .authPrompt,
+.ares[data-style="modern"] .artifact,
+.ares[data-style="modern"] .permissionCard,
+.ares[data-style="modern"] .diffCard,
+.ares[data-style="modern"] .hmStat,
+.ares[data-style="modern"] .hmPanel,
+.ares[data-style="modern"] .vaultCard,
+.ares[data-style="modern"] .vaultTable,
+.ares[data-style="modern"] .usageCard,
+.ares[data-style="modern"] .usageTable,
+.ares[data-style="modern"] .usageChart,
+.ares[data-style="modern"] .themeCard,
+.ares[data-style="modern"] .displayModes button,
+.ares[data-style="modern"] .settingsModelCard,
+.ares[data-style="modern"] .livingLaunchCard {
+  background: var(--glass-fill);
+  border: 1px solid var(--glass-edge);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-spec), var(--glass-lift);
+}
+
+/* the two that must stay legible over a scrolling transcript get a touch more
+   body so long code blocks never swim */
+.ares[data-style="modern"] .toolCard,
+.ares[data-style="modern"] .diffCard {
+  background: linear-gradient(180deg, rgba(255, 244, 232, 0.06), rgba(10, 8, 7, 0.5));
+}
+
+/* hover: the lens catches more light and the ember rim wakes up */
+.ares[data-style="modern"] .vaultCard:hover,
+.ares[data-style="modern"] .themeCard:hover,
+.ares[data-style="modern"] .toolCard:hover {
+  border-color: rgba(255, 150, 80, 0.45);
+  box-shadow: var(--glass-spec), var(--glass-lift), 0 0 30px rgba(255, 106, 48, 0.08);
+}
+
+/* the big floating surfaces are the same lens, thicker */
+.ares[data-style="modern"] .rail,
+.ares[data-style="modern"] .forge {
+  background: linear-gradient(180deg, rgba(255, 244, 232, 0.055), rgba(9, 8, 7, 0.72));
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-spec);
+}
+.ares[data-style="modern"] .titlebar,
+.ares[data-style="modern"] .statusBar {
+  background: linear-gradient(180deg, rgba(255, 244, 232, 0.05), rgba(10, 9, 8, 0.66));
+  -webkit-backdrop-filter: blur(24px) saturate(140%);
+  backdrop-filter: blur(24px) saturate(140%);
+  box-shadow: var(--glass-spec);
+}
+
+/* WebKitGTK composites backdrop-filter on the CPU — strip the blur there and
+   fall back to an opaque tint so Linux does not turn into a slideshow. */
+html[data-perf="lite"] .ares[data-style="modern"] .toolCard,
+html[data-perf="lite"] .ares[data-style="modern"] .notice,
+html[data-perf="lite"] .ares[data-style="modern"] .diffCard,
+html[data-perf="lite"] .ares[data-style="modern"] .hmStat,
+html[data-perf="lite"] .ares[data-style="modern"] .hmPanel,
+html[data-perf="lite"] .ares[data-style="modern"] .vaultCard,
+html[data-perf="lite"] .ares[data-style="modern"] .vaultTable,
+html[data-perf="lite"] .ares[data-style="modern"] .usageCard,
+html[data-perf="lite"] .ares[data-style="modern"] .usageTable,
+html[data-perf="lite"] .ares[data-style="modern"] .usageChart,
+html[data-perf="lite"] .ares[data-style="modern"] .themeCard,
+html[data-perf="lite"] .ares[data-style="modern"] .displayModes button,
+html[data-perf="lite"] .ares[data-style="modern"] .rail,
+html[data-perf="lite"] .ares[data-style="modern"] .forge,
+html[data-perf="lite"] .ares[data-style="modern"] .titlebar,
+html[data-perf="lite"] .ares[data-style="modern"] .statusBar {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  background: linear-gradient(180deg, #131110, #0b0a09);
+}
 
 /* ── HELM (modern) ───────────────────────────────────────────────────────── */
 

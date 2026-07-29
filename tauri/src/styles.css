@@ -635,6 +635,10 @@ a:hover { border-bottom-color: var(--bronze-hi); }
 .ares:not([data-style="modern"]) .medallion,
 .ares:not([data-style="modern"]) .railBrand,
 .ares:not([data-style="modern"]) .titleTools { display: none; }
+/* The agent turn gained a body wrapper for the modern skin's medallion gutter.
+   `display:contents` makes it vanish from layout everywhere else, so Forged
+   and Legacy see the exact box tree they saw before. */
+.ares:not([data-style="modern"]) .turnBody { display: contents; }
 
 /* Modern-skin-only markup (medallion icons, rail wordmark, titlebar tools):
    rendered unconditionally for simplicity, INVISIBLE outside data-style="modern"
@@ -3034,7 +3038,13 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .routingHead .popClose { flex: none; padding: 6px 12px; font-size: 11px; }
 /* min-height:0 is REQUIRED for a flex child to actually scroll â€” without it the
    body grows to content height and the modal clips it with no scrollbar. */
-.routingPopBody { overflow-y: auto; min-height: 0; flex: 1; padding: 12px 14px; display: grid; gap: 10px; align-content: start; }
+/* grid-auto-rows:min-content is load-bearing. Without it the auto rows get
+   compressed to share the body's definite height, so every EXPANDED lane was
+   squeezed to ~91px while its content needed ~450 — and `.routeLane`'s
+   overflow:hidden silently guillotined the model list mid-row. With rows
+   sized to their content the body simply scrolls, which is what it was
+   already set up to do. */
+.routingPopBody { overflow-y: auto; min-height: 0; flex: 1; padding: 12px 14px; display: grid; gap: 10px; align-content: start; grid-auto-rows: min-content; }
 .routingPopFoot { padding: 14px 18px; border-top: 1px solid var(--line); flex: none; }
 .routingPopFoot .primary { width: 100%; height: 42px; font-size: 13px; letter-spacing: 0.04em; }
 
@@ -4189,6 +4199,10 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .gwFree { font-style: normal; font-size: 10px; font-weight: 700; color: var(--steel, #7fa6a3); }
 
 /* ARES brand dropdown â€” the account lives one click from the wordmark */
+/* `.titlebar .brand` sets pointer-events:none so the wordmark never blocks the
+   window drag — but it out-specifies `.brandBtn` (0,2,0 vs 0,1,0), which left
+   the account button unclickable in EVERY skin. Restore it for the button. */
+.titlebar .brand.brandBtn { pointer-events: auto; }
 .brandBtn { cursor: pointer; background: none; border: none; padding: 0 8px 0 0; border-radius: 8px; transition: background 160ms; position: relative; }
 .brandBtn:hover, .brandBtn[data-open="1"] { background: color-mix(in srgb, var(--ember, #e08b2e) 10%, transparent); }
 .brandCredits { font-style: normal; font-weight: 800; font-size: 12px; color: var(--ember, #e08b2e); margin-left: 8px; padding: 2px 8px; border: 1px solid color-mix(in srgb, var(--ember, #e08b2e) 55%, transparent); border-radius: 999px; }

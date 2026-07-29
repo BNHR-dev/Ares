@@ -5705,6 +5705,10 @@ const ItemView = React.memo(function ItemView({
   if (item.kind === "assistant") {
     return (
       <div className="turn assistant" data-streaming={item.streaming ? "1" : "0"} data-proactive={item.proactive ? "1" : "0"}>
+        {/* modern skin: the agent speaks from behind the helm, struck into the
+            left gutter. Hidden in Forged/Legacy like every other medallion. */}
+        <Medallion glyph="helm" size={34} className="turnMark" />
+        <div className="turnBody">
         {item.proactive ? (
           <div className="watchBadge" title="Ares noticed this on your screen — unprompted">
             <span aria-hidden="true">👁</span> watching
@@ -5719,6 +5723,7 @@ const ItemView = React.memo(function ItemView({
         ) : null}
         {item.thinking ? <ThinkingView text={item.thinking} /> : null}
         {item.text ? <RichContent text={item.text} /> : null}
+        </div>
       </div>
     );
   }
