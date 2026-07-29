@@ -71,8 +71,10 @@ function makeEngine(provider, tools, extraCfg = {}) {
 // ── 1. gate fires and blocks "verified" ──────────────────────────────────────
 
 test("GUI gate: touched .tscn without a screenshot pushes once, then surfaces GUI-UNVERIFIED", async () => {
+  // ComputerUse is IN the belt (the gate only demands screenshots it can take)
+  // — the model just never calls it.
   const provider = scriptedProvider([{ name: "Edit", input: { file_path: "Main.tscn" } }]);
-  const events = await collect(makeEngine(provider, [sceneEditTool]));
+  const events = await collect(makeEngine(provider, [sceneEditTool, computerUseTool]));
 
   const pushes = events.filter((e) => e.type === "system_reminder_injected" && /WINDOWED app artifact/.test(e.text));
   assert.equal(pushes.length, 1, "the launch-and-screenshot push fires exactly once");
@@ -83,6 +85,20 @@ test("GUI gate: touched .tscn without a screenshot pushes once, then surfaces GU
 
   const end = events.findLast((e) => e.type === "turn_end");
   assert.equal(end.workStatus, "unverified", "GUI work without visual proof can never end verified");
+});
+
+test("GUI gate: with NO screenshot-capable tool in the belt, skips the dead order and surfaces GUI-UNVERIFIED directly", async () => {
+  const provider = scriptedProvider([{ name: "Edit", input: { file_path: "Main.tscn" } }]);
+  const events = await collect(makeEngine(provider, [sceneEditTool]));
+  assert.ok(
+    !events.some((e) => e.type === "system_reminder_injected" && /WINDOWED app artifact/.test(e.text)),
+    "no futile screenshot demand when no tool can take one",
+  );
+  assert.ok(
+    events.some((e) => e.type === "system_reminder_injected" && /^GUI-UNVERIFIED at turn end/.test(e.text)),
+    "still discloses honestly",
+  );
+  assert.equal(events.findLast((e) => e.type === "turn_end").workStatus, "unverified");
 });
 
 // ── 2. screenshot after the mutation satisfies the gate ─────────────────────

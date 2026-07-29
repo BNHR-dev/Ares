@@ -332,6 +332,12 @@ export function selectToolsForTurn(tools: readonly EngineTool[], messages: reado
   for (const message of messages.slice(-8)) {
     for (const block of message.content) {
       if (block.type === "tool_use" && typeof block.name === "string") wanted.add(block.name.toLowerCase());
+      // The GUI ground-truth gate just demanded a screenshot: the screenshot
+      // tools MUST be advertised or the model is ordered to use a tool it
+      // cannot see (unknown-tool loop instead of compliance).
+      if (block.type === "system_reminder" && /WINDOWED app artifact|GUI-UNVERIFIED/.test(block.text ?? "")) {
+        add("computeruse", "browser");
+      }
     }
   }
   const selected = tools.filter((tool) => wanted.has(tool.schema.name.toLowerCase()));
@@ -1789,7 +1795,11 @@ export class QueryEngine {
           guiNeedsVisualProof() &&
           !this.liveSignal().aborted
         ) {
-          if (!guiGateFired) {
+          // Without a screenshot-capable tool in the belt (headless workers,
+          // non-Windows builds) demanding one is a dead order — skip straight
+          // to the honest GUI-UNVERIFIED disclosure instead.
+          const hasVisualTool = this.cfg.tools.some((t) => /^(?:computeruse|browser)$/i.test(t.schema.name));
+          if (!guiGateFired && hasVisualTool) {
             guiGateFired = true;
             const what = [...guiSignals].slice(0, 4).join(", ");
             const text = `This task produced a WINDOWED app artifact (${what}), and there is no screenshot of the running app newer than your last change. Headless boots and unit tests do not prove the UI renders — an app can pass every logic test and still open to a broken/grey screen. Launch the actual app (windowed, NOT --headless), capture a real screenshot (ComputerUse {action:"screenshot"}, or the Browser screenshot action for web UIs), look at it, and confirm what is on screen matches what you claim. If you cannot open a window in this environment, say so plainly instead of claiming the UI works.`;
