@@ -31,7 +31,7 @@ import { fileURLToPath } from "node:url";
 import { cleanCommandId } from "./permissions.js";
 import { aresGatewayBase, daemonModelCatalog, fetchAresGatewayMe, fetchCustomOpenAiModels, postAresGatewayReport, preflightProviderSelection, providerFamilyForSelection, selectProvider, type ProviderSelection } from "./providers.js";
 import { ParsedArgs, cliVersion } from "./runtime.js";
-import { LiveSession, chatContextBudget, createSession, createSessionWithSelection, handleReasoningCommand, isProviderFatalError, makeSpanSummarizer, modelLikelyHasVision, pickHealthyFallback, pickVisionFallback, resolveReasoningLevel } from "./sessionFactory.js";
+import { LiveSession, chatContextBudget, createSession, createSessionWithSelection, handleReasoningCommand, isProviderFatalError, makeSpanSummarizer, modelLikelyHasVision, pickCapacitySibling, pickHealthyFallback, pickVisionFallback, resolveReasoningLevel } from "./sessionFactory.js";
 import { startGatewayMirror } from "./telegramWiring.js";
 import { contentFromUserInput, undoLines } from "./terminalLines.js";
 import { buildSystemPrompt, disposeLiveSession, finishTurn, gatherGitRunFacts, mindSessionEnded, prepareUserTurn } from "./turnPipeline.js";
@@ -1828,15 +1828,24 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
               markProviderDead(providerFamilyForSelection(entry.live.selection));
             }
             const routingMode = (await loadUiSettings().catch(() => ({ routingMode: "manual" as const }))).routingMode;
-            const fallback = await pickHealthyFallback(entry.live.selection, liveDeadProviders(), {
-              allowCrossProvider: routingMode === "auto",
-            }).catch(() => null);
+            // Capacity pressure gets a same-provider sibling FIRST, even on
+            // manual routing: the engine already rode out ~95s of Overloadeds,
+            // and sliding Opus→Sonnet inside the owner's own account respects
+            // the pin far better than losing the turn (or jumping providers).
+            const overloaded = /overloaded|capacity|\b529\b|server is busy|service unavailable|temporarily unavailable/i.test(turnState.fatalProvider);
+            const fallback =
+              (overloaded ? await pickCapacitySibling(entry.live.selection).catch(() => null) : null) ??
+              (await pickHealthyFallback(entry.live.selection, liveDeadProviders(), {
+                allowCrossProvider: routingMode === "auto",
+              }).catch(() => null));
             if (!fallback) {
               const onAres = providerFamilyForSelection(entry.live.selection) === "ares";
               tagEmit(sid, {
                 type: "system_reminder_injected",
                 source: "instructions",
-                text: onAres
+                text: overloaded
+                  ? `${entry.live.selection.model} stayed overloaded through every retry, and no other model on ${providerFamilyForSelection(entry.live.selection)} is available to take it. This is upstream congestion, not a problem with your setup or your message — send it again in a minute, or switch model in the status bar.`
+                  : onAres
                   ? `Your Ares account couldn't run this turn (${turnState.fatalProvider}). Check your credits and granted models at doingteam.com → Account — you won't be switched to another provider's key.`
                   : routingMode !== "auto"
                     ? `Pinned provider ${providerFamilyForSelection(entry.live.selection)}/${entry.live.selection.model} failed (${turnState.fatalProvider}). The selection was kept. Enable Auto routing if you want cross-provider failover.`
@@ -1850,15 +1859,22 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
                 entry.live.session.recordAuxiliaryUsage("compaction", fallback.provider.name, fallback.model, usage),
               ),
             });
+            const overloadedModel = entry.live.selection.model;
             entry.live.selection = fallback;
-            // Persist as the session default so the NEXT message starts on the
-            // healthy provider instead of re-running the dead gauntlet.
-            mainSelection = fallback;
-            mainProviderFamily = providerFamilyForSelection(fallback);
+            // A DEAD provider (no balance, bad key) is persisted as the session
+            // default so the next message doesn't re-run the gauntlet. Capacity
+            // is different: the owner's pinned model isn't broken, it was busy —
+            // so keep the pin and let the next turn try it again.
+            if (!overloaded) {
+              mainSelection = fallback;
+              mainProviderFamily = providerFamilyForSelection(fallback);
+            }
             tagEmit(sid, {
               type: "system_reminder_injected",
               source: "instructions",
-              text: `Provider failed (${turnState.fatalProvider}). Auto routing switched to ${providerFamilyForSelection(fallback)}/${fallback.model}.`,
+              text: overloaded
+                ? `${overloadedModel} is overloaded upstream — finishing this turn on ${fallback.model} instead. Your pinned model is unchanged and the next message will use it again.`
+                : `Provider failed (${turnState.fatalProvider}). Auto routing switched to ${providerFamilyForSelection(fallback)}/${fallback.model}.`,
             });
             tagEmit(sid, { type: "route_resolved", model: fallback.model, provider: providerFamilyForSelection(fallback), lane: entry.lane ?? "chat", source: "assigned" });
             // Reset and re-run; if THIS one also fails fatally the loop continues.

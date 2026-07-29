@@ -77,6 +77,31 @@ export function effortLevelsFor(provider: string, model: string): ReasoningLevel
   return ["off", "low", "medium", "high", "xhigh", "max"];
 }
 
+/**
+ * The effort this model will ACTUALLY run at.
+ *
+ * A saved preference outlives the model it was chosen for: pin Opus at
+ * "medium", switch to Kimi K3 (which offers only high/max), and the status bar
+ * kept claiming "medium" — a level the provider silently ignores. Clamp to the
+ * nearest rung the model really honours so what's displayed is what happens.
+ * Returns the saved level untouched when the model has no dial at all.
+ */
+export function effectiveEffort(provider: string, model: string, level: ReasoningLevel): ReasoningLevel {
+  const ladder = effortLevelsFor(provider, model);
+  if (ladder.length === 0 || ladder.includes(level)) return level;
+  const want = REASONING_LEVELS.indexOf(level);
+  let best = ladder[0];
+  let bestGap = Number.POSITIVE_INFINITY;
+  for (const rung of ladder) {
+    const gap = Math.abs(REASONING_LEVELS.indexOf(rung) - want);
+    if (gap < bestGap) {
+      bestGap = gap;
+      best = rung;
+    }
+  }
+  return best;
+}
+
 export function effortWireLabel(provider: string, model: string, level: ReasoningLevel): string {
   const m = model.toLowerCase();
   if (/deepseek-v4|deepseek-v3\.2/.test(m) || provider.toLowerCase() === "deepseek") return level === "off" ? "thinking.disabled" : `reasoning_effort: ${level === "max" || level === "xhigh" ? "max" : "high"}`;

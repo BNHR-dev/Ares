@@ -13,7 +13,7 @@ import { listCapabilities, seedAllCapabilities, writeCapabilitiesDoc } from "@ar
 import { ManualReminderSource, applyEngineConfigEnv } from "./daemon.js";
 import { buildEngineTools } from "./engineTools.js";
 import { AresCommandPermissionStore, AresPathPermissionStore, promptPermission } from "./permissions.js";
-import { ProviderSelection, providerFamilyForSelection, selectProvider } from "./providers.js";
+import { ProviderSelection, daemonModelCatalog, providerFamilyForSelection, selectProvider } from "./providers.js";
 import { AresRuntimeState, CliRuntimeContext, ParsedArgs, cliRuntimeContext } from "./runtime.js";
 import { resumeMessageLimit } from "./terminalLines.js";
 import { buildSystemPrompt, loadGitContext, loadLiveMindContext, recallFailureFixFromMemory } from "./turnPipeline.js";
@@ -200,6 +200,15 @@ export function isProviderFatalError(err: { code?: string; message?: string } | 
   // 402 (out of balance) and no_auth/insufficient-balance are the TWO most common
   // unattended deaths — a balance runs dry or a key signs out mid-mission. They were
   // missing here, so failover never fired and a scheduled/autonomous run just died.
+  // Sustained CAPACITY pressure earns a failover. By the time this is called
+  // the engine has already ridden out its patient capacity ladder (~95s of
+  // Overloadeds), so the provider really is not serving us — and a different
+  // provider has entirely separate capacity. Without this, `overloaded_error`
+  // matched nothing here (its message is just "Overloaded" — no http_5xx), the
+  // self-healing loop never ran, and the turn died with zero model calls and
+  // the user's message lost. Note isPermanentlyDeadError deliberately does NOT
+  // match overload: congestion is temporary, so the provider is never retired.
+  if (/overloaded|capacity|\b529\b|server is busy|service unavailable|temporarily unavailable/.test(blob)) return true;
   return /http_(401|402|403|404|5\d\d)|\b401\b|\b402\b|\b403\b|\b404\b|_throw|no_auth|unauthorized|forbidden|insufficient.?balance|out.?of.?balance|not ?found|fetch failed|unreachable|enotfound|econnrefused|etimedout/.test(
     blob,
   );
@@ -283,6 +292,35 @@ export function guardVisionForTurn(live: LiveSession, content: readonly ContentB
 /** Pick a healthy provider to fall back to when the current one is failing.
  *  Prefers Anthropic (most tool-reliable) when it's authenticated and isn't the
  *  one that just failed. Returns null when there's no better option. */
+/**
+ * A SIBLING model on the same provider, for capacity pressure only.
+ *
+ * Cross-provider failover is gated behind Auto routing because a pinned model
+ * is a pin. But when the pinned model is merely *overloaded*, refusing to move
+ * means losing the turn entirely — and staying inside the same provider and
+ * account honours the pin far better than jumping to someone else's key. So on
+ * capacity (and only capacity) we slide to the next model in that provider's
+ * own catalog, which is what a person would do by hand.
+ *
+ * Returns null when the family has nothing else to offer.
+ */
+export async function pickCapacitySibling(current: ProviderSelection): Promise<ProviderSelection | null> {
+  const family = providerFamilyForSelection(current);
+  // The gateway routes server-side; picking its models for it is not our job.
+  if (family === "ares") return null;
+  const rows = await daemonModelCatalog(family).catch(() => []);
+  const siblings = rows.map((row) => row.id).filter((id) => id && id !== current.model);
+  if (siblings.length === 0) return null;
+  for (const model of siblings) {
+    try {
+      return await selectProvider(new Map([["provider", family], ["model", model]]));
+    } catch {
+      // that id isn't selectable on this account — try the next
+    }
+  }
+  return null;
+}
+
 export async function pickHealthyFallback(
   current: ProviderSelection,
   dead: ReadonlySet<string> = new Set(),

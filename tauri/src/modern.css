@@ -236,6 +236,19 @@
   border-radius: 50%;
   padding: 0;
 }
+/* the sidebar toggle is chrome, not an action: a rounded square, not a coin */
+.ares[data-style="modern"] .railToggle {
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  border: 1px solid rgba(200, 155, 94, 0.22);
+  color: rgba(232, 200, 147, 0.6);
+  transition: border-color 140ms ease, color 140ms ease;
+}
+.ares[data-style="modern"] .railToggle svg { width: 16px; height: 16px; }
+.ares[data-style="modern"] .railToggle:hover { border-color: rgba(255, 160, 90, 0.6); color: var(--accent-hi); }
+.ares[data-style="modern"] .railToggle[data-on="1"] { color: var(--gold-hi); background: rgba(200, 155, 94, 0.08); }
+
 .ares[data-style="modern"] .titleIcon[data-on="1"] > .medallion {
   color: var(--accent-hi);
   border-color: rgba(255, 160, 90, 0.7);
@@ -1043,6 +1056,23 @@
   box-shadow: var(--glass-spec), var(--glass-lift);
 }
 .ares[data-style="modern"] .statusBar .statusSeg { height: 32px; border-radius: 999px; }
+/* the base bar's flex spacer still occupied the row and shoved the capsule
+   left of centre even with justify-content:center */
+.ares[data-style="modern"] .statusBar .grow { display: none; }
+/* The capsule must stay CENTRED, so it can never be allowed to outgrow its
+   column — an overflowing capsule reads as "off-centre" even though it is
+   technically centred. Shed the least-useful ink first: the labels, then the
+   two segments whose state is already obvious elsewhere. */
+@container (max-width: 1080px) {
+  .ares[data-style="modern"] .statusBar .statusSeg b { display: none; }
+}
+@container (max-width: 860px) {
+  .ares[data-style="modern"] .statusBar .statusSeg[title*="routing"],
+  .ares[data-style="modern"] .statusBar .statusSeg[title*="effects"] { display: none; }
+}
+@container (max-width: 700px) {
+  .ares[data-style="modern"] .statusBar .statusSeg[title*="reasoning"] { display: none; }
+}
 .ares[data-style="modern"] .statusSeg {
   display: flex;
   align-items: center;
@@ -1119,14 +1149,19 @@
 
 /* ── forge + overlays ────────────────────────────────────────────────────── */
 
+/* The Forge is a floating slab too — same frosted material and radius as the
+   rail, not a squared-off panel welded to the right edge. */
 .ares[data-style="modern"] .forge {
-  border-left: 1px solid var(--line);
-  background: linear-gradient(180deg, #0c0a09, #090807);
+  border: 1px solid var(--glass-edge);
+  border-radius: var(--r-lg);
+  overflow: hidden;
 }
 .ares[data-style="modern"] .forge > header {
   background: transparent;
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
+/* the drag grip sits on the slab's edge, inside the rounded corner */
+.ares[data-style="modern"] .forgeGrip { border-radius: var(--r-lg) 0 0 var(--r-lg); }
 .ares[data-style="modern"] .forge > header strong {
   font: 600 9.5px/1 var(--display);
   letter-spacing: 0.24em;
@@ -1929,17 +1964,25 @@ html[data-perf="lite"] .ares[data-style="modern"] .statusBar {
 
 /* ── responsive: desktop-first, but the shell must survive a narrow window ── */
 
-/* below 940px the rail steps aside; the titlebar toggle brings it back */
+/* Narrow windows tighten the page padding — they must NOT hide the rail.
+   The previous rule here force-hid it below 940px whenever it was *not*
+   collapsed, which inverted the toggle: at a narrow window the rail could
+   never be shown at all, and pressing "show sidebar" actively hid it. That is
+   the panel that "disappeared and couldn't be found". Visibility belongs to
+   the owner's explicit toggle, never to a viewport query. */
 @media (max-width: 940px) {
-  .ares[data-style="modern"]:not([data-rail="collapsed"]) { grid-template-columns: 0 minmax(0, 1fr); }
-  .ares[data-style="modern"]:not([data-rail="collapsed"]) .rail { transform: translateX(-100%); opacity: 0; pointer-events: none; }
   .ares[data-style="modern"] .hm,
   .ares[data-style="modern"] .vault { padding: 24px 20px 28px; }
+  .ares[data-style="modern"] { padding: 12px 10px 12px; column-gap: 10px; }
 }
-/* below 1160px the forge panel yields the floor to the transcript */
+/* Below 1160px the Forge gets a smaller share — it is NOT hidden. Hiding a
+   panel the owner just opened (as this rule used to do) makes the button look
+   broken; the same inverted-intent bug as the rail's old auto-hide. The grid
+   tracks are minmax(0, …) so all three shrink instead. */
 @media (max-width: 1160px) {
-  .ares[data-style="modern"][data-panel="1"] { grid-template-columns: 274px minmax(0, 1fr); }
-  .ares[data-style="modern"][data-panel="1"] .forge { display: none; }
+  .ares[data-style="modern"][data-panel="1"] {
+    grid-template-columns: 274px minmax(0, 1fr) minmax(0, clamp(260px, 38vw, var(--forge-w, 480px)));
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

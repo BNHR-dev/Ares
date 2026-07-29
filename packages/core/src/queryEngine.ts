@@ -1267,12 +1267,18 @@ export class QueryEngine {
     // evidence — a successful ComputerUse/Browser screenshot newer than the
     // last mutation — before the work can resolve as verified.
     const guiSignals = new Set<string>();
-    let visualEvidenceAt = 0;
     let guiGateFired = false;
     let guiUnverifiedSurfaced = false;
     let specGateFired = false;
+    // Freshness is ordered by a monotonic per-turn counter, NOT by wall clock.
+    // Two tool outcomes in the same turn routinely land in the same millisecond,
+    // and `visualEvidence < lastMutation` then reads false — so a screenshot
+    // taken BEFORE an edit counted as proof of the edit. A counter can't tie.
+    let evidenceTick = 0;
+    let lastMutationTick = 0;
+    let visualEvidenceTick = 0;
     const guiNeedsVisualProof = (): boolean =>
-      guiSignals.size > 0 && (visualEvidenceAt === 0 || visualEvidenceAt < lastMutationAt);
+      guiSignals.size > 0 && (visualEvidenceTick === 0 || visualEvidenceTick < lastMutationTick);
     let workStatus: WorkStatus = "not_applicable";
     let verificationGenerationAtMutation = this.cfg.verificationEvidence?.().mutationGeneration ?? 0;
     const hasOutstandingVerification = (): boolean => this.cfg.outstandingVerificationRequired?.() === true;
@@ -1516,15 +1522,22 @@ export class QueryEngine {
               !isContextLimitError(streamError) &&
               (!modelStarted || (isStallError(streamError) && !sawCommittedOutput)) &&
               !this.liveSignal().aborted &&
-              transientRetry < MAX_TRANSIENT_RETRIES
+              transientRetry < (isCapacityError(streamError) ? MAX_CAPACITY_RETRIES : MAX_TRANSIENT_RETRIES)
             ) {
               transientRetry++;
               // Honor a server-provided reset window (Retry-After) when it's
               // longer than our exponential backoff — burning four 12s-capped
               // retries against a 30s 429 window just fails a turn that waiting
               // would have completed. The provider already clamps it to 60s.
-              let waitMs = Math.max(transientBackoffMs(transientRetry), streamError.retryAfterMs ?? 0);
-              let note = `provider hiccup (${streamError.code}); retrying in ${(waitMs / 1000).toFixed(1)}s — attempt ${transientRetry}/${MAX_TRANSIENT_RETRIES}`;
+              const capacity = isCapacityError(streamError);
+              const retryBudget = capacity ? MAX_CAPACITY_RETRIES : MAX_TRANSIENT_RETRIES;
+              let waitMs = Math.max(
+                capacity ? capacityBackoffMs(transientRetry) : transientBackoffMs(transientRetry),
+                streamError.retryAfterMs ?? 0,
+              );
+              let note = capacity
+                ? `${this.cfg.model} is overloaded upstream — retrying in ${(waitMs / 1000).toFixed(1)}s (attempt ${transientRetry}/${retryBudget}). Your message is safe.`
+                : `provider hiccup (${streamError.code}); retrying in ${(waitMs / 1000).toFixed(1)}s — attempt ${transientRetry}/${retryBudget}`;
               if (isStallError(streamError)) {
                 // Two consecutive stalls at the same window size usually mean the
                 // provider is choking on the PROMPT itself (deepseek/ollama-cloud
@@ -1961,14 +1974,17 @@ export class QueryEngine {
         for (const outcome of outcomes) {
           resultByToolUseId.set(outcome.toolUseId, outcome.result);
           interruptedByTool ||= outcome.interrupted === true;
+          evidenceTick++; // strictly increasing, in outcome order
           if (outcome.touchedFiles?.length) {
             verificationGenerationAtMutation = verificationGenerationBeforeBatch;
             lastMutationAt = Math.max(lastMutationAt, outcome.finishedAt ?? Date.now());
+            lastMutationTick = evidenceTick;
             for (const file of outcome.touchedFiles) changedFiles.add(file);
             workStatus = "unverified";
           } else if (outcome.potentialMutation) {
             verificationGenerationAtMutation = verificationGenerationBeforeBatch;
             lastMutationAt = Math.max(lastMutationAt, outcome.finishedAt ?? Date.now());
+            lastMutationTick = evidenceTick;
             changedFiles.add("<shell-mediated workspace changes>");
             workStatus = "unverified";
           }
@@ -1982,7 +1998,7 @@ export class QueryEngine {
             if (use && outcome.result.is_error !== true) {
               for (const sig of guiArtifactSignals(use.name, use.input, outcome.touchedFiles)) guiSignals.add(sig);
               if (isVisualEvidenceCall(use.name, use.input, outcome.result)) {
-                visualEvidenceAt = Math.max(visualEvidenceAt, outcome.finishedAt ?? Date.now());
+                visualEvidenceTick = evidenceTick;
               }
             }
           }
@@ -3156,6 +3172,50 @@ function transientBackoffMs(attempt: number): number {
   const base = 800 * Math.pow(2, attempt - 1); // 800ms, 1.6s, 3.2s, 6.4s…
   const jitter = (attempt * 137) % 400; // deterministic, no Math.random in core
   return Math.min(12_000, base + jitter);
+}
+
+/**
+ * CAPACITY pressure (Anthropic 529 `overloaded_error`, "server is busy",
+ * upstream capacity refusals) is a queue depth problem, not a broken request:
+ * the identical call usually succeeds a little later. The generic transient
+ * budget (4 tries inside ~12s) was far too impatient for it — a real report
+ * showed five straight Overloadeds in 20s and the turn died with ZERO model
+ * calls, losing the user's message. These get their own, much more patient
+ * ladder, and the daemon only fails over to another provider after it.
+ */
+function isCapacityError(error: { code: string; message: string }): boolean {
+  const text = `${error.code} ${error.message}`.toLowerCase();
+  return (
+    text.includes("overloaded") ||
+    text.includes("capacity") ||
+    text.includes("http_529") ||
+    /\b529\b/.test(text) ||
+    text.includes("server is busy") ||
+    text.includes("temporarily unavailable") ||
+    text.includes("service unavailable") ||
+    text.includes("http_503")
+  );
+}
+
+/** Retries reserved for capacity pressure. Override with ARES_CAPACITY_RETRIES. */
+const MAX_CAPACITY_RETRIES = (() => {
+  const raw = Number(process.env.ARES_CAPACITY_RETRIES);
+  return Number.isFinite(raw) && raw >= 0 && raw <= 20 ? Math.floor(raw) : 8;
+})();
+
+/** Patient backoff for capacity: ~1.5s, 3s, 6s, 12s, 20s, 20s… (cap 20s).
+ *  Eight attempts ride out roughly 95s of provider congestion. The base and cap
+ *  are tunable (ARES_CAPACITY_BACKOFF_MS / _MAX_MS) — useful on a chronically
+ *  congested endpoint, and it lets the regression test exercise the real ladder
+ *  without sleeping for 90 seconds. */
+function capacityBackoffMs(attempt: number): number {
+  const rawBase = Number(process.env.ARES_CAPACITY_BACKOFF_MS);
+  const rawCap = Number(process.env.ARES_CAPACITY_BACKOFF_MAX_MS);
+  const baseMs = Number.isFinite(rawBase) && rawBase >= 1 ? rawBase : 1_500;
+  const capMs = Number.isFinite(rawCap) && rawCap >= 1 ? rawCap : 20_000;
+  const base = baseMs * Math.pow(2, attempt - 1);
+  const jitter = (attempt * 211) % Math.max(1, Math.round(baseMs * 0.4)); // deterministic; no Math.random in core
+  return Math.min(capMs, base + jitter);
 }
 
 // ─── Stream stall guard (the effort-dial cutoff) ───────────────────────
