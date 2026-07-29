@@ -110,7 +110,16 @@ export function SpringHeight({
       transition={{ type: "spring", stiffness: 380, damping: 34 }}
       style={{ overflow: "hidden", height: h === null || reduced ? "auto" : undefined }}
     >
-      <div ref={inner}>{children}</div>
+      {/* The animated height is `inner.offsetHeight`, which does NOT include the
+          OUTER element's padding — so any padding on the container makes its
+          content overflow its own box and get clipped by overflow:hidden, worse
+          the taller the content grows. Skins must therefore hang card padding on
+          this inner wrapper (see .springInner in modern.css), never on the
+          animated container. min-width:0 keeps a wide child (a long path, a code
+          fragment) from forcing intrinsic width instead of wrapping. */}
+      <div ref={inner} className="springInner" style={{ minWidth: 0 }}>
+        {children}
+      </div>
     </motion.div>
   );
 }

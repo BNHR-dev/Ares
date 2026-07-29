@@ -2153,7 +2153,19 @@ function App() {
   // transient failover can't make the readout look like the selection changed.
   // What actually ran is still surfaced per-message (the assistant badge). In
   // auto mode the routed per-turn model IS the point, so show it there.
-  const liveModelId = prefs.routingMode === "auto" ? (active?.turnModel ?? "routing (auto)") : prefs.model;
+  // In auto mode, before a turn has resolved, fall back to the model that WOULD
+  // take the next message — the chat lane's assignment, else the main model.
+  // The old "routing (auto)" placeholder told the owner nothing and made the
+  // chip look like a dead label ("all I see is on").
+  const liveModelId =
+    prefs.routingMode === "auto"
+      ? (active?.turnModel ?? prefs.routing.chat?.model ?? prefs.model)
+      : prefs.model;
+  /** "chat → sonnet · coding → opus-5" — the whole routing table, for the
+   *  route chip's tooltip, so the mapping is legible without opening anything. */
+  const routeSummary = routedLanes.length
+    ? routedLanes.map((l) => `${l} → ${prefs.routing[l]?.model ?? "?"}`).join("\n")
+    : "";
   // Gateway models are white-labeled: the footer chip shows the friendly name
   // ("Model Ares (in house)"), never the raw virtual id or the upstream model.
   // "ares-internal" is the house sentinel — resolve it to the crowned model's name.
@@ -2814,14 +2826,46 @@ function App() {
             <button className="statusSeg" data-seg="garrison" onClick={() => setGarrisonOpen(true)} title="Garrison panel — status, log, restart">
               <i className="dot" data-state={daemon} /><b>garrison</b><span>{daemon}</span>
             </button>
-            <button className="statusSeg" data-seg="model" onClick={() => setModelPopOpen(true)} title={prefs.routingMode === "auto" ? "auto-routing — model that handled the last turn" : "switch provider / model"}>
+            <button
+              className="statusSeg"
+              data-seg="model"
+              data-auto={prefs.routingMode === "auto" ? "1" : "0"}
+              onClick={() => setModelPopOpen(true)}
+              title={
+                prefs.routingMode === "auto"
+                  ? `Auto-routing is on — ${active?.turnModel ? `${liveModel} handled the last turn` : `${liveModel} will take the next message`}.\nOpens the model picker (sets the fallback model for unassigned lanes).${routeSummary ? `\n\nLanes:\n${routeSummary}` : ""}`
+                  : "switch provider / model"
+              }
+            >
               <b>model</b><span>{liveModel}</span>
+              {prefs.routingMode === "auto" ? <em className="segAuto">auto</em> : null}
             </button>
             <button className="statusSeg effortStatus" data-seg="effort" onClick={() => setReasoningOpen(true)} title="Set the active model's native reasoning effort">
               <b>effort</b><span>{EFFORT_META[effectiveEffort(prefs.provider, prefs.model, prefs.reasoning)].label.toLowerCase()}</span>
             </button>
-            <button className="statusSeg" data-seg="route" onClick={() => setRoutingOpen(true)} title="per-lane model routing">
-              <b>route</b><span>{prefs.routingMode === "auto" ? `auto · ${routedLanes.length}` : routedLanes.length > 0 ? `ready · ${routedLanes.length}` : "off"}</span>
+            {/* The route chip is the door to the War Table, so it names the
+                lanes it routes rather than just counting them — "all I see is
+                on" was this chip reading `auto · 2` with the mapping hidden. */}
+            <button
+              className="statusSeg"
+              data-seg="route"
+              onClick={() => setRoutingOpen(true)}
+              title={
+                routedLanes.length
+                  ? `Per-lane model routing${prefs.routingMode === "auto" ? " (active)" : " (assigned, but Auto is off)"}:\n${routeSummary}\n\nClick to edit the War Table.`
+                  : "Per-lane model routing — nothing assigned yet. Click to open the War Table and give each kind of work its own model."
+              }
+            >
+              <b>route</b>
+              <span>
+                {prefs.routingMode !== "auto"
+                  ? routedLanes.length > 0
+                    ? `off · ${routedLanes.length} set`
+                    : "off"
+                  : routedLanes.length === 0
+                    ? "auto · none set"
+                    : routedLanes.join(" · ")}
+              </span>
             </button>
             {opStatus?.activeCount ? (
               <button

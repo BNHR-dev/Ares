@@ -493,8 +493,25 @@
 
 /* ── the sanctum (empty state) ───────────────────────────────────────────── */
 
-.ares[data-style="modern"] .chat { padding: 28px 0 20px; }
-.ares[data-style="modern"] .chat > * { width: min(880px, 92%); margin-left: auto; margin-right: auto; }
+.ares[data-style="modern"] .chat {
+  padding: 28px 0 20px;
+  /* The transcript column is a FIXED measure, centred with auto margins. If a
+     child ever exceeds it, `overflow-x: auto` (which the base sheet's
+     overflow-y:auto implies) turns the whole column into a horizontal
+     scroller — and because the column is centred, the overflow eats into the
+     LEFT margin and the text reads as bled-off/cut. A streaming thought does
+     exactly this transiently: its height animates on every chunk while the
+     text grows. Nothing here legitimately needs the column to scroll
+     sideways — code blocks, diagrams and tables scroll inside themselves —
+     so pin it shut. */
+  overflow-x: hidden;
+}
+.ares[data-style="modern"] .chat > * {
+  width: min(880px, 92%);
+  margin-left: auto;
+  margin-right: auto;
+  min-width: 0;
+}
 
 /* The sanctum is full-bleed: the helm owns the whole stage, the session header
    steps aside, and the composer becomes a pill floating in the same frame —
@@ -658,10 +675,15 @@
   gap: 14px;
 }
 
-/* thinking reads as a margin note, not a card */
+/* Thinking reads as a margin note, not a card.
+   The padding lives on .springInner, NOT here: this element's height is
+   animated to the inner wrapper's offsetHeight, which excludes this element's
+   own padding — putting it here made the note clip its own last lines, and
+   worse the longer the thought got. Border/background stay on the animated
+   box so the frame still springs with it. */
 .ares[data-style="modern"] .thought,
 .ares[data-style="modern"] .thinking {
-  padding: 11px 15px;
+  padding: 0;
   border-radius: 12px;
   border: 1px dashed rgba(200, 155, 94, 0.22);
   background: rgba(255, 255, 255, 0.014);
@@ -669,7 +691,32 @@
   line-height: 1.65;
   color: rgba(239, 227, 207, 0.5);
   font-style: italic;
+  min-width: 0;
+  max-width: 100%;
 }
+.ares[data-style="modern"] .thinking > .springInner,
+.ares[data-style="modern"] .thought > .springInner { padding: 11px 15px; min-width: 0; overflow-x: hidden; }
+/* A LIVE thought is the hard case: the tail rewrites on every streamed chunk
+   while SpringHeight re-animates the height, so any chunk that briefly
+   establishes a wide min-content would jolt the column. Force every line to
+   wrap in place — a streaming thought must never be able to size the card. */
+.ares[data-style="modern"] .thinking .thinkText,
+.ares[data-style="modern"] .thought .thinkText {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: hidden;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+/* the legacy (non-animated) path has no inner wrapper — pad it directly */
+.ares[data-style="modern"] .thinking:not(:has(> .springInner)),
+.ares[data-style="modern"] .thought:not(:has(> .springInner)) { padding: 11px 15px; }
+
+/* Nothing inside an assistant turn may force the column wider than its share:
+   a long path, URL or code fragment wraps or scrolls internally instead. */
+.ares[data-style="modern"] .turn.assistant .turnBody > * { min-width: 0; max-width: 100%; }
+.ares[data-style="modern"] .thinkText { overflow-wrap: anywhere; word-break: break-word; }
 
 /* every agent-side card shares one frame */
 .ares[data-style="modern"] .toolCard,
@@ -1069,23 +1116,24 @@
    technically centred. Shed the least-useful ink first: the labels, then
    segments whose state is visible elsewhere.
 
-   Shedding order is by data-seg, most expendable first: effects → route →
-   perms → effort. The model and Garrison chips are the last to go, because
-   "which model am I talking to" is the whole point of the readout. */
+   Shedding order is by data-seg, most expendable first: effects → perms →
+   effort → route. Route outlives the others because it now NAMES its lanes and
+   is the door to the War Table; model and Garrison are last, because "which
+   model am I talking to" is the whole point of the readout. */
 @container (max-width: 940px) {
   .ares[data-style="modern"] .statusBar .statusSeg b { display: none; }
 }
-@container (max-width: 760px) {
+@container (max-width: 780px) {
   .ares[data-style="modern"] .statusBar .statusSeg[data-seg="effects"] { display: none; }
 }
 @container (max-width: 660px) {
-  .ares[data-style="modern"] .statusBar .statusSeg[data-seg="route"] { display: none; }
-}
-@container (max-width: 560px) {
   .ares[data-style="modern"] .statusBar .statusSeg[data-seg="perms"] { display: none; }
 }
-@container (max-width: 470px) {
+@container (max-width: 560px) {
   .ares[data-style="modern"] .statusBar .statusSeg[data-seg="effort"] { display: none; }
+}
+@container (max-width: 470px) {
+  .ares[data-style="modern"] .statusBar .statusSeg[data-seg="route"] { display: none; }
 }
 .ares[data-style="modern"] .statusSeg {
   display: flex;
@@ -1130,6 +1178,18 @@
 .ares[data-style="modern"] .statusGroup .statusSeg + .statusAction { box-shadow: none; }
 .ares[data-style="modern"] .statusSeg .dot[data-state="running"] { background: var(--steel); box-shadow: 0 0 8px var(--steel); }
 .ares[data-style="modern"] .effortStatus span { color: var(--ember-text); }
+/* the little "auto" flag on the model chip: this model came from the router,
+   not from a pin — so the chip reads as live state, not a dead label */
+.ares[data-style="modern"] .segAuto {
+  font: 400 8.5px/1 var(--mono);
+  font-style: normal;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ember-text);
+  padding: 2px 5px;
+  border: 1px solid rgba(226, 102, 52, 0.34);
+  border-radius: 999px;
+}
 /* The capsule owns the centre. The token readout, utility icons and version
    pin to the edges and ghost out, so nothing competes with it for width —
    they were squeezing it until "effects" fell off the end. */
