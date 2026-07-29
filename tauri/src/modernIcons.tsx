@@ -78,9 +78,15 @@ export function AresSigils(): React.ReactElement {
         <path d="M15 5l1.6 3.8L20.5 10l-3.9 1.4L15 15l-1.6-3.6L9.5 10l3.9-1.2z" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
         <path d="M31 9l1.1 2.6 2.6 1-2.6 1L31 16l-1.1-2.4-2.6-1 2.6-1z" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
       </symbol>
+      {/* The gear as drawn spans y 4.5–37.5, i.e. its optical centre is y=21 in
+          a 48-unit box — 3 units high. Every other sigil centres on 24, so in a
+          row of medallions this one sat visibly lifted. Nudged down to match
+          rather than re-authoring the path. */}
       <symbol id="ares-settings" viewBox="0 0 48 48">
-        <path d="M24 4.5 30 8h7v7l3.5 6-3.5 6v7h-7l-6 3.5L18 34h-7v-7l-3.5-6L11 15V8h7z" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />
-        <circle cx="24" cy="21" r="6" fill="none" stroke="#a02b1e" strokeWidth="2.4" />
+        <g transform="translate(0 3)">
+          <path d="M24 4.5 30 8h7v7l3.5 6-3.5 6v7h-7l-6 3.5L18 34h-7v-7l-3.5-6L11 15V8h7z" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />
+          <circle cx="24" cy="21" r="6" fill="none" stroke="#a02b1e" strokeWidth="2.4" />
+        </g>
       </symbol>
       <symbol id="ares-voice" viewBox="0 0 48 48">
         <path d="M7 18h7l11-8v28l-11-8H7z" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />

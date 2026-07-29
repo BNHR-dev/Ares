@@ -38,6 +38,50 @@ export interface ChangelogEntry {
 // from the "earlier updates" strip.
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.30.0",
+    date: "July 2026",
+    title: "The Modern face — and nothing flashes any more",
+    tagline: "A new glass interface built from the Ares HELM design, working effects that can't trigger a seizure, and turns that survive an overloaded model.",
+    highlights: [
+      {
+        icon: "🛡️",
+        title: "Nothing flashes",
+        tag: "Safer",
+        blurb: "Every agent action used to flash the whole screen, and the flame border pulsed while Ares worked — a real photosensitive-seizure risk. Working state is now a small ring that only rotates, plus an optional steady glow. Nothing strobes in any mode, and \"off\" is a true kill switch.",
+      },
+      {
+        icon: "🏛️",
+        title: "The Modern interface",
+        tag: "New",
+        blurb: "Floating smoked-glass panels over a painted Corinthian helm, medallion icons, and a serif ARES wordmark. Pick it in Settings → Appearance; Forged and Legacy are untouched and one click away.",
+      },
+      {
+        icon: "🌊",
+        title: "An overloaded model no longer loses your message",
+        tag: "Safer",
+        blurb: "When a provider is busy, Ares now waits it out patiently instead of giving up in twelve seconds — and if it stays congested, it finishes the turn on another model in your own account without changing your pinned choice.",
+      },
+      {
+        icon: "🎚️",
+        title: "Effort dials that tell the truth",
+        tag: "Polished",
+        blurb: "Each model now offers only the reasoning levels it actually honours — Kimi shows high and max, not a fake low-to-high ladder — and the readout clamps to what will really run. New models bring their own correct dial with no update needed.",
+      },
+      {
+        icon: "⚡",
+        title: "YOLO mode",
+        tag: "New",
+        blurb: "One click in the status bar switches between asking before sensitive actions and acting on everything without prompts. Approval cards were rebuilt too — the command you're approving is now shown in full instead of being cut off.",
+      },
+      {
+        icon: "🎨",
+        title: "Ares can restyle its own effect",
+        tag: "New",
+        blurb: "Ask for a calmer or bluer working animation and it changes it live — colour and pace only, so it can never be made to flash.",
+      },
+    ],
+  },
+  {
     version: "0.29.1",
     date: "July 2026",
     title: "0.29.0 couldn't start its own backend",

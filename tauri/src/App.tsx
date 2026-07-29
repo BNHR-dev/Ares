@@ -2562,21 +2562,6 @@ function App() {
         </span>
         {prefs.uiStyle === "modern" ? (
           <div className="titleTools" onMouseDown={(ev) => ev.stopPropagation()}>
-            {/* The rail toggle belongs to the titlebar (chrome, always present),
-                not to the stage header — the sanctum hides that header, so a
-                rail collapsed on the home screen used to be unrecoverable. */}
-            <button
-              className="titleIcon railToggle"
-              onClick={toggleRail}
-              title={railCollapsed ? "Show the sidebar" : "Hide the sidebar"}
-              aria-label={railCollapsed ? "Show the sidebar" : "Hide the sidebar"}
-              data-on={railCollapsed ? "0" : "1"}
-            >
-              <svg viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
-                <rect x="2.5" y="3" width="13" height="12" rx="2.5" />
-                <path d="M7 3v12" />
-              </svg>
-            </button>
             <button className="titleIcon" onClick={() => setPaletteOpen(true)} title="Command palette (Ctrl+K)" aria-label="Command palette">
               <Medallion glyph="search" size={30} />
             </button>

@@ -236,19 +236,6 @@
   border-radius: 50%;
   padding: 0;
 }
-/* the sidebar toggle is chrome, not an action: a rounded square, not a coin */
-.ares[data-style="modern"] .railToggle {
-  width: 30px;
-  height: 30px;
-  border-radius: 9px;
-  border: 1px solid rgba(200, 155, 94, 0.22);
-  color: rgba(232, 200, 147, 0.6);
-  transition: border-color 140ms ease, color 140ms ease;
-}
-.ares[data-style="modern"] .railToggle svg { width: 16px; height: 16px; }
-.ares[data-style="modern"] .railToggle:hover { border-color: rgba(255, 160, 90, 0.6); color: var(--accent-hi); }
-.ares[data-style="modern"] .railToggle[data-on="1"] { color: var(--gold-hi); background: rgba(200, 155, 94, 0.08); }
-
 .ares[data-style="modern"] .titleIcon[data-on="1"] > .medallion {
   color: var(--accent-hi);
   border-color: rgba(255, 160, 90, 0.7);
@@ -308,14 +295,16 @@
   color: #f3e6cf;
   text-shadow: 0 0 22px rgba(255, 140, 60, 0.32);
 }
+/* The rail keeps its own collapse chevron, and the stage keeps the reveal
+   chevron that replaces it — both sit top-left, which is where they belong.
+   (An earlier pass added a third toggle to the titlebar; it was redundant.) */
 .ares[data-style="modern"] .railCollapse {
   order: -1;
   align-self: flex-end;
   margin-bottom: -26px; /* float it over the wordmark row */
-  /* the wordmark is pulled up over this button by that negative margin and,
-     being later in the DOM, was painting on top and swallowing every click.
-     Lift the button above it; the wordmark is decorative, so it stops taking
-     pointer events entirely (see .railBrand). */
+  /* The wordmark is pulled up over this button by that negative margin and,
+     being later in the DOM, would paint on top and swallow every click. Lift
+     the button above it; the wordmark takes no pointer events (see .railBrand). */
   position: relative;
   z-index: 2;
   font: 500 9px/1 var(--mono);
@@ -485,11 +474,18 @@
   background: transparent;
   border-bottom: 1px solid var(--line);
 }
-/* The stage's own reveal chevron is redundant now that the sidebar toggle
-   lives in the titlebar and the rail's auto-hide bug is gone — two controls
-   for one panel, one of which appeared and vanished. The titlebar one wins
-   because it is always present, in a fixed place. */
-.ares[data-style="modern"] .railReveal { display: none; }
+/* The reveal chevron is the ONLY way back once the rail is hidden, so it is
+   styled to match the room rather than removed. */
+.ares[data-style="modern"] .railReveal {
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  border: 1px solid rgba(200, 155, 94, 0.22);
+  background: rgba(255, 255, 255, 0.03);
+  color: rgba(232, 200, 147, 0.6);
+  transition: border-color 140ms ease, color 140ms ease;
+}
+.ares[data-style="modern"] .railReveal:hover { border-color: rgba(255, 160, 90, 0.6); color: var(--accent-hi); }
 
 /* ── the sanctum (empty state) ───────────────────────────────────────────── */
 
@@ -521,6 +517,18 @@
    pill). Re-declare the rows for the three that remain. */
 .ares[data-style="modern"] .stage:has(.chat > .empty) > .stageHead { display: none; }
 .ares[data-style="modern"] .stage:has(.chat > .empty) { grid-template-rows: minmax(0, 1fr) auto auto; }
+/* …EXCEPT when the rail is hidden. The reveal chevron lives in that header, so
+   hiding it on the sanctum stranded the rail with no way back — the panel that
+   "disappeared and couldn't be found". Keep the header just for the chevron
+   (its title/model text stays hidden), and restore the four-row template since
+   the header is a grid item again. */
+.ares[data-style="modern"][data-rail="collapsed"] .stage:has(.chat > .empty) > .stageHead {
+  display: flex;
+  border-bottom: none;
+  background: none;
+}
+.ares[data-style="modern"][data-rail="collapsed"] .stage:has(.chat > .empty) > .stageHead > div { display: none; }
+.ares[data-style="modern"][data-rail="collapsed"] .stage:has(.chat > .empty) { grid-template-rows: auto minmax(0, 1fr) auto auto; }
 /* The scroller becomes the frame: it stops scrolling, drops its reading
    gutters, and carries the helm itself — so the artwork is full-bleed behind
    the hero instead of boxed inside it. */
