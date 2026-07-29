@@ -172,12 +172,22 @@
   border-color: rgba(200, 155, 94, 0.42);
   background: rgba(200, 155, 94, 0.06);
 }
-.ares[data-style="modern"] .titlebar .emblem { display: none; }
-.ares[data-style="modern"] .titlebar h1 {
-  font: 600 12.5px/1 var(--display);
-  letter-spacing: 0.26em;
-  text-indent: 0.26em;
-  color: rgba(239, 227, 207, 0.9);
+/* The rail already crowns the room with ARES, so the titlebar must not repeat
+   it. The account control collapses to a single small coin — present, but no
+   longer a second wordmark competing with the real one. */
+.ares[data-style="modern"] .titlebar h1 { display: none; }
+.ares[data-style="modern"] .titlebar .emblem {
+  display: block;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 1px solid rgba(200, 155, 94, 0.34);
+  background: var(--coin) center / 62% no-repeat;
+  background-image: var(--god-uri), var(--coin);
+  background-size: 60%, cover;
+  background-position: center, center;
+  background-repeat: no-repeat, no-repeat;
+  opacity: 0.9;
 }
 .ares[data-style="modern"] .titlebar .brand span { display: none; }
 
@@ -237,21 +247,40 @@
 
 /* ── rail ────────────────────────────────────────────────────────────────── */
 
-.ares[data-style="modern"] { grid-template-columns: 274px minmax(0, 1fr); }
-.ares[data-style="modern"][data-panel="1"] { grid-template-columns: 274px minmax(0, 1fr) minmax(0, var(--forge-w, 480px)); }
+/* ── the floating shell ───────────────────────────────────────────────────
+   Panels float in the room rather than tiling it: the whole grid is inset,
+   the rail is a rounded slab spanning full height (so it sits level with the
+   status pill, exactly like the reference), and the titlebar/status bar stop
+   being bars at all — see below. */
+.ares[data-style="modern"] {
+  padding: 14px 16px 16px;
+  column-gap: 16px;
+  grid-template-columns: 274px minmax(0, 1fr);
+  grid-template-areas:
+    "rail title"
+    "rail stage";
+}
+.ares[data-style="modern"][data-panel="1"] {
+  grid-template-columns: 274px minmax(0, 1fr) minmax(0, var(--forge-w, 480px));
+  grid-template-areas:
+    "rail title title"
+    "rail stage forge";
+}
 /* Collapsed states must be RE-declared: the base sheet's [data-rail="collapsed"]
    rules tie with the two above on specificity, and this file loads later — so
    without these, collapsing slid the rail away but left its 274px column as a
    dead gutter (the "collapse kind of breaks it" bug). */
-.ares[data-style="modern"][data-rail="collapsed"] { grid-template-columns: 0 minmax(0, 1fr); }
-.ares[data-style="modern"][data-panel="1"][data-rail="collapsed"] { grid-template-columns: 0 minmax(0, 1fr) minmax(0, var(--forge-w, 480px)); }
+.ares[data-style="modern"][data-rail="collapsed"] { grid-template-columns: 0 minmax(0, 1fr); column-gap: 0; }
+.ares[data-style="modern"][data-panel="1"][data-rail="collapsed"] { grid-template-columns: 0 minmax(0, 1fr) minmax(0, var(--forge-w, 480px)); column-gap: 16px; }
 .ares[data-style="modern"][data-rail="collapsed"] .rail { padding: 0; border: 0; }
 
 .ares[data-style="modern"] .rail {
+  grid-area: rail;
   padding: 16px 12px 0;
   gap: 0;
-  background: linear-gradient(180deg, #0d0b0a, #090807);
-  border-right: 1px solid var(--line);
+  border: 1px solid var(--glass-edge);
+  border-radius: var(--r-lg);
+  overflow: hidden;
 }
 /* the wordmark crowning the rail */
 .ares[data-style="modern"] .railBrand {
@@ -377,22 +406,36 @@
   background: var(--line);
 }
 
-/* session rows */
-.ares[data-style="modern"] .sessionList { display: flex; flex-direction: column; gap: 3px; margin-bottom: 14px; }
+/* Session rows live INSIDE one grouped slab — the reference's card of missions
+   with hairline dividers — rather than floating as loose pills. */
+.ares[data-style="modern"] .sessionList {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin-bottom: 14px;
+  border: 1px solid rgba(255, 240, 224, 0.1);
+  border-radius: var(--r-md);
+  background: linear-gradient(158deg, rgba(255, 246, 236, 0.05), rgba(255, 240, 226, 0.015));
+  overflow: hidden;
+}
+.ares[data-style="modern"] .sessionList:empty { display: none; }
+/* the rail is a flex column — without this the mission slab grows to eat all
+   remaining height and reads as a big empty box under the last session */
+.ares[data-style="modern"] .sessionList { flex: none; }
 .ares[data-style="modern"] .sessionList > * {
   display: flex;
   align-items: center;
   gap: 11px;
-  padding: 7px 10px;
-  border-radius: 12px;
-  border: 1px solid transparent;
-  transition: background 140ms ease, border-color 140ms ease;
+  padding: 9px 11px;
+  border: none;
+  border-radius: 0;
+  transition: background 140ms ease;
 }
-.ares[data-style="modern"] .sessionList > *:hover { background: rgba(200, 155, 94, 0.06); border-color: rgba(200, 155, 94, 0.2); }
+.ares[data-style="modern"] .sessionList > * + * { border-top: 1px solid rgba(200, 155, 94, 0.09); }
+.ares[data-style="modern"] .sessionList > *:hover { background: rgba(200, 155, 94, 0.07); }
 .ares[data-style="modern"] .sessionList > *[data-on="1"] {
-  background: rgba(200, 155, 94, 0.09);
-  border-color: rgba(200, 155, 94, 0.3);
-  box-shadow: none;
+  background: rgba(200, 155, 94, 0.1);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 .ares[data-style="modern"] .sessionMain { min-width: 0; flex: 1; }
 .ares[data-style="modern"] .sessionMain > :first-child { font-size: 13px; color: rgba(240, 227, 205, 0.92); }
@@ -972,15 +1015,34 @@
 
 /* ── status bar ──────────────────────────────────────────────────────────── */
 
+/* Grid items refuse to shrink below min-content by default, so a long model
+   id blew the status row past the stage column and pushed the whole
+   transcript out of the window. min-width:0 lets it shrink; the segments
+   ellipsise instead of overflowing. */
+.ares[data-style="modern"] .stage > * { min-width: 0; }
 .ares[data-style="modern"] .statusBar {
-  height: 34px;
+  height: 40px;
   padding: 0 12px;
   gap: 0;
-  background: linear-gradient(180deg, #0b0a09, #0e0c0b);
-  border-top: 1px solid var(--line);
+  justify-content: center;
+  overflow: hidden;
   font-size: 11.5px;
 }
-.ares[data-style="modern"] .statusBar .statusGroup { gap: 0; border: none; background: transparent; box-shadow: none; padding: 0; }
+.ares[data-style="modern"] .statusBar .statusGroup:first-child { min-width: 0; max-width: 100%; overflow: hidden; }
+.ares[data-style="modern"] .statusSeg > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* the readout condenses into ONE floating glass capsule, centred under the
+   composer — the reference's "Garrison ready · model · Effort: High" chip */
+.ares[data-style="modern"] .statusBar .statusGroup:first-child {
+  gap: 0;
+  padding: 0 4px;
+  border: 1px solid var(--glass-edge);
+  border-radius: 999px;
+  background: var(--glass-fill);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-spec), var(--glass-lift);
+}
+.ares[data-style="modern"] .statusBar .statusSeg { height: 32px; border-radius: 999px; }
 .ares[data-style="modern"] .statusSeg {
   display: flex;
   align-items: center;
@@ -1024,11 +1086,36 @@
 .ares[data-style="modern"] .statusGroup .statusSeg + .statusAction { box-shadow: none; }
 .ares[data-style="modern"] .statusSeg .dot[data-state="running"] { background: var(--steel); box-shadow: 0 0 8px var(--steel); }
 .ares[data-style="modern"] .effortStatus span { color: var(--ember-text); }
+/* The capsule owns the centre. The token readout, utility icons and version
+   pin to the edges and ghost out, so nothing competes with it for width —
+   they were squeezing it until "effects" fell off the end. */
+.ares[data-style="modern"] .statusBar .hudReadout,
+.ares[data-style="modern"] .statusBar .statusActions,
+.ares[data-style="modern"] .statusBar .hudVersion {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  opacity: 0.4;
+  transition: opacity 160ms ease;
+}
+.ares[data-style="modern"] .statusBar .hudReadout:hover,
+.ares[data-style="modern"] .statusBar .statusActions:hover,
+.ares[data-style="modern"] .statusBar .hudVersion:hover { opacity: 1; }
+.ares[data-style="modern"] .statusBar .hudReadout { left: 4px; }
+.ares[data-style="modern"] .statusBar .statusActions { right: 44px; }
+.ares[data-style="modern"] .statusBar .hudVersion { right: 4px; }
+@media (max-width: 1400px) { .ares[data-style="modern"] .statusBar .hudReadout { display: none; } }
+@media (max-width: 1150px) {
+  .ares[data-style="modern"] .statusBar .statusActions,
+  .ares[data-style="modern"] .statusBar .hudVersion { display: none; }
+}
+
 .ares[data-style="modern"] .hudReadout { font: 400 11px/1 var(--mono); color: rgba(239, 227, 207, 0.55); padding: 0 12px; }
 .ares[data-style="modern"] .statusActions { border: none; background: transparent; box-shadow: none; }
 .ares[data-style="modern"] .statusIcon { color: rgba(232, 200, 147, 0.55); }
 .ares[data-style="modern"] .statusIcon:hover { color: var(--gold-hi); background: rgba(200, 155, 94, 0.06); }
 .ares[data-style="modern"] .hudVersion { font: 400 10.5px/1 var(--mono); color: rgba(239, 227, 207, 0.3); padding: 0 10px; }
+.ares[data-style="modern"] .statusBar { position: relative; }
 
 /* ── forge + overlays ────────────────────────────────────────────────────── */
 
@@ -1261,12 +1348,18 @@
    whatever moves behind it every frame (embers, the scrolling transcript), and
    pinned against the window edge it buys almost no depth for that cost — it
    just shimmers. Opaque tint, same palette, zero churn. */
+/* Neither the titlebar nor the status bar is a BAR any more. They are strips
+   of empty air whose contents float over the canvas — the "Online" chip and
+   the tool coins up top, one status capsule at the bottom — which is what
+   makes the room read as panels-in-space instead of a tiled dashboard.
+   (Also removes the last two full-width surfaces that could shimmer.) */
 .ares[data-style="modern"] .titlebar,
 .ares[data-style="modern"] .statusBar {
-  background: linear-gradient(180deg, #14110f, #0b0a09);
+  background: none;
+  border: none;
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
-  box-shadow: var(--glass-spec);
+  box-shadow: none;
   transition: none;
 }
 /* the working border-color swap on the titlebar was another luminance blink */
