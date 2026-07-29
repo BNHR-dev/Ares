@@ -1191,7 +1191,7 @@ function classify(
   }
   if (
     kind === "engine_error" &&
-    /\b(?:stream_stall|reasoning_stall|provider_throw|no_message_done|max_turns_exceeded)\b/.test(signal)
+    /\b(?:stream_stall|reasoning_stall|provider_throw|no_message_done|max_turns_exceeded|loop_detected)\b/.test(signal)
   ) {
     return {
       category: "product",

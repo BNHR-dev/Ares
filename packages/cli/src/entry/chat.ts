@@ -589,6 +589,13 @@ async function renderTurn(live: LiveSession, goal: string): Promise<void> {
       if (event.status !== "completed") {
         process.stderr.write(notice("Turn", [`status ${event.status}`], "warn"));
       }
+      if (event.workStatus === "unverified" || event.workStatus === "blocked") {
+        process.stderr.write(notice("Work", [
+          event.workStatus === "blocked"
+            ? "BLOCKED — verification checks still failing"
+            : "UNVERIFIED — changes lack a passing post-change verification",
+        ], "warn"));
+      }
       process.stderr.write(dim(usageMeter(event.usage, event.durationMs)) + "\n");
       await finishTurn(live, finalStatus);
       return;

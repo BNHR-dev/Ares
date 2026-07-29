@@ -1030,6 +1030,14 @@ function AresInkApp({ options }: { options: InkChatOptions }) {
         collapseDiffCards();
         finalizeFleet();
         settleOrphanToolLines();
+        if (event.workStatus === "unverified" || event.workStatus === "blocked") {
+          append(
+            "verify",
+            event.workStatus === "blocked"
+              ? "Turn ended BLOCKED — verification checks were still failing when the work stopped."
+              : "Turn ended UNVERIFIED — changes were made without a passing post-change verification.",
+          );
+        }
         // A permission ask can't outlive its turn — deny + drain so no dead
         // card lingers (its awaiter is gone; resolving is a harmless no-op).
         if (permRef.current) {

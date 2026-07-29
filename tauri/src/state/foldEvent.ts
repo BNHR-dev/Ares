@@ -304,9 +304,12 @@ export function foldEvent(s: SessionVm, e: AresEvent): SessionVm {
       // operational allowlist that needs owner attention; durable state,
       // repository maps, verifier output and loop guards stay in diagnostics.
       const text = e.text ?? "";
-      const visible = /^(?:Provider failed|All configured providers failed|Your Ares account couldn't run|Image attached|Garrison is down)|retrying with a smaller recent-history window/i.test(text);
+      // Honesty markers from the verification spine ARE owner business: a turn
+      // that ends with unresolved red checks, unverified coding changes, or an
+      // unscreenshotted GUI must not read as a clean finish in the chat.
+      const visible = /^(?:Provider failed|All configured providers failed|Your Ares account couldn't run|Image attached|Garrison is down|UNRESOLVED at turn end|UNVERIFIED at turn end|GUI-UNVERIFIED at turn end)|retrying with a smaller recent-history window/i.test(text);
       if (!visible) break;
-      const tone = /failed|couldn't run|down/i.test(text) ? "warn" : "dim";
+      const tone = /failed|couldn't run|down|UNRESOLVED|UNVERIFIED/i.test(text) ? "warn" : "dim";
       items.push({ kind: "notice", key: nextKey(), text: compact(text, 400), tone });
       break;
     }
@@ -376,6 +379,16 @@ export function foldEvent(s: SessionVm, e: AresEvent): SessionVm {
         lane: session.turnLane,
         provider: session.turnProvider,
       });
+      if (e.workStatus === "unverified" || e.workStatus === "blocked") {
+        items.push({
+          kind: "notice",
+          key: nextKey(),
+          text: e.workStatus === "blocked"
+            ? "Turn ended BLOCKED — verification checks were still failing when the work stopped."
+            : "Turn ended UNVERIFIED — changes were made without a passing post-change verification.",
+          tone: "warn",
+        });
+      }
       session.busy = false;
       session.steerQueued = 0;
       session.tokensIn += input;

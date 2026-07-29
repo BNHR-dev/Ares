@@ -72,6 +72,7 @@ export interface SessionOptions {
   persistedVerificationDebt?: QueryEngineConfig["persistedVerificationDebt"];
   persistedVerificationScopeComplete?: QueryEngineConfig["persistedVerificationScopeComplete"];
   observedMutationAt?: QueryEngineConfig["observedMutationAt"];
+  specDocs?: QueryEngineConfig["specDocs"];
   /** Failure-signature recall — see QueryEngineConfig.recallFailureFix. */
   recallFailureFix?: (input: { tool: string; signature: string; error: string }) => Promise<string | null>;
   hookManager?: HookManager;
@@ -88,7 +89,8 @@ export interface SessionOptions {
   maxOutputTokens?: number;
   /** Trim oldest history to keep estimated input under this many tokens. */
   contextBudgetTokens?: number;
-  /** Hard ceiling on tool-calling turns before the engine stops (default 80). */
+  /** Explicit hard ceiling on tool-calling turns. Unset = effectively
+   *  unbounded (huge backstop); loop-kill detectors terminate stuck turns. */
   maxTurns?: number;
   /** See QueryEngineConfig.onHistoryTrimmed — read-stamp invalidation on trim. */
   onHistoryTrimmed?: (dropped: readonly Message[]) => void;
@@ -160,6 +162,7 @@ export class Session {
         persistedVerificationDebt: opts.persistedVerificationDebt,
         persistedVerificationScopeComplete: opts.persistedVerificationScopeComplete,
         observedMutationAt: opts.observedMutationAt,
+        specDocs: opts.specDocs,
         recallFailureFix: opts.recallFailureFix,
         hookManager: opts.hookManager,
         requestPermission: opts.requestPermission,

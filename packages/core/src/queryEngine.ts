@@ -198,6 +198,12 @@ export interface QueryEngineConfig {
   persistedVerificationScopeComplete?(): boolean;
   /** Latest exact mutation observed below the engine (e.g. checkpoint-derived shell diff). */
   observedMutationAt?(): number;
+  /** Spec/requirements docs (e.g. the task .md) read during this coding
+   *  objective. When non-empty, the engine forces a requirements-vs-artifacts
+   *  diff before the first completion claim: re-open the spec, enumerate every
+   *  explicit deliverable and verification artifact, and confirm each exists —
+   *  the guard against silent scope reduction. */
+  specDocs?(): string[];
   /**
    * Failure-signature recall. When a tool fails the SAME way twice in a row (an
    * approach that's about to be declared dead), the engine asks the host whether
@@ -1189,10 +1195,13 @@ export class QueryEngine {
 
     const totalUsage: Usage = { inputTokens: 0, outputTokens: 0, modelCalls: 0 };
     let stopReason: StopReason = "end_turn";
-    // Big autonomous builds legitimately run long; the adaptive convergence
-    // guard below handles unproductive loops, so the hard ceiling is a
-    // backstop, not a leash.
-    const maxIters = this.cfg.maxTurns ?? 80;
+    // Big autonomous builds legitimately run long. There is deliberately NO
+    // meaningful default iteration cap: the loop-kill detectors below (dead
+    // failure loops, no-op repeats, sustained oscillation) are the real
+    // terminators, and a productive build may run for as many rounds as the
+    // work takes. The default here is a runaway backstop only — an explicit
+    // cfg.maxTurns (tests, subagents) or ARES_MAX_TURN_ITERS still binds.
+    const maxIters = this.cfg.maxTurns ?? defaultMaxIters();
     const gatherStallRounds = currentGatherStallRounds();
     // (turnAbort was already armed at the top of the turn — see above.)
     let ledgerAnnounced = false;
@@ -1232,7 +1241,9 @@ export class QueryEngine {
     let totalToolCalls = 0;
     let repeatBreakerFired = false;
     let oscillationFired = false;
+    let oscillationStreak = 0;
     let ceilingNudged = false;
+    let shellEditHinted = false;
     // Coding completion truth. Tool-reported mutations arm the proof gate;
     // only a successful manual check or host verifier result AFTER the latest
     // mutation can mark the work verified.
@@ -1243,6 +1254,19 @@ export class QueryEngine {
     const changedFiles = new Set<string>();
     let proofGateFired = false;
     let unverifiedSurfaced = false;
+    // GUI ground truth. Headless/unit green does not prove a window renders:
+    // the BeanBrawl failure shipped a grey screen behind "27/27 tests pass".
+    // When the turn touches a windowed-app artifact (Godot/Tauri/Electron/
+    // Unity scenes, desktop exports), completion additionally requires VISUAL
+    // evidence — a successful ComputerUse/Browser screenshot newer than the
+    // last mutation — before the work can resolve as verified.
+    const guiSignals = new Set<string>();
+    let visualEvidenceAt = 0;
+    let guiGateFired = false;
+    let guiUnverifiedSurfaced = false;
+    let specGateFired = false;
+    const guiNeedsVisualProof = (): boolean =>
+      guiSignals.size > 0 && (visualEvidenceAt === 0 || visualEvidenceAt < lastMutationAt);
     let workStatus: WorkStatus = "not_applicable";
     let verificationGenerationAtMutation = this.cfg.verificationEvidence?.().mutationGeneration ?? 0;
     const hasOutstandingVerification = (): boolean => this.cfg.outstandingVerificationRequired?.() === true;
@@ -1299,6 +1323,9 @@ export class QueryEngine {
     const resolvedWorkStatus = (): WorkStatus => {
       if (workStatus === "blocked") return "blocked";
       if (!requiresVerification()) return "not_applicable";
+      // A GUI artifact without post-mutation visual proof can NEVER resolve
+      // verified, no matter how green the headless checks are.
+      if (guiNeedsVisualProof()) return "unverified";
       return hasPostMutationProof() ? "verified" : "unverified";
     };
 
@@ -1749,6 +1776,69 @@ export class QueryEngine {
             }
           }
         }
+        // GUI ground-truth gate. A windowed-app artifact (Godot scene, Tauri/
+        // Electron build, desktop export) can pass every headless check and
+        // still open to a broken screen — pixels are the only proof. Require a
+        // successful screenshot NEWER than the last mutation before accepting
+        // "done". One push; a second unsupported finish ends honestly as
+        // GUI-UNVERIFIED (and resolvedWorkStatus stays unverified).
+        if (
+          this.cfg.requireVerificationEvidence &&
+          workStatus !== "blocked" &&
+          requiresVerification() &&
+          guiNeedsVisualProof() &&
+          !this.liveSignal().aborted
+        ) {
+          if (!guiGateFired) {
+            guiGateFired = true;
+            const what = [...guiSignals].slice(0, 4).join(", ");
+            const text = `This task produced a WINDOWED app artifact (${what}), and there is no screenshot of the running app newer than your last change. Headless boots and unit tests do not prove the UI renders — an app can pass every logic test and still open to a broken/grey screen. Launch the actual app (windowed, NOT --headless), capture a real screenshot (ComputerUse {action:"screenshot"}, or the Browser screenshot action for web UIs), look at it, and confirm what is on screen matches what you claim. If you cannot open a window in this environment, say so plainly instead of claiming the UI works.`;
+            this.messages.push({
+              id: cryptoId(),
+              role: "user",
+              content: [{ type: "system_reminder", text }],
+              createdAt: new Date().toISOString(),
+            });
+            yield { type: "system_reminder_injected", text, source: "verifier" };
+            continue;
+          }
+          if (!guiUnverifiedSurfaced) {
+            guiUnverifiedSurfaced = true;
+            yield {
+              type: "system_reminder_injected",
+              text: "GUI-UNVERIFIED at turn end: a windowed-app artifact changed, but no screenshot of the running app was captured after the last change. The UI may not render as claimed.",
+              source: "verifier",
+            };
+          }
+        }
+        // Spec-checklist gate: when a spec/requirements doc anchored this
+        // coding objective, force one requirements-vs-artifacts diff before
+        // the first completion claim — the guard against silent scope
+        // reduction (spec demanded screenshots/commits/tests that were never
+        // produced, yet "done" was claimed).
+        {
+          const specDocs = this.cfg.specDocs?.() ?? [];
+          if (
+            this.cfg.requireVerificationEvidence &&
+            workStatus !== "blocked" &&
+            requiresVerification() &&
+            specDocs.length > 0 &&
+            !specGateFired &&
+            !this.liveSignal().aborted
+          ) {
+            specGateFired = true;
+            const docs = specDocs.slice(0, 4).join(", ");
+            const text = `Before finishing: re-open the task spec (${docs}) and diff it against what you actually produced. Enumerate every EXPLICIT deliverable and verification artifact it demands — files, screenshots, tests, builds, commits — and confirm each exists on disk right now. List anything missing or cut and why; do not silently reduce scope. If the spec calls for committed milestones, confirm the working tree is actually committed (git status), not just edited.`;
+            this.messages.push({
+              id: cryptoId(),
+              role: "user",
+              content: [{ type: "system_reminder", text }],
+              createdAt: new Date().toISOString(),
+            });
+            yield { type: "system_reminder_injected", text, source: "verifier" };
+            continue;
+          }
+        }
         // Post-edit proof gate. The verifier's empty reminder queue is NOT a
         // green verdict: it can also mean no command was derived or every tool
         // was skipped. Settle the normal end gate first, then require concrete
@@ -1851,6 +1941,7 @@ export class QueryEngine {
       }
 
       let interruptedByTool = false;
+      const useById = new Map(pendingToolUses.map((u) => [u.id, u] as const));
       for (const batch of buildDepAwareBatches(runnable, this.cfg.workspace)) {
         // Capture BEFORE yielding tool events to the host: Session/UI consumers
         // schedule verification while tool_end is yielded, so reading the
@@ -1870,6 +1961,20 @@ export class QueryEngine {
             lastMutationAt = Math.max(lastMutationAt, outcome.finishedAt ?? Date.now());
             changedFiles.add("<shell-mediated workspace changes>");
             workStatus = "unverified";
+          }
+          // GUI ground-truth tracking: collect windowed-app signals from this
+          // outcome, and credit visual evidence from successful screenshot
+          // calls (ComputerUse always captures pixels; Browser only counts
+          // when the result actually carries an image — its embedded-engine
+          // fallback is a self-flagged text snapshot).
+          {
+            const use = useById.get(outcome.toolUseId);
+            if (use && outcome.result.is_error !== true) {
+              for (const sig of guiArtifactSignals(use.name, use.input, outcome.touchedFiles)) guiSignals.add(sig);
+              if (isVisualEvidenceCall(use.name, use.input, outcome.result)) {
+                visualEvidenceAt = Math.max(visualEvidenceAt, outcome.finishedAt ?? Date.now());
+              }
+            }
           }
           if (outcome.verificationPassed) {
             if (
@@ -1911,6 +2016,35 @@ export class QueryEngine {
         content: orderedToolResults(pendingToolUses, resultByToolUseId),
         createdAt: new Date().toISOString(),
       });
+
+      // ── shell-regex file-edit hint (one-shot) ───────────────────────────
+      // Editing files via shell regex replace (`-replace` + Set-Content, or
+      // `sed -i`) fails SILENTLY when the pattern doesn't match — the command
+      // "succeeds", the file is unchanged, and the model chases phantom bugs
+      // (observed live: ~15 rounds lost to a project.godot no-op replace).
+      // The Edit tool errors loudly on no-match; nudge toward it once.
+      if (!shellEditHinted) {
+        const shellRegexEdit = pendingToolUses.some((u) => {
+          if (u.name !== "PowerShell" && u.name !== "Bash") return false;
+          const cmd = (u.input as Record<string, unknown> | null | undefined)?.["command"];
+          if (typeof cmd !== "string") return false;
+          return /\bsed\s+(?:-\w*\s+)*-i\b/.test(cmd) ||
+            (/-replace\s/.test(cmd) && /\b(?:set-content|out-file|add-content)\b/i.test(cmd));
+        });
+        if (shellRegexEdit) {
+          shellEditHinted = true;
+          this.messages.push({
+            id: cryptoId(),
+            role: "user",
+            content: [{
+              type: "system_reminder",
+              text: "You edited a file via shell regex replace (`-replace`/`sed -i`). If the pattern doesn't match, that silently does NOTHING — the command still exits 0 and the file stays stale. Prefer the Edit tool: it fails loudly when the target string isn't found. If you keep the shell approach, verify the file actually changed (grep for the new value) before relying on it.",
+            }],
+            createdAt: new Date().toISOString(),
+          });
+          yield { type: "system_reminder_injected", text: "shell-regex file edit detected — Edit tool fails loudly, shell replace fails silently", source: "instructions" };
+        }
+      }
 
       // ── repeated-failure circuit-breaker ────────────────────────────────
       // Track this round's failures by (tool, error-signature). Any signature
@@ -1959,6 +2093,31 @@ export class QueryEngine {
           }
         }
       }
+      // ── loop-kill: dead failure loop ────────────────────────────────────
+      // The breaker (3×) and failure-recall (2×) already intervened. A model
+      // still re-issuing the SAME failing call after both interventions is
+      // provably stuck — and with no default iteration cap, this terminator is
+      // what ends the turn. Fail honestly with the loop named, never hang.
+      const deadSig = [...failStreak.entries()].find(([, n]) => n >= loopKillLimit())?.[0];
+      if (deadSig) {
+        const toolName = deadSig.split(":")[0];
+        yield {
+          type: "error",
+          error: {
+            code: "loop_detected",
+            message: `stuck loop: ${toolName} failed identically ${failStreak.get(deadSig)} rounds in a row despite strategy-change interventions`,
+            retriable: false,
+          },
+        };
+        yield {
+          type: "turn_end",
+          status: "failed",
+          workStatus: resolvedWorkStatus(),
+          usage: totalUsage,
+          durationMs: Date.now() - startedAt,
+        };
+        return;
+      }
       const stuckSig = [...failStreak.entries()].find(([, n]) => n >= 3)?.[0];
       if (stuckSig && !breakerFired) {
         breakerFired = true;
@@ -1985,6 +2144,31 @@ export class QueryEngine {
       for (const use of pendingToolUses) roundSigs.add(canonicalCallSignature(use.name, use.input));
       for (const sig of roundSigs) repeatStreak.set(sig, (repeatStreak.get(sig) ?? 0) + 1);
       for (const sig of [...repeatStreak.keys()]) if (!roundSigs.has(sig)) repeatStreak.delete(sig);
+      // ── loop-kill: no-op repeat loop ────────────────────────────────────
+      // Identical SUCCESSFUL call still being re-issued long after the nudge
+      // fired (3× warns, 3× the limit kills). Same contract as the failure
+      // loop-kill: with no iteration cap, sustained no-op repetition must end
+      // the turn honestly instead of burning tokens forever.
+      const noopSig = [...repeatStreak.entries()].find(([, n]) => n >= repeatCallLimit() * 3)?.[0];
+      if (noopSig) {
+        const toolName = pendingToolUses.find((u) => canonicalCallSignature(u.name, u.input) === noopSig)?.name ?? noopSig.split("::")[0];
+        yield {
+          type: "error",
+          error: {
+            code: "loop_detected",
+            message: `stuck loop: identical ${toolName} call repeated ${repeatStreak.get(noopSig)} rounds with no new input despite convergence nudges`,
+            retriable: false,
+          },
+        };
+        yield {
+          type: "turn_end",
+          status: "failed",
+          workStatus: resolvedWorkStatus(),
+          usage: totalUsage,
+          durationMs: Date.now() - startedAt,
+        };
+        return;
+      }
       const repeatedSig = [...repeatStreak.entries()].find(([, n]) => n >= repeatCallLimit())?.[0];
       if (repeatedSig && !repeatBreakerFired) {
         repeatBreakerFired = true;
@@ -2008,13 +2192,34 @@ export class QueryEngine {
       roundSigHistory.push(roundSig);
       if (roundSigHistory.length > 6) roundSigHistory.shift();
       const h = roundSigHistory;
-      if (
+      const oscillating =
         h.length >= 4 &&
         h[h.length - 1] === h[h.length - 3] &&
         h[h.length - 2] === h[h.length - 4] &&
-        h[h.length - 1] !== h[h.length - 2] &&
-        !oscillationFired
-      ) {
+        h[h.length - 1] !== h[h.length - 2];
+      // ── loop-kill: sustained oscillation ────────────────────────────────
+      // The one-shot nudge below fires on the first detection; a model still
+      // ping-ponging A/B/A/B many rounds later has ignored it. Terminate.
+      oscillationStreak = oscillating ? oscillationStreak + 1 : 0;
+      if (oscillationStreak >= loopKillLimit()) {
+        yield {
+          type: "error",
+          error: {
+            code: "loop_detected",
+            message: `stuck loop: A/B oscillation between two tool-call states persisted ${oscillationStreak} rounds despite the convergence nudge`,
+            retriable: false,
+          },
+        };
+        yield {
+          type: "turn_end",
+          status: "failed",
+          workStatus: resolvedWorkStatus(),
+          usage: totalUsage,
+          durationMs: Date.now() - startedAt,
+        };
+        return;
+      }
+      if (oscillating && !oscillationFired) {
         oscillationFired = true;
         this.messages.push({
           id: cryptoId(),
@@ -2704,6 +2909,28 @@ function normalizeToolInput(toolName: string, input: unknown): unknown {
     }
   };
 
+  // Weak/loosely-trained models sometimes emit a structured argument as a
+  // JSON-ENCODED STRING ("todos": "[{...}]") instead of the actual array or
+  // object — observed live: glm-5.2 failed TodoWrite twice this way. Coerce
+  // any string value that parses to an array/object back to the real value
+  // for parameters that are structurally ALWAYS non-scalar. Never applied to
+  // free-text params (Write.content may legitimately start with "[").
+  const parseStructured = (key: string) => {
+    const v = next[key];
+    if (typeof v !== "string") return;
+    const s = v.trim();
+    if (!(s.startsWith("[") || s.startsWith("{"))) return;
+    try {
+      const parsed = JSON.parse(s) as unknown;
+      if (parsed && typeof parsed === "object") next[key] = parsed;
+    } catch {
+      // leave as-is; schema validation reports the real error
+    }
+  };
+  for (const key of ["todos", "edits"]) {
+    if (key in next) parseStructured(key);
+  }
+
   switch (toolName) {
     case "Read":
       copy("file_path", "path", "file");
@@ -3219,10 +3446,69 @@ function fnv1a(text: string): string {
   return (h >>> 0).toString(36);
 }
 
+/** Files whose mutation means "a windowed app changed" — scene/config formats
+ *  that only exist for GUI runtimes. Deliberately conservative: false positives
+ *  add one screenshot request; false negatives ship grey screens. */
+const GUI_ARTIFACT_FILE_RE =
+  /\.(?:tscn|tres|uproject|unity|xaml)$|(?:^|[\\/])project\.godot$|(?:^|[\\/])tauri\.conf\.(?:json|json5|toml)$|(?:^|[\\/])export_presets\.cfg$/i;
+
+/** Shell commands that build/run a windowed app (desktop exports, GUI engines). */
+const GUI_ARTIFACT_SHELL_RE =
+  /\bgodot(?:[.\w-]*\.exe)?\b|--export-(?:release|debug)\b|\btauri\s+(?:dev|build)\b|\bcargo\s+tauri\b|\belectron\b|\belectron-builder\b/i;
+
+/** Signals that this tool outcome touched a windowed-app artifact. */
+function guiArtifactSignals(toolName: string, input: unknown, touchedFiles?: readonly string[]): string[] {
+  const signals: string[] = [];
+  for (const file of touchedFiles ?? []) {
+    if (GUI_ARTIFACT_FILE_RE.test(file)) signals.push(path.basename(file));
+  }
+  if ((toolName === "Bash" || toolName === "PowerShell") && input && typeof input === "object") {
+    const cmd = (input as Record<string, unknown>)["command"];
+    if (typeof cmd === "string") {
+      const m = GUI_ARTIFACT_SHELL_RE.exec(cmd);
+      if (m) signals.push(`shell:${m[0].trim()}`);
+    }
+  }
+  return signals;
+}
+
+/** True when this successful call captured REAL pixels of a running UI.
+ *  ComputerUse screenshot/zoom always grabs the screen; Browser screenshot
+ *  counts only when the result actually carries an image block (its embedded
+ *  fallback returns a self-flagged text snapshot that proves nothing). */
+function isVisualEvidenceCall(toolName: string, input: unknown, result: ToolResultBlock): boolean {
+  const action =
+    input && typeof input === "object" ? String((input as Record<string, unknown>)["action"] ?? "") : "";
+  if (toolName === "ComputerUse") return action === "screenshot" || action === "zoom";
+  if (toolName === "Browser") {
+    if (!/^(?:screenshot|filmstrip)$/.test(action)) return false;
+    return Array.isArray(result.content) && result.content.some((b) => (b as { type?: string }).type === "image");
+  }
+  return false;
+}
+
 /** Threshold for the identical-call (no-op loop) detector. */
 function repeatCallLimit(): number {
   const raw = Number(process.env.ARES_REPEAT_CALL_LIMIT);
   return Number.isFinite(raw) && raw >= 2 ? Math.floor(raw) : 3;
+}
+
+/** Consecutive rounds of a provably-stuck pattern (identical failure, or
+ *  sustained A/B oscillation) after which the turn is TERMINATED as
+ *  loop_detected. This is the real stopping rule now that iterations are
+ *  effectively unbounded: interventions fire at 2× (recall) and 3× (breaker);
+ *  a model still looping at this count has ignored both. */
+function loopKillLimit(): number {
+  const raw = Number(process.env.ARES_LOOP_KILL_LIMIT);
+  return Number.isFinite(raw) && raw >= 4 ? Math.floor(raw) : 8;
+}
+
+/** Default per-turn iteration backstop when cfg.maxTurns is not set. Loop-kill
+ *  detectors are the real terminators; this only stops a pathological run that
+ *  somehow evades every detector. */
+function defaultMaxIters(): number {
+  const raw = Number(process.env.ARES_MAX_TURN_ITERS);
+  return Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : 10_000;
 }
 
 /** Absolute per-turn tool-call ceiling — a graceful backstop that ends the turn
@@ -3230,7 +3516,10 @@ function repeatCallLimit(): number {
  *  max_turns_exceeded path. Default high enough no legit build hits it. */
 function toolCallCeiling(): number {
   const raw = Number(process.env.ARES_MAX_TURN_TOOL_CALLS);
-  return Number.isFinite(raw) && raw >= 10 ? Math.floor(raw) : 400;
+  // No practical tool-call limit by default: loop-kill detectors terminate
+  // stuck turns, so a productive build may issue as many calls as it needs.
+  // The default only backstops a pathological run that evades every detector.
+  return Number.isFinite(raw) && raw >= 10 ? Math.floor(raw) : 5000;
 }
 
 function contextBudgetAttempts(configuredBudgetTokens: number): number[] {
