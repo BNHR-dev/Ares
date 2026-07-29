@@ -624,6 +624,23 @@ a:hover { border-bottom-color: var(--bronze-hi); }
   border-color: rgba(var(--accent-rgb), 0.15);
   animation: ringSpin 50s linear infinite reverse;
 }
+/* the empty-state question line — quiet by default; the modern skin makes it
+   the headline (see modern.css). */
+.empty .emptyAsk { margin: 6px 0 0; font: 500 15px/1.4 var(--font); color: var(--muted); letter-spacing: 0.01em; }
+
+/* Modern-skin-only markup (Ares sigil medallions, the rail wordmark, the
+   titlebar tool row). It is rendered unconditionally so the tree stays simple;
+   these rules keep Forged and Legacy pixel-identical to before the reskin.
+   modern.css re-enables and styles them under [data-style="modern"]. */
+.ares:not([data-style="modern"]) .medallion,
+.ares:not([data-style="modern"]) .railBrand,
+.ares:not([data-style="modern"]) .titleTools { display: none; }
+
+/* Modern-skin-only markup (medallion icons, rail wordmark, titlebar tools):
+   rendered unconditionally for simplicity, INVISIBLE outside data-style="modern"
+   so Forged/Legacy stay pixel-identical. modern.css re-enables and styles them. */
+.medallion, .railBrand, .titleTools { display: none; }
+
 .empty h3 { margin: 6px 0 0; font-weight: 650; color: var(--text); letter-spacing: 0.01em; }
 .empty p { margin: 0; font-size: 13px; max-width: 380px; color: var(--muted); }
 

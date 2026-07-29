@@ -15,14 +15,23 @@
 import React, { createContext, useContext, useEffect, useRef, useState } from "react";
 import { motion, useReducedMotion, useSpring, useTransform } from "framer-motion";
 
-export type UiStyle = "legacy" | "new";
+export type UiStyle = "legacy" | "new" | "modern";
 
 /** Provided at the app root from prefs.uiStyle. Defaults to legacy so any
  *  stray render outside the provider stays on the untouched path. */
 export const StyleCtx = createContext<UiStyle>("legacy");
 
+/** True for every non-legacy skin. "modern" (the glass-forge reskin) keeps all
+ *  the Forged runtime behaviors — springs, gauges, token flow — and restyles
+ *  the surfaces in CSS (modern.css, scoped under data-style="modern"). */
 export function useNewStyle(): boolean {
-  return useContext(StyleCtx) === "new";
+  return useContext(StyleCtx) !== "legacy";
+}
+
+/** The raw skin, for the few places that must render different MARKUP (not just
+ *  different CSS) — e.g. the composer swapping its glyphs for Ares sigils. */
+export function useUiStyle(): UiStyle {
+  return useContext(StyleCtx);
 }
 
 // ─── SpringNumber — a numeric readout that glides instead of jumping ────────
@@ -123,10 +132,13 @@ export function pushTokenFlow(chars: number): void {
  *  follows tokens/sec (≈ chars/4). One rAF loop, owned here; paused when the
  *  document is hidden and unmounted entirely when the turn isn't busy. */
 export function TokenFlowStrip({ busy }: { busy: boolean }) {
-  const newStyle = useNewStyle();
+  // Forged ONLY. The modern skin says "working" with a single ember sweep under
+  // the composer (pure CSS); dropping this canvas pulse-line on top of it read
+  // as a stray heart-rate monitor shoving the transcript around mid-turn.
+  const forged = useUiStyle() === "new";
   const reduced = useReducedMotion();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const active = newStyle && busy && !reduced;
+  const active = forged && busy && !reduced;
 
   useEffect(() => {
     if (!active) return;

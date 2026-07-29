@@ -12,6 +12,10 @@ export interface AresEvent {
   name?: string;
   toolName?: string;
   status?: string;
+  /** turn_end only — the engine's work-truth verdict for the turn. Drives the
+   *  "finished but UNVERIFIED" disclosure so a turn that changed code without
+   *  a passing check never reads as a clean finish. */
+  workStatus?: "not_applicable" | "unverified" | "verified" | "blocked";
   source?: string;
   reason?: string;
   decision?: string;

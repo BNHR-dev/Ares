@@ -34,7 +34,8 @@ import { redactSecrets } from "../../packages/protocol/src/secretRedact";
 import { UpdateBanner } from "./UpdateBanner";
 import { WhatsNew } from "./WhatsNew";
 import { LivingSurface } from "./LivingSurface";
-import { StyleCtx, SpringNumber, SpringHeight, TokenFlowStrip, pushTokenFlow, useNewStyle } from "./newStyle";
+import { StyleCtx, SpringNumber, SpringHeight, TokenFlowStrip, pushTokenFlow, useNewStyle, useUiStyle } from "./newStyle";
+import { AresSigils, Medallion, Sigil } from "./modernIcons";
 import { CHANGELOG } from "./changelog";
 import { useTts, sidecarListen, wakeListen, fetchVoices, setVoiceToken, setVoiceEndpoint, type VoiceInfo, type WakeHandle } from "./voice";
 import {
@@ -100,6 +101,7 @@ import {
 } from "./models/catalog";
 import { STREAM_SPEECH_SENTENCE_MIN, STREAM_SPEECH_BATCH_MIN, takeStreamSpeechChunk } from "./voice/streamSpeech";
 import "./styles.css";
+import "./modern.css";
 
 // The app version, injected by Vite's `define`. Guarded with typeof so that even
 // if the build ever fails to substitute the token (which white-screened the app
@@ -2269,6 +2271,7 @@ function App() {
       data-ultra={prefs.ultra ? "1" : "0"}
       style={{ ["--forge-w" as string]: `${forgeWidth}px`, ["--heat" as string]: heat.toFixed(3), ["--draft" as string]: draft.toFixed(3) }}
     >
+      <AresSigils />
       {pill ? (
         <PillBar
           daemon={daemon}
@@ -2514,6 +2517,25 @@ function App() {
         <span className="pill" data-state={daemon}>
           {daemon === "running" ? "ONLINE" : daemon.toUpperCase()}
         </span>
+        {prefs.uiStyle === "modern" ? (
+          <div className="titleTools" onMouseDown={(ev) => ev.stopPropagation()}>
+            <button className="titleIcon" onClick={() => setPaletteOpen(true)} title="Command palette (Ctrl+K)" aria-label="Command palette">
+              <Medallion glyph="search" size={30} />
+            </button>
+            <button
+              className="titleIcon"
+              onClick={() => setForge((f) => ({ ...f, open: !f.open, tab: f.open ? f.tab : f.artifact ? "preview" : liveTarget ? "live" : "preview" }))}
+              title={forge.open ? "Close the Forge" : "Open the Forge"}
+              aria-label="Forge"
+              data-on={forge.open ? "1" : "0"}
+            >
+              <Medallion glyph="forge" size={30} />
+            </button>
+            <button className="titleIcon" onClick={() => setSettingsOpen(true)} title="Settings" aria-label="Settings">
+              <Medallion glyph="settings" size={30} />
+            </button>
+          </div>
+        ) : null}
         <div className="winControls">
           <button className="winPill" aria-label="condense to floating pill" title="Condense to a floating pill" onClick={() => void enterPill()}>
             <AresPillGlyph />
@@ -2532,17 +2554,18 @@ function App() {
       </header>
 
       <aside className="rail">
+        <div className="railBrand" aria-hidden="true">ARES</div>
         <button className="railCollapse" onClick={toggleRail} title="Collapse navigation" aria-label="Collapse navigation">
           <svg viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.4"><path d="M11 4 6 9l5 5"/><path d="M15 3v12"/></svg>
           <span>Collapse</span>
         </button>
         <button className="primary" onClick={newSession}>
-          + New session
+          <Medallion glyph="new-session" tone="ember" /><span className="primaryLabel">New session</span>
         </button>
 
         <nav className="railNav">
           <button data-on={view === "chat" ? "1" : "0"} onClick={() => setView("chat")}>
-            <i className="glyph" data-glyph="task" /> Sessions
+            <Medallion glyph="sessions" /><i className="glyph" data-glyph="task" /> Sessions
           </button>
           <button
             className="helmNav"
@@ -2554,7 +2577,7 @@ function App() {
               daemonCmd({ type: "usage_stats", days: 14 });
             }}
           >
-            <i className="glyph" data-glyph="dot" /> HELM
+            <Medallion glyph="helm" /><i className="glyph" data-glyph="dot" /> HELM
             {opStatus?.activeCount ? <em>{opStatus.activeCount}</em> : null}
           </button>
           <button
@@ -2564,7 +2587,7 @@ function App() {
               setForge((current) => ({ ...current, open: false }));
             }}
           >
-            <i className="glyph" data-glyph="file" /> Artifacts
+            <Medallion glyph="artifacts" /><i className="glyph" data-glyph="file" /> Artifacts
             {vaultCount > 0 ? <em>{vaultCount}</em> : null}
           </button>
         </nav>
@@ -2596,13 +2619,15 @@ function App() {
         </nav>
 
         <div className="railFoot">
-          <button className="ghost" disabled={!native || daemon !== "running" || active?.busy} onClick={undoLastChange}>
+          {/* data-act lets the modern skin drop the two that moved into the
+              titlebar (Forge, Settings) without touching the other skins. */}
+          <button className="ghost" data-act="undo" disabled={!native || daemon !== "running" || active?.busy} onClick={undoLastChange}>
             Undo last agent change
           </button>
-          <button className="ghost" onClick={() => setForge((f) => ({ ...f, open: !f.open, tab: f.open ? f.tab : f.artifact ? "preview" : liveTarget ? "live" : "preview" }))}>
+          <button className="ghost" data-act="forge" onClick={() => setForge((f) => ({ ...f, open: !f.open, tab: f.open ? f.tab : f.artifact ? "preview" : liveTarget ? "live" : "preview" }))}>
             {forge.open ? "Close the Forge" : "Open the Forge"}
           </button>
-          <button className="ghost" onClick={() => setSettingsOpen(true)}>
+          <button className="ghost" data-act="settings" onClick={() => setSettingsOpen(true)}>
             Settings
           </button>
           <div className="daemonDot" title={`daemon: ${daemon}`}>
@@ -2656,16 +2681,21 @@ function App() {
               </div>
             ) : active && active.items.length === 0 ? (
               <div className="empty">
+                <div className="emptyEmblem" aria-hidden="true">
+                  <Sigil name="helm" size={64} />
+                </div>
                 <div className="wordmark">ARES</div>
                 <p className="wordmarkSub">Name the mission. I'll plan it, build it, verify it — and show you proof.</p>
+                <h2 className="emptyAsk">Command the mission.</h2>
                 <div className="starters">
                   {[
-                    "Audit this repo and list the top risks",
-                    "Build me a landing page and preview it",
-                    "Design a robot arm on the holotable",
-                  ].map((qq) => (
-                    <button key={qq} className="starter" onClick={() => send(qq)}>
-                      {qq}
+                    { label: "Audit this repository", icon: "shield" as const, q: "Audit this repository and list the top risks, ranked, with the evidence for each." },
+                    { label: "Build and verify", icon: "forge" as const, q: "Build me a landing page, preview it, and show me a screenshot proving it renders." },
+                    { label: "Design a system", icon: "artifacts" as const, q: "Design a robot arm on the holotable." },
+                  ].map(({ label, icon, q }) => (
+                    <button key={label} className="starter" onClick={() => send(q)} title={q}>
+                      <Medallion glyph={icon} size={40} />
+                      <span className="starterLabel">{label}</span>
                     </button>
                   ))}
                 </div>
@@ -4961,6 +4991,9 @@ const Composer = React.memo(function Composer({
     setAttachmentsState(attachmentsRef.current);
   };
   const ref = useRef<HTMLTextAreaElement | null>(null);
+  // The modern skin swaps the composer's glyphs for Ares sigils (markup, not
+  // just CSS — the sigils are <use> refs into the sprite).
+  const modern = useUiStyle() === "modern";
   // In-flight FileReader reads from a paste/drop that haven't landed in
   // `attachments` yet. FileReader is async — pasting a screenshot and
   // immediately hitting Enter (a completely normal motion) could fire submit()
@@ -5141,7 +5174,7 @@ const Composer = React.memo(function Composer({
           aria-pressed={dictation.state === "recording"}
           title={dictation.state === "recording" ? "listening — pauses automatically; tap to finish early" : dictation.state === "thinking" ? "decoding speech…" : dictation.state === "error" ? "mic unavailable" : "tap once, speak, and pause"}
         >
-          {dictation.state === "thinking" ? <i className="micSpin" /> : <MicGlyph />}
+          {dictation.state === "thinking" ? <i className="micSpin" /> : modern ? <Sigil name="voice" size={22} /> : <MicGlyph />}
         </button>
         {busy ? (
           <>
@@ -5160,9 +5193,13 @@ const Composer = React.memo(function Composer({
           </>
         ) : (
           <button className="send" onClick={() => void submit()} disabled={!text.trim() && attachments.length === 0} aria-label="send">
-            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M2 8 L14 2 L10.5 14 L8 9 Z" />
-            </svg>
+            {modern ? (
+              <Sigil name="send" size={22} />
+            ) : (
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M2 8 L14 2 L10.5 14 L8 9 Z" />
+              </svg>
+            )}
           </button>
         )}
       </div>
@@ -6987,10 +7024,20 @@ function Settings({
               <label className="fieldLabel">Interface style</label>
               <div className="displayModes">
                 <button
+                  data-on={draft.uiStyle === "modern" ? "1" : "0"}
+                  onClick={() => {
+                    setDraftPrefs({ ...draft, uiStyle: "modern" });
+                    onLivePref({ uiStyle: "modern" }); // display-only — preview instantly
+                  }}
+                >
+                  <strong>Modern</strong>
+                  <span>Floating smoked glass, copper ember, cinematic canvas.</span>
+                </button>
+                <button
                   data-on={draft.uiStyle === "new" ? "1" : "0"}
                   onClick={() => {
                     setDraftPrefs({ ...draft, uiStyle: "new" });
-                    onLivePref({ uiStyle: "new" }); // display-only — preview instantly
+                    onLivePref({ uiStyle: "new" });
                   }}
                 >
                   <strong>Forged</strong>

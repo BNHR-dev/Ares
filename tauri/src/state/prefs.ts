@@ -29,10 +29,16 @@ export interface Prefs {
   pinned: string[];
   /** Accent theme for the desktop chrome. */
   theme: ThemeName;
-  /** Interface style — "new" = the Forged skin (glass depth, spring motion,
-   *  living gauges); "legacy" = the classic flat shell, pixel-identical to
-   *  the pre-skin app. Everything new is scoped under data-style="new". */
-  uiStyle: "legacy" | "new";
+  /** Interface style — "modern" = the glass-forge reskin (floating smoked-glass
+   *  surfaces over a cinematic obsidian canvas, copper accent, mint success;
+   *  scoped under data-style="modern" in modern.css); "new" = the Forged skin
+   *  (glass depth, spring motion, living gauges); "legacy" = the classic flat
+   *  shell, pixel-identical to the pre-skin app. */
+  uiStyle: "legacy" | "new" | "modern";
+  /** Marks a post-glass-revamp save. Absent = pre-revamp prefs: a stored
+   *  "new" was the old DEFAULT (not a choice), so it migrates to "modern"
+   *  once; explicit re-picks of Forged after that stick. */
+  uiStyleV2?: boolean;
   /** Advanced engine knobs (mirrors the daemon's EngineConfig). */
   engine: EngineConfig;
   /** Voice: speak Ares's replies aloud via the local sidecar (Kokoro TTS). */
@@ -92,7 +98,7 @@ export function loadPrefs(): Prefs {
     flameMode: IS_LINUX ? "clean" : "immersive",
     pinned: [],
     theme: "rage",
-    uiStyle: "new",
+    uiStyle: "modern",
     engine: {},
   };
   try {
@@ -118,7 +124,15 @@ export function loadPrefs(): Prefs {
       flameMode: raw.flameMode === "clean" || raw.flameMode === "combat" || raw.flameMode === "immersive" || raw.flameMode === "off" ? raw.flameMode : fallback.flameMode,
       pinned: Array.isArray(raw.pinned) ? raw.pinned.filter((p): p is string => typeof p === "string") : [],
       theme: themeOk ? (raw.theme as ThemeName) : "rage",
-      uiStyle: raw.uiStyle === "legacy" ? "legacy" : "new",
+      // Glass-revamp migration: pre-V2 saves stored "new" as the mere DEFAULT,
+      // not a choice — upgrade those to "modern" once. Post-V2 saves (any
+      // value) are explicit picks and stick, so Forged stays selectable.
+      uiStyle: raw.uiStyle === "legacy"
+        ? "legacy"
+        : raw.uiStyleV2 && raw.uiStyle === "new"
+          ? "new"
+          : "modern",
+      uiStyleV2: true,
       engine: raw.engine && typeof raw.engine === "object" ? raw.engine : {},
       voiceEnabled: raw.voiceEnabled === true,
       voiceId: typeof raw.voiceId === "string" ? raw.voiceId : undefined,

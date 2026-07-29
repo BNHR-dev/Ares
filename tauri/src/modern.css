@@ -1,0 +1,994 @@
+/* ═══ ARES · MODERN ════════════════════════════════════════════════════════
+   Implementation of the "Ares UI mockup revamp" design project (Ares HELM).
+
+   The system in one breath: a near-black obsidian room, gold hairlines instead
+   of borders, and every affordance struck as a MEDALLION — a lit coin with a
+   gold rim and a line-art Spartan glyph carrying one drop of crimson. Cinzel
+   sets the display voice (ARES, section labels), Manrope speaks the UI, and
+   JetBrains Mono handles anything numeric or literal.
+
+   Scoped entirely under .ares[data-style="modern"]; Forged and Legacy render
+   untouched beneath it and the switch in Settings → Appearance is instant.
+
+   Rules this file keeps:
+   - Gold (#c89b5e family) is structure and rest. Ember (#e26634/#ff6a30) is
+     the primary action and live work. Crimson (#a02b1e) only ever appears as
+     the accent inside a glyph. Mint (#5ec27a) means ready/passed. Nothing else
+     is allowed a color opinion.
+   - Hairlines are rgba(200,155,94,.13) at rest, .26 raised, .45 active.
+   - Panels are near-opaque gradients, not blur. Blur is reserved for the two
+     surfaces that actually float over content (composer, overlays). */
+
+@import url("https://fonts.googleapis.com/css2?family=Cinzel:wght@400;500;600;700&family=Manrope:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap");
+
+/* ── tokens ──────────────────────────────────────────────────────────────── */
+
+.ares[data-style="modern"] {
+  --bg: #080706;
+  --bg-raised: #0d0b0a;
+  --panel: #131110;
+  --panel-2: #0c0a09;
+
+  --text: #efe3cf;
+  --text-hi: #f6ecda;
+  --muted: rgba(239, 227, 207, 0.62);
+  --faint: rgba(239, 227, 207, 0.4);
+
+  /* gold — structure, rest, labels */
+  --gold: #c89b5e;
+  --gold-hi: #e8c893;
+  --gold-glyph: #d9ab6e;
+  --line: rgba(200, 155, 94, 0.13);
+  --line-raised: rgba(200, 155, 94, 0.26);
+  --line-active: rgba(200, 155, 94, 0.45);
+
+  /* ember — action, heat, live work */
+  --ember: #ff6a30;
+  --ember-hi: #ffb24d;
+  --ember-text: #ffb083;
+  --ember-rim: rgba(226, 140, 80, 0.5);
+  --ember-rgb: 255, 106, 48;
+
+  /* crimson — the drop of blood (glyph accents, primary fills) */
+  --blood: #8f1d1d;
+  --accent: #e26634;
+  --accent-hi: #ffcf9a;
+  --accent-rgb: 226, 102, 52;
+
+  /* verdicts */
+  --steel: #5ec27a;
+  --mint-text: #a7d9b4;
+  --crimson: #c9564a;
+
+  --r-sm: 9px;
+  --r-md: 13px;
+  --r-lg: 16px;
+
+  --display: "Cinzel", "Palatino Linotype", Palatino, Georgia, serif;
+  --font: "Manrope", ui-sans-serif, "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", "Cascadia Code", ui-monospace, Consolas, monospace;
+
+  /* the coin — every medallion is struck from these two lines */
+  --coin: radial-gradient(120% 120% at 34% 24%, #1b1817, #0a0908);
+  --coin-ember: radial-gradient(120% 120% at 34% 24%, #241d19, #0b0a09);
+
+  font-family: var(--font);
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* every war-band keeps the room; only the ember hue shifts */
+.ares[data-style="modern"][data-theme="steel"] { --accent: #4f9f9a; --accent-rgb: 79, 159, 154; --ember: #5fb8b0; --ember-rgb: 95, 184, 176; }
+.ares[data-style="modern"][data-theme="nightfall"] { --accent: #7d76d8; --accent-rgb: 125, 118, 216; --ember: #9a8bef; --ember-rgb: 154, 139, 239; }
+.ares[data-style="modern"][data-theme="verdant"] { --accent: #4faa78; --accent-rgb: 79, 170, 120; --ember: #59c08c; --ember-rgb: 89, 192, 140; }
+
+/* ── the sigil set ───────────────────────────────────────────────────────── */
+
+.ares[data-style="modern"] .medallion {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  border-radius: 50%;
+  color: var(--gold-glyph);
+  background: var(--coin);
+  border: 1px solid rgba(200, 155, 94, 0.34);
+  transition: color 150ms ease, border-color 150ms ease, box-shadow 150ms ease;
+}
+.ares[data-style="modern"] .medallion[data-tone="ember"] {
+  color: #e8bd83;
+  background: var(--coin-ember);
+  border-color: var(--ember-rim);
+}
+.ares[data-style="modern"] .medallion svg { display: block; }
+/* hover state is owned by whatever the coin sits inside */
+.ares[data-style="modern"] button:hover > .medallion,
+.ares[data-style="modern"] a:hover > .medallion,
+.ares[data-style="modern"] .sessionRow:hover .medallion,
+.ares[data-style="modern"] .starter:hover .medallion {
+  color: var(--accent-hi);
+  border-color: rgba(255, 160, 90, 0.7);
+}
+
+/* ── shell ───────────────────────────────────────────────────────────────── */
+
+.ares[data-style="modern"] { grid-template-rows: 48px minmax(0, 1fr); }
+
+.ares[data-style="modern"] .backdrop::before {
+  background-image: url("/backdrop-helm.png"), url("/backdrop.jpg");
+  background-position: 74% 50%;
+  background-size: cover;
+  opacity: 0.1;
+  filter: none;
+  animation: none;
+}
+.ares[data-style="modern"] .backdrop::after,
+.ares[data-style="modern"] .backdrop .astrolabe,
+.ares[data-style="modern"] .backdrop .depthField { display: none; }
+
+/* the room is quiet at rest; ember only when Ares actually works */
+.ares[data-style="modern"]::after {
+  background: radial-gradient(150% 120% at 50% 116%, rgba(var(--ember-rgb), 0.1), transparent 48%);
+  box-shadow: inset 0 0 80px rgba(var(--ember-rgb), 0.07);
+}
+
+/* ── titlebar ────────────────────────────────────────────────────────────── */
+
+.ares[data-style="modern"] .titlebar {
+  height: 48px;
+  padding: 0 14px 0 18px;
+  gap: 14px;
+  background: linear-gradient(180deg, #100e0c, #0a0908);
+  border-bottom: 1px solid var(--line);
+}
+.ares[data-style="modern"] .titlebar .brand {
+  gap: 9px;
+  padding: 5px 12px;
+  border: 1px solid rgba(200, 155, 94, 0.14);
+  border-radius: var(--r-sm);
+  transition: border-color 140ms ease, background 140ms ease;
+}
+.ares[data-style="modern"] .titlebar .brand:hover {
+  border-color: rgba(200, 155, 94, 0.42);
+  background: rgba(200, 155, 94, 0.06);
+}
+.ares[data-style="modern"] .titlebar .emblem { display: none; }
+.ares[data-style="modern"] .titlebar h1 {
+  font: 600 12.5px/1 var(--display);
+  letter-spacing: 0.26em;
+  text-indent: 0.26em;
+  color: rgba(239, 227, 207, 0.9);
+}
+.ares[data-style="modern"] .titlebar .brand span { display: none; }
+
+.ares[data-style="modern"] .pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 13px;
+  border-radius: 999px;
+  border: 1px solid rgba(200, 155, 94, 0.2);
+  background: transparent;
+  font: 500 11px/1 var(--font);
+  letter-spacing: 0.06em;
+  text-transform: none;
+  color: var(--muted);
+  animation: none;
+}
+.ares[data-style="modern"] .pill::before {
+  content: "";
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--steel);
+  box-shadow: 0 0 8px var(--steel);
+}
+.ares[data-style="modern"] .pill[data-state="error"]::before,
+.ares[data-style="modern"] .pill[data-state="stopped"]::before { background: var(--crimson); box-shadow: 0 0 8px var(--crimson); }
+.ares[data-style="modern"] .pill[data-state="starting"]::before { background: var(--ember-hi); box-shadow: 0 0 8px var(--ember-hi); }
+
+/* the circular tool row at the right of the titlebar (search / forge / settings) */
+.ares[data-style="modern"] .titleTools { display: flex; align-items: center; gap: 9px; margin-left: 8px; }
+.ares[data-style="modern"] .titleIcon {
+  width: 30px; height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  padding: 0;
+}
+.ares[data-style="modern"] .titleIcon[data-on="1"] > .medallion {
+  color: var(--accent-hi);
+  border-color: rgba(255, 160, 90, 0.7);
+  box-shadow: 0 0 16px -4px rgba(var(--ember-rgb), 0.5);
+}
+
+.ares[data-style="modern"] .winControls button { width: 40px; border-radius: 8px; }
+.ares[data-style="modern"] .winControls .winClose:hover { background: rgba(160, 43, 30, 0.85); }
+
+/* ── rail ────────────────────────────────────────────────────────────────── */
+
+.ares[data-style="modern"] { grid-template-columns: 274px minmax(0, 1fr); }
+.ares[data-style="modern"][data-panel="1"] { grid-template-columns: 274px minmax(0, 1fr) minmax(0, var(--forge-w, 480px)); }
+
+.ares[data-style="modern"] .rail {
+  padding: 16px 12px 0;
+  gap: 0;
+  background: linear-gradient(180deg, #0d0b0a, #090807);
+  border-right: 1px solid var(--line);
+}
+/* the wordmark crowning the rail */
+.ares[data-style="modern"] .railBrand {
+  display: block;
+  flex: none;
+  text-align: center;
+  padding: 8px 0 18px;
+  font: 600 21px/1 var(--display);
+  letter-spacing: 0.36em;
+  text-indent: 0.36em;
+  color: #f3e6cf;
+  text-shadow: 0 0 22px rgba(255, 140, 60, 0.32);
+}
+.ares[data-style="modern"] .railCollapse {
+  order: -1;
+  align-self: flex-end;
+  margin-bottom: -26px; /* float it over the wordmark row */
+  font: 500 9px/1 var(--mono);
+  letter-spacing: 0.1em;
+  color: rgba(232, 200, 147, 0.4);
+}
+.ares[data-style="modern"] .railCollapse span { display: none; }
+.ares[data-style="modern"] .railCollapse:hover { color: var(--gold-hi); }
+
+/* The primary action, wherever it appears: crimson-lit glass, no sheen sweep.
+   Deliberately NOT given a width or display — `.primary` is also the Settings
+   "Apply changes" button and a few inline confirms, and forcing width:100%
+   there collapsed the settings footer. Layout belongs to each host below. */
+.ares[data-style="modern"] .primary {
+  border-radius: var(--r-md);
+  font: 400 14px/1.2 var(--font);
+  color: #f3e6cf;
+  background: linear-gradient(180deg, rgba(143, 29, 29, 0.3), rgba(50, 12, 9, 0.18));
+  border: 1px solid rgba(226, 102, 52, 0.45);
+  box-shadow: inset 0 0 24px rgba(255, 106, 48, 0.13);
+  transition: border-color 150ms ease;
+}
+.ares[data-style="modern"] .primary::after { display: none; } /* kill the legacy sheen sweep */
+.ares[data-style="modern"] .primary:hover { border-color: rgba(255, 150, 80, 0.8); box-shadow: inset 0 0 24px rgba(255, 106, 48, 0.2); }
+
+/* New session — the rail's one crimson-lit action */
+.ares[data-style="modern"] .rail > .primary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 8px 12px;
+  margin-bottom: 14px;
+  text-align: left;
+}
+.ares[data-style="modern"] .rail > .primary .primaryLabel { flex: 1; }
+
+/* nav rows */
+.ares[data-style="modern"] .railNav { display: flex; flex-direction: column; gap: 2px; }
+.ares[data-style="modern"] .railNav button {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 5px 12px;
+  border-radius: var(--r-md);
+  border: 1px solid transparent;
+  font: 400 14px/1.2 var(--font);
+  color: rgba(240, 227, 205, 0.86);
+  transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+.ares[data-style="modern"] .railNav button:hover { background: rgba(200, 155, 94, 0.07); }
+.ares[data-style="modern"] .railNav button[data-on="1"] {
+  background: rgba(200, 155, 94, 0.1);
+  border-color: rgba(200, 155, 94, 0.28);
+  color: var(--text-hi);
+  box-shadow: none;
+}
+.ares[data-style="modern"] .railNav button[data-on="1"] > .medallion {
+  color: #e8bd83;
+  border-color: var(--ember-rim);
+  background: var(--coin-ember);
+}
+.ares[data-style="modern"] .railNav button > .glyph { display: none; } /* superseded by the medallion */
+.ares[data-style="modern"] .railNav button em {
+  margin-left: auto;
+  font: 400 10.5px/1 var(--mono);
+  font-style: normal;
+  color: rgba(232, 200, 147, 0.4);
+  background: none;
+  padding: 0;
+}
+
+/* search */
+.ares[data-style="modern"] .railSearch {
+  margin: 14px 0 12px;
+  padding: 9px 13px 9px 34px;
+  border: 1px solid rgba(200, 155, 94, 0.16);
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.012)
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' fill='none'%3E%3Ccircle cx='6' cy='6' r='4.6' stroke='%23c89b5e' stroke-opacity='.75'/%3E%3Cpath d='M9.4 9.4 13 13' stroke='%23c89b5e' stroke-opacity='.75' stroke-linecap='round'/%3E%3C/svg%3E")
+    no-repeat 12px center;
+  font-size: 13px;
+}
+.ares[data-style="modern"] .railSearch:focus { border-color: rgba(200, 155, 94, 0.42); outline: none; }
+
+/* section labels — Cinzel small caps with a rule running out to the edge */
+.ares[data-style="modern"] .railLabel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 4px 7px;
+  font: 600 9.5px/1 var(--display);
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  color: rgba(232, 200, 147, 0.5);
+}
+.ares[data-style="modern"] .railLabel::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+
+/* session rows */
+.ares[data-style="modern"] .sessionList { display: flex; flex-direction: column; gap: 3px; margin-bottom: 14px; }
+.ares[data-style="modern"] .sessionList > * {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 7px 10px;
+  border-radius: 12px;
+  border: 1px solid transparent;
+  transition: background 140ms ease, border-color 140ms ease;
+}
+.ares[data-style="modern"] .sessionList > *:hover { background: rgba(200, 155, 94, 0.06); border-color: rgba(200, 155, 94, 0.2); }
+.ares[data-style="modern"] .sessionList > *[data-on="1"] {
+  background: rgba(200, 155, 94, 0.09);
+  border-color: rgba(200, 155, 94, 0.3);
+  box-shadow: none;
+}
+.ares[data-style="modern"] .sessionMain { min-width: 0; flex: 1; }
+.ares[data-style="modern"] .sessionMain > :first-child { font-size: 13px; color: rgba(240, 227, 205, 0.92); }
+.ares[data-style="modern"] .sessionMain > :last-child { font-size: 10.5px; color: rgba(239, 227, 207, 0.38); }
+
+/* Forge and Settings live in the titlebar now — the rail must not offer them
+   twice. Undo stays (it has no other home) and the daemon dot closes the rail,
+   matching the design's footer. */
+.ares[data-style="modern"] .railFoot .ghost[data-act="forge"],
+.ares[data-style="modern"] .railFoot .ghost[data-act="settings"] { display: none; }
+
+.ares[data-style="modern"] .railFoot {
+  margin-top: auto;
+  padding: 10px 11px;
+  border-top: 1px solid rgba(200, 155, 94, 0.12);
+  gap: 6px;
+}
+.ares[data-style="modern"] .railFoot .ghost {
+  border: 1px solid transparent;
+  border-radius: 10px;
+  font-size: 12.5px;
+  color: var(--muted);
+  padding: 7px 10px;
+  text-align: left;
+}
+.ares[data-style="modern"] .railFoot .ghost:hover { background: rgba(200, 155, 94, 0.07); color: var(--text); }
+.ares[data-style="modern"] .daemonDot { font: 400 10.5px/1 var(--mono); color: rgba(239, 227, 207, 0.45); }
+.ares[data-style="modern"] .daemonDot i[data-state="running"] { background: var(--steel); box-shadow: 0 0 8px var(--steel); }
+
+/* ── stage ───────────────────────────────────────────────────────────────── */
+
+.ares[data-style="modern"] .stage { background: transparent; }
+.ares[data-style="modern"] .stageHead {
+  background: transparent;
+  border-bottom: 1px solid var(--line);
+}
+
+/* ── the sanctum (empty state) ───────────────────────────────────────────── */
+
+.ares[data-style="modern"] .chat { padding: 28px 0 20px; }
+.ares[data-style="modern"] .chat > * { width: min(880px, 92%); margin-left: auto; margin-right: auto; }
+
+/* The sanctum is full-bleed: the helm owns the whole stage, the session header
+   steps aside, and the composer becomes a pill floating in the same frame —
+   exactly the home state of the design. */
+/* Dropping the header removes a grid ITEM, so the stage's four-row template
+   would shift up and hand the composer the flexible row (an ellipse-tall
+   pill). Re-declare the rows for the three that remain. */
+.ares[data-style="modern"] .stage:has(.chat > .empty) > .stageHead { display: none; }
+.ares[data-style="modern"] .stage:has(.chat > .empty) { grid-template-rows: minmax(0, 1fr) auto auto; }
+/* The scroller becomes the frame: it stops scrolling, drops its reading
+   gutters, and carries the helm itself — so the artwork is full-bleed behind
+   the hero instead of boxed inside it. */
+.ares[data-style="modern"] .chat:has(> .empty) {
+  flex: 1;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+  justify-content: center;
+}
+.ares[data-style="modern"] .chat:has(> .empty)::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background-image: url("/backdrop-helm.png"), url("/backdrop.jpg");
+  background-size: cover;
+  background-position: 74% 50%;
+  opacity: 0.92;
+  pointer-events: none;
+}
+.ares[data-style="modern"] .chat:has(> .empty)::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background: radial-gradient(115% 95% at 16% 48%, rgba(8, 7, 6, 0.95) 20%, rgba(8, 7, 6, 0.6) 56%, rgba(8, 7, 6, 0.18) 100%);
+  pointer-events: none;
+}
+
+.ares[data-style="modern"] .empty {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  width: 100%;
+  max-width: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  padding: 20px 40px 34px;
+  animation: riseIn 0.6s ease both;
+}
+
+/* the home composer: a full pill with larger coins */
+.ares[data-style="modern"] .stage:has(.chat > .empty) .composer { padding-bottom: 34px; }
+.ares[data-style="modern"] .stage:has(.chat > .empty) .composerRow {
+  width: min(880px, 86%);
+  align-items: center;
+  padding: 11px 12px 11px 26px;
+  border-radius: 999px;
+  background: rgba(12, 10, 9, 0.84);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.55);
+}
+.ares[data-style="modern"] .stage:has(.chat > .empty) .composerRow textarea { font-size: 16px; padding: 8px 0; }
+.ares[data-style="modern"] .stage:has(.chat > .empty) .mic,
+.ares[data-style="modern"] .stage:has(.chat > .empty) .send { width: 44px; height: 44px; }
+/* the hero mark */
+.ares[data-style="modern"] .empty .emptyEmblem {
+  /* the legacy emblem breathes down to ~6% opacity as ambient decoration; here
+     it IS the hero mark, so it holds full strength */
+  opacity: 1;
+  animation: none;
+  width: 116px;
+  height: 116px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: #e8bd83;
+  background: var(--coin-ember);
+  border: 1px solid rgba(226, 140, 80, 0.45);
+  box-shadow: 0 0 52px rgba(255, 106, 48, 0.2);
+  mask: none;
+  -webkit-mask: none;
+}
+.ares[data-style="modern"] .empty .emptyEmblem::before,
+.ares[data-style="modern"] .empty .emptyEmblem::after { display: none; }
+
+.ares[data-style="modern"] .empty .wordmark {
+  margin-top: 22px;
+  font: 600 clamp(42px, 5.4vw, 70px)/1 var(--display);
+  letter-spacing: 0.28em;
+  text-indent: 0.28em;
+  color: #f6ecda;
+  text-shadow: 0 0 40px rgba(255, 140, 60, 0.3);
+}
+.ares[data-style="modern"] .empty .wordmarkSub { display: none; }
+.ares[data-style="modern"] .empty .emptyAsk {
+  margin: 4px 0 0;
+  font: 400 17px/1.4 var(--font);
+  color: rgba(239, 227, 207, 0.72);
+}
+
+/* the three invitations */
+.ares[data-style="modern"] .starters {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 16px;
+  margin-top: 34px;
+  max-width: min(820px, 100%);
+}
+.ares[data-style="modern"] .starter .starterLabel { white-space: nowrap; }
+.ares[data-style="modern"] .starter {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 22px 8px 8px;
+  border-radius: 999px;
+  font: 400 14.5px/1.2 var(--font);
+  color: #f0e3cd;
+  background: rgba(13, 11, 10, 0.74);
+  border: 1px solid rgba(200, 155, 94, 0.28);
+  transition: border-color 150ms ease, background 150ms ease;
+}
+.ares[data-style="modern"] .starter:hover {
+  border-color: rgba(255, 150, 80, 0.65);
+  background: rgba(26, 19, 16, 0.88);
+  transform: none;
+}
+
+/* ── transcript ──────────────────────────────────────────────────────────── */
+
+/* the user speaks in a crimson-lit card, tucked to the right */
+.ares[data-style="modern"] .turn.user { justify-content: flex-end; }
+.ares[data-style="modern"] .turn.user .bubble {
+  max-width: 76%;
+  padding: 13px 18px;
+  border-radius: 16px 16px 4px 16px;
+  background: linear-gradient(180deg, rgba(143, 29, 29, 0.24), rgba(56, 13, 9, 0.16));
+  border: 1px solid rgba(226, 102, 52, 0.3);
+  font-size: 14.5px;
+  line-height: 1.6;
+  box-shadow: none;
+}
+.ares[data-style="modern"] .turn.assistant { font-size: 14.5px; line-height: 1.75; color: rgba(240, 229, 210, 0.93); }
+
+/* thinking reads as a margin note, not a card */
+.ares[data-style="modern"] .thought,
+.ares[data-style="modern"] .thinking {
+  padding: 11px 15px;
+  border-radius: 12px;
+  border: 1px dashed rgba(200, 155, 94, 0.22);
+  background: rgba(255, 255, 255, 0.014);
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: rgba(239, 227, 207, 0.5);
+  font-style: italic;
+}
+
+/* every agent-side card shares one frame */
+.ares[data-style="modern"] .toolCard,
+.ares[data-style="modern"] .notice,
+.ares[data-style="modern"] .authPrompt,
+.ares[data-style="modern"] .artifact,
+.ares[data-style="modern"] .permissionCard,
+.ares[data-style="modern"] .diffCard {
+  border: 1px solid rgba(200, 155, 94, 0.18);
+  border-radius: 14px;
+  background: linear-gradient(180deg, #131110, #0c0a09);
+  box-shadow: none;
+  overflow: hidden;
+}
+.ares[data-style="modern"] .toolCardHead {
+  padding: 11px 15px;
+  gap: 11px;
+  border-bottom: 1px solid rgba(200, 155, 94, 0.13);
+  background: transparent;
+}
+/* the head reads as a Cinzel label + a mono duration, like the design */
+.ares[data-style="modern"] .toolCardTitle {
+  font: 600 10px/1.4 var(--display);
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: rgba(232, 200, 147, 0.72);
+}
+.ares[data-style="modern"] .toolCardSub {
+  font: 400 11px/1.4 var(--mono);
+  color: rgba(239, 227, 207, 0.4);
+}
+/* the status light replaces the boxed icon tile */
+.ares[data-style="modern"] .toolCardIcon {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: none;
+  background: var(--steel);
+  box-shadow: 0 0 9px var(--steel);
+  overflow: hidden;
+  text-indent: -999px;
+}
+.ares[data-style="modern"] .toolCard[data-state="running"] .toolCardIcon { background: var(--ember-hi); box-shadow: 0 0 9px var(--ember-hi); animation: emberPulse 1.6s ease-in-out infinite; }
+.ares[data-style="modern"] .toolCard[data-state="error"] .toolCardIcon { background: var(--crimson); box-shadow: 0 0 9px var(--crimson); }
+.ares[data-style="modern"] .toolCard[data-state="error"] { border-color: rgba(201, 86, 74, 0.34); }
+
+/* tool steps — a mono ledger, one line each */
+.ares[data-style="modern"] .toolStep,
+.ares[data-style="modern"] .toolCardBody .step {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 15px;
+  border-bottom: 1px solid rgba(200, 155, 94, 0.07);
+  font: 400 12.5px/1.4 var(--mono);
+}
+.ares[data-style="modern"] .toolStep .name { color: var(--gold-hi); }
+
+/* verdict chips */
+.ares[data-style="modern"] .chip,
+.ares[data-style="modern"] .verdictChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 13px;
+  border-radius: 999px;
+  border: 1px solid rgba(200, 155, 94, 0.24);
+  background: rgba(200, 155, 94, 0.05);
+  font-size: 12px;
+  color: rgba(232, 200, 147, 0.85);
+}
+.ares[data-style="modern"] .chip[data-ok="1"] { border-color: rgba(94, 194, 122, 0.32); background: rgba(94, 194, 122, 0.07); color: var(--mint-text); }
+
+/* per-turn usage is metadata, not a card */
+.ares[data-style="modern"] .usage {
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  font: 400 11px/1.4 var(--mono);
+  color: rgba(239, 227, 207, 0.35);
+}
+
+.ares[data-style="modern"] .working .workingLabel { color: var(--ember-text); }
+
+/* the per-turn model/lane stamp — a quiet mono tag, not a boxed badge */
+.ares[data-style="modern"] .modelBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 11px;
+  border: 1px solid rgba(200, 155, 94, 0.18);
+  border-radius: 999px;
+  background: transparent;
+  box-shadow: none;
+  font: 400 10.5px/1.5 var(--mono);
+  color: rgba(232, 200, 147, 0.62);
+  text-transform: none;
+  letter-spacing: 0.01em;
+}
+.ares[data-style="modern"] .modelBadge .glyph { display: none; }
+.ares[data-style="modern"] .modelBadge em {
+  font-style: normal;
+  border-left: 1px solid rgba(200, 155, 94, 0.22);
+  margin-left: 2px;
+  padding-left: 8px;
+  color: rgba(239, 227, 207, 0.42);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-size: 9.5px;
+}
+.ares[data-style="modern"] .watchBadge {
+  border: 1px solid rgba(200, 155, 94, 0.18);
+  border-radius: 999px;
+  background: transparent;
+  font: 400 10.5px/1.5 var(--mono);
+  color: rgba(232, 200, 147, 0.62);
+}
+
+/* ── composer ────────────────────────────────────────────────────────────── */
+
+/* The base composer is a grid, so its children stretch to the row box — which
+   inflated the pill into an ellipse. A flex column sizes every child to its
+   own content and centers the stack. */
+.ares[data-style="modern"] .composer {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex: none;
+  background: transparent;
+  border-top: none;
+  padding: 0 0 18px;
+}
+.ares[data-style="modern"] .composerRow,
+.ares[data-style="modern"] .composer .chips,
+.ares[data-style="modern"] .composer .attachments,
+.ares[data-style="modern"] .composer .slashMenu { width: min(880px, 92%); margin-left: auto; margin-right: auto; }
+
+.ares[data-style="modern"] .composerRow {
+  align-items: flex-end;
+  gap: 12px;
+  padding: 9px 12px 9px 20px;
+  border-radius: 26px;
+  background: rgba(12, 10, 9, 0.9);
+  border: 1px solid rgba(200, 155, 94, 0.26);
+  box-shadow: 0 14px 44px rgba(0, 0, 0, 0.5);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+  transition: border-color 160ms ease;
+}
+.ares[data-style="modern"] .composerRow:focus-within { border-color: rgba(255, 150, 80, 0.5); }
+.ares[data-style="modern"] .composerRow textarea {
+  background: transparent;
+  border: none;
+  font-size: 15px;
+  line-height: 1.6;
+  padding: 9px 0;
+}
+.ares[data-style="modern"] .composerRow textarea::placeholder { color: rgba(239, 227, 207, 0.32); }
+
+/* the round controls — same coin, one ember for send */
+.ares[data-style="modern"] .mic,
+.ares[data-style="modern"] .send {
+  width: 40px;
+  height: 40px;
+  flex: none;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  color: var(--gold-glyph);
+  background: var(--coin);
+  border: 1px solid rgba(200, 155, 94, 0.34);
+  box-shadow: none;
+  transition: color 150ms ease, border-color 150ms ease;
+}
+.ares[data-style="modern"] .mic:hover { color: var(--accent-hi); border-color: rgba(255, 160, 90, 0.7); }
+.ares[data-style="modern"] .send {
+  color: #e8bd83;
+  background: var(--coin-ember);
+  border-color: var(--ember-rim);
+}
+.ares[data-style="modern"] .send:hover:not(:disabled) {
+  color: #ffd7a6;
+  border-color: rgba(255, 170, 100, 0.85);
+  transform: none;
+  filter: none;
+}
+.ares[data-style="modern"] .send.stop { color: var(--ember-text); border-color: rgba(226, 102, 52, 0.5); background: rgba(143, 29, 29, 0.42); }
+.ares[data-style="modern"] .send.steer { color: var(--gold-glyph); background: var(--coin); border-color: rgba(200, 155, 94, 0.34); }
+
+/* the ember rail under the composer — the one motion that means "working" */
+.ares[data-style="modern"] .composer::after {
+  content: "";
+  display: block;
+  width: min(836px, 88%);
+  height: 2px;
+  margin: 7px auto 0;
+  border-radius: 2px;
+  background: linear-gradient(90deg, rgba(255, 106, 48, 0), var(--ember), var(--ember-hi), rgba(255, 106, 48, 0));
+  background-size: 200% 100%;
+  animation: emberSweep 2.4s linear infinite;
+  opacity: 0;
+  transition: opacity 300ms ease;
+}
+.ares[data-style="modern"][data-working="1"] .composer::after { opacity: 0.9; }
+
+.ares[data-style="modern"] .slashMenu {
+  border: 1px solid rgba(200, 155, 94, 0.26);
+  border-radius: 12px;
+  background: linear-gradient(180deg, #171311, #0d0b0a);
+  box-shadow: 0 22px 50px rgba(0, 0, 0, 0.72);
+}
+
+/* ── status bar ──────────────────────────────────────────────────────────── */
+
+.ares[data-style="modern"] .statusBar {
+  height: 34px;
+  padding: 0 12px;
+  gap: 0;
+  background: linear-gradient(180deg, #0b0a09, #0e0c0b);
+  border-top: 1px solid var(--line);
+  font-size: 11.5px;
+}
+.ares[data-style="modern"] .statusBar .statusGroup { gap: 0; border: none; background: transparent; box-shadow: none; padding: 0; }
+.ares[data-style="modern"] .statusSeg {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 12px;
+  border-radius: 0;
+  border: none;
+  font-size: 11.5px;
+  color: rgba(239, 227, 207, 0.65);
+  position: relative;
+}
+.ares[data-style="modern"] .statusSeg + .statusSeg::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 1px;
+  height: 14px;
+  background: rgba(200, 155, 94, 0.14);
+}
+.ares[data-style="modern"] .statusSeg:hover { background: rgba(200, 155, 94, 0.06); }
+/* the design reads as a sentence, not a telemetry rack: a plain-case label in
+   Manrope followed by its live value in mono gold. The base bar's 8.5px
+   all-caps micro-labels were the "still old" tell. */
+.ares[data-style="modern"] .statusSeg b {
+  font: 400 11.5px/1 var(--font);
+  letter-spacing: 0;
+  text-transform: none;
+  color: rgba(239, 227, 207, 0.65);
+}
+.ares[data-style="modern"] .statusSeg:hover b { color: rgba(239, 227, 207, 0.9); }
+.ares[data-style="modern"] .statusSeg > span {
+  font: 400 11.5px/1 var(--mono);
+  font-weight: 400;
+  color: rgba(232, 200, 147, 0.85);
+}
+.ares[data-style="modern"] .statusGroup .statusSeg + .statusSeg,
+.ares[data-style="modern"] .statusGroup .statusAction + *,
+.ares[data-style="modern"] .statusGroup .statusSeg + .statusAction { box-shadow: none; }
+.ares[data-style="modern"] .statusSeg .dot[data-state="running"] { background: var(--steel); box-shadow: 0 0 8px var(--steel); }
+.ares[data-style="modern"] .effortStatus span { color: var(--ember-text); }
+.ares[data-style="modern"] .hudReadout { font: 400 11px/1 var(--mono); color: rgba(239, 227, 207, 0.55); padding: 0 12px; }
+.ares[data-style="modern"] .statusActions { border: none; background: transparent; box-shadow: none; }
+.ares[data-style="modern"] .statusIcon { color: rgba(232, 200, 147, 0.55); }
+.ares[data-style="modern"] .statusIcon:hover { color: var(--gold-hi); background: rgba(200, 155, 94, 0.06); }
+.ares[data-style="modern"] .hudVersion { font: 400 10.5px/1 var(--mono); color: rgba(239, 227, 207, 0.3); padding: 0 10px; }
+
+/* ── forge + overlays ────────────────────────────────────────────────────── */
+
+.ares[data-style="modern"] .forge {
+  border-left: 1px solid var(--line);
+  background: linear-gradient(180deg, #0c0a09, #090807);
+}
+.ares[data-style="modern"] .forge > header {
+  background: transparent;
+  border-bottom: 1px solid var(--line);
+}
+.ares[data-style="modern"] .forge > header strong {
+  font: 600 9.5px/1 var(--display);
+  letter-spacing: 0.24em;
+  color: rgba(232, 200, 147, 0.5);
+}
+
+/* Every floating overlay is smoked glass: a translucent warm pane that lets
+   the room glow through, blurred so text stays legible over the transcript.
+   This is the "apple glass" material the reference set is built on. */
+.ares[data-style="modern"] .palette,
+.ares[data-style="modern"] .drawer,
+.ares[data-style="modern"] .settingsShell,
+.ares[data-style="modern"] .accountMenu,
+.ares[data-style="modern"] .popover,
+.ares[data-style="modern"] .menu {
+  border: 1px solid rgba(200, 155, 94, 0.26);
+  border-radius: var(--r-lg);
+  background: linear-gradient(180deg, rgba(30, 25, 22, 0.82), rgba(13, 11, 10, 0.88));
+  -webkit-backdrop-filter: blur(26px) saturate(1.25);
+  backdrop-filter: blur(26px) saturate(1.25);
+  box-shadow: 0 22px 50px rgba(0, 0, 0, 0.72), inset 0 1px 0 rgba(255, 236, 214, 0.09);
+}
+.ares[data-style="modern"] .paletteScrim { background: rgba(4, 3, 3, 0.62); }
+
+/* ── settings: the same room, not a different app ────────────────────────── */
+
+.ares[data-style="modern"] .settingsNav {
+  background: transparent;
+  border-right: 1px solid var(--line);
+}
+.ares[data-style="modern"] .settingsBrand,
+.ares[data-style="modern"] .paneTitle {
+  font: 600 15px/1.2 var(--display);
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: #f3e6cf;
+}
+.ares[data-style="modern"] .settingsNav button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-radius: var(--r-sm);
+  border: 1px solid transparent;
+  padding: 8px 11px;
+  font-size: 13px;
+  color: rgba(240, 227, 205, 0.78);
+  transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+.ares[data-style="modern"] .settingsNav button:hover { background: rgba(200, 155, 94, 0.07); color: var(--text); }
+.ares[data-style="modern"] .settingsNav button[data-on="1"] {
+  background: rgba(200, 155, 94, 0.1);
+  border-color: rgba(200, 155, 94, 0.28);
+  color: var(--gold-hi);
+  box-shadow: none;
+}
+.ares[data-style="modern"] .settingsMain { background: transparent; }
+.ares[data-style="modern"] .fieldLabel {
+  font: 600 9.5px/1 var(--display);
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: rgba(232, 200, 147, 0.5);
+}
+.ares[data-style="modern"] .settingsFooter {
+  background: transparent;
+  border-top: 1px solid var(--line);
+}
+.ares[data-style="modern"] .settingsFooterHint { font-size: 11.5px; color: var(--faint); white-space: nowrap; }
+
+/* every option tile, card and panel in settings shares the card frame */
+.ares[data-style="modern"] .displayModes button,
+.ares[data-style="modern"] .settingsModelCard,
+.ares[data-style="modern"] .livingLaunchCard,
+.ares[data-style="modern"] .settingsPane .card,
+.ares[data-style="modern"] .usageCard,
+.ares[data-style="modern"] .helmCard,
+.ares[data-style="modern"] .vaultCard {
+  border: 1px solid rgba(200, 155, 94, 0.16);
+  border-radius: var(--r-md);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.012));
+  box-shadow: inset 0 1px 0 rgba(255, 236, 214, 0.06);
+}
+.ares[data-style="modern"] .displayModes button[data-on="1"] {
+  border-color: rgba(226, 102, 52, 0.45);
+  background: linear-gradient(180deg, rgba(143, 29, 29, 0.26), rgba(50, 12, 9, 0.14));
+  box-shadow: inset 0 0 24px rgba(255, 106, 48, 0.1);
+}
+.ares[data-style="modern"] .displayModes button strong { color: var(--gold-hi); font-weight: 600; }
+.ares[data-style="modern"] .displayModes button span { color: var(--faint); }
+
+/* ── boot ────────────────────────────────────────────────────────────────── */
+
+.ares[data-style="modern"] .boot { background: #080706; }
+.ares[data-style="modern"] .bootEmblem {
+  border-radius: 50%;
+  color: #e8bd83;
+  background: var(--coin-ember);
+  border: 1px solid rgba(226, 140, 80, 0.45);
+  box-shadow: 0 0 52px rgba(255, 106, 48, 0.2);
+}
+.ares[data-style="modern"] .bootWord {
+  font: 600 44px/1 var(--display);
+  letter-spacing: 0.28em;
+  text-indent: 0.28em;
+  color: #f6ecda;
+  text-shadow: 0 0 40px rgba(255, 140, 60, 0.3);
+}
+.ares[data-style="modern"] .bootSub {
+  font: 400 11px/1 var(--font);
+  letter-spacing: 0.34em;
+  text-indent: 0.34em;
+  color: rgba(239, 227, 207, 0.55);
+}
+.ares[data-style="modern"] .bootBar {
+  height: 3px;
+  border-radius: 3px;
+  border: none;
+  background: rgba(200, 155, 94, 0.14);
+  overflow: hidden;
+}
+.ares[data-style="modern"] .bootBar i { border-radius: 3px; background: linear-gradient(90deg, var(--blood), var(--ember-hi)); box-shadow: none; }
+.ares[data-style="modern"] .bootStatus {
+  font: 400 9.5px/1 var(--mono);
+  letter-spacing: 0.34em;
+  text-indent: 0.34em;
+  text-transform: uppercase;
+  color: rgba(239, 227, 207, 0.4);
+}
+
+/* ── chrome details ──────────────────────────────────────────────────────── */
+
+.ares[data-style="modern"] ::-webkit-scrollbar { width: 9px; height: 9px; }
+.ares[data-style="modern"] ::-webkit-scrollbar-thumb { background: rgba(200, 155, 94, 0.22); border-radius: 9px; }
+.ares[data-style="modern"] ::-webkit-scrollbar-track { background: transparent; }
+.ares[data-style="modern"] a { color: var(--gold-hi); border-bottom-color: rgba(200, 155, 94, 0.3); }
+.ares[data-style="modern"] a:hover { color: #ffd9a0; }
+.ares[data-style="modern"] ::selection { background: rgba(226, 102, 52, 0.3); }
+.ares[data-style="modern"] button:focus-visible,
+.ares[data-style="modern"] input:focus-visible,
+.ares[data-style="modern"] textarea:focus-visible {
+  outline: 2px solid rgba(255, 160, 90, 0.7);
+  outline-offset: 2px;
+}
+
+@keyframes emberPulse { 0%, 100% { opacity: 0.45; } 50% { opacity: 1; } }
+@keyframes emberSweep { 0% { background-position: 0% 50%; } 100% { background-position: 200% 50%; } }
+@keyframes riseIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .ares[data-style="modern"] .composer::after,
+  .ares[data-style="modern"] .toolCard[data-state="running"] .toolCardIcon,
+  .ares[data-style="modern"] .empty { animation: none; }
+}
+
+/* WebKitGTK composites blur on the CPU — drop it, keep the surface. */
+html[data-perf="lite"] .ares[data-style="modern"] .composerRow {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  background: rgba(12, 10, 9, 0.97);
+}
