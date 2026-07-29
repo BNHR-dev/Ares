@@ -633,10 +633,29 @@ async function collectInputFiles(homes: string[], workspaces: string[]): Promise
   for (const input of files) {
     if (!isExpectedInputLayout(input)) continue;
     const info = await fs.lstat(input.file).catch(() => null);
+    // lstat (not stat) is the symlinked-FILE guard: a rollout path that is
+    // itself a link never gets read.
     if (!info?.isFile() || info.isSymbolicLink()) continue;
+    // The remaining risk is a symlinked ANCESTOR redirecting us out of the
+    // tree, so require the canonical path to still live under the canonical
+    // declared root.
+    //
+    // This used to demand realpath(file) === file, which conflated "escaped
+    // the tree" with "the path simply wasn't canonical" — and on Windows it is
+    // very often not. A GitHub runner's os.tmpdir() is C:\Users\RUNNER~1\…
+    // (an 8.3 short name) whose realpath is C:\Users\runneradmin\…, so every
+    // input was silently discarded and self-triage read NOTHING: no findings,
+    // no warning, just a clean empty run. The same held for any owner whose
+    // workspace sat behind a junction, a mapped drive, or a short-name
+    // profile directory.
     const real = await fs.realpath(input.file).catch(() => null);
-    if (!real || fileKey(real) !== fileKey(input.file)) continue;
-    unique.set(fileKey(input.file), input);
+    if (!real) continue;
+    const declaredRoot = input.workspace ?? input.homeRoot;
+    if (declaredRoot) {
+      const realRoot = await fs.realpath(declaredRoot).catch(() => null);
+      if (!realRoot || !isPathWithin(realRoot, real)) continue;
+    }
+    unique.set(fileKey(real), input);
   }
   return [...unique.values()].sort((a, b) => a.file.localeCompare(b.file));
 }
