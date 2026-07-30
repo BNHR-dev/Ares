@@ -124,6 +124,16 @@
   border-color: rgba(94, 194, 122, 0.42);
 }
 .ares[data-style="modern"] .medallion svg { display: block; }
+/* The sigils are hairline line-art (1.2–1.9px strokes in a 48-box) rendered at
+   16–28px. The default "auto" shape-rendering lets the rasteriser soften those
+   strokes to hit its speed heuristic, which is exactly the "dull and plain"
+   read — geometricPrecision keeps the edges sharp at every coin size. Scoped to
+   our own sprite so no third-party SVG pays for it. */
+.ares[data-style="modern"] svg use[href^="#ares-"],
+.ares[data-style="modern"] .medallion svg,
+.ares[data-style="modern"] .sigil {
+  shape-rendering: geometricPrecision;
+}
 /* hover state is owned by whatever the coin sits inside */
 .ares[data-style="modern"] button:hover > .medallion,
 .ares[data-style="modern"] a:hover > .medallion,
@@ -2236,10 +2246,13 @@ html[data-perf="lite"] .ares[data-style="modern"] .composerRow {
   overflow: hidden;
   transition: border-color 180ms ease, transform 180ms cubic-bezier(0.32, 0.72, 0, 1), box-shadow 180ms ease;
 }
+/* Hover matches the rest of the skin, which follows the handoff: a WARM border
+   and an ember bloom, not a cold drop shadow. The dark-shadow version I had
+   here first is what made these cards read flatter than every other surface. */
 .ares[data-style="modern"] .hmCard:hover {
   transform: translateY(-2px);
-  border-color: var(--line-active);
-  box-shadow: 0 14px 34px -18px rgba(0, 0, 0, 0.9);
+  border-color: rgba(255, 150, 80, 0.45);
+  box-shadow: 0 0 30px rgba(255, 106, 48, 0.08);
 }
 .ares[data-style="modern"] .hmCard[data-worn="1"] { border-color: var(--ember-rim); }
 .ares[data-style="modern"] .hmCard[data-tone="mint"]:hover { border-color: rgba(94, 194, 122, 0.42); }

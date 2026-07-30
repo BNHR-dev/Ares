@@ -38,6 +38,50 @@ export interface ChangelogEntry {
 // from the "earlier updates" strip.
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.31.0",
+    date: "July 2026",
+    title: "The roster — specialists Ares can wear",
+    tagline: "Ares now keeps a roster of expert personas. Wear one and the whole conversation shifts into that expertise; hand one a task and it works in the background with its own tools.",
+    highlights: [
+      {
+        icon: "◈",
+        title: "A roster of specialists",
+        blurb: "HELM has an Agents tab: Vitruvius researches, Forge builds, Aegis tries to break things, Scribe writes. Pick one and Ares wears it — same conversation, same tools, sharper focus.",
+        tag: "New",
+      },
+      {
+        icon: "✍",
+        title: "Build your own",
+        blurb: "Give a persona a name and a method and it joins the roster. Ares can write one for you too, whenever it notices work that deserves a standing specialist.",
+        tag: "New",
+      },
+      {
+        icon: "⚡",
+        title: "They step in when it fits",
+        blurb: "Say \"let's research this\" and the right specialist takes it and introduces itself. You always see who's answering, and you're one click from plain Ares.",
+        tag: "New",
+      },
+      {
+        icon: "⛊",
+        title: "Delegate instead of wearing",
+        blurb: "Every persona doubles as a background worker Ares can hand a task to, with only the tools that job needs — a reviewer can't quietly rewrite what it was asked to inspect.",
+        tag: "Safer",
+      },
+      {
+        icon: "☉",
+        title: "Sharper icons",
+        blurb: "Every sigil now matches the HELM design exactly, including the Corinthian helm, and renders crisp at every size instead of softening.",
+        tag: "Polished",
+      },
+      {
+        icon: "◎",
+        title: "Self-checks work everywhere",
+        blurb: "Ares reviews its own reliability again on machines where the workspace sits behind a mapped drive or shortcut path — it was silently finding nothing there.",
+        tag: "Safer",
+      },
+    ],
+  },
+  {
     version: "0.30.0",
     date: "July 2026",
     title: "The Modern face — and nothing flashes any more",

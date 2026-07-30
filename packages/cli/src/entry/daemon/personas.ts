@@ -17,6 +17,10 @@ export interface PersonaWire {
   name: string;
   label: string;
   description: string;
+  /** The persona prompt itself. Wired so HELM can load one back into the
+   *  composer for editing — without it, "Edit" could only ever offer the
+   *  metadata and would silently blank the method on save. */
+  body: string;
   greeting: string;
   glyph: string;
   tone: string;
@@ -36,6 +40,7 @@ export function personaToWire(p: PersonaDef): PersonaWire {
     name: p.name,
     label: p.label,
     description: p.description,
+    body: p.body,
     greeting: p.greeting,
     glyph: p.glyph,
     tone: p.tone,

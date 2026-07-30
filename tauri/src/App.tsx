@@ -206,7 +206,14 @@ function demoRoster(): PersonaVm[] {
     autonomy: PersonaVm["autonomy"],
     triggers: string[],
     tools: string[],
-  ): PersonaVm => ({ name, label, description, greeting, glyph, tone, autonomy, triggers, tools, source: "builtin", file: "" });
+  ): PersonaVm => ({
+    name, label, description, greeting, glyph, tone, autonomy, triggers, tools,
+    source: "builtin",
+    file: "",
+    body: `You are working as ${label}.
+
+${description}`,
+  });
   return [
     make("aegis", "Aegis", "Adversarial review. Tries to break the work — security, edge cases, and the last 20% nobody checks.",
       "Aegis. I'm here to break it, not bless it. What am I attacking?", "shield", "ember", "auto",
@@ -4633,7 +4640,10 @@ function HelmAgents({
   onWrite: (draft: PersonaDraft) => void;
 }) {
   const [expanded, setExpanded] = useState<string | null>(null);
-  const [composing, setComposing] = useState(false);
+  // null = closed; "" = forging a new persona; a name = editing that one.
+  // Modelled as one piece of state so the composer can never be open in two
+  // modes at once, and so `key` remounts it when the target changes.
+  const [composing, setComposing] = useState<string | null>(null);
 
   return (
     <div className="hmPane hmAgents" key="agents">
@@ -4643,9 +4653,9 @@ function HelmAgents({
           shifts into that expertise. Ares can also <strong>delegate</strong> to any of them, so each one doubles as a
           background worker with its own narrower tools.
         </p>
-        <button className="hmForge" onClick={() => setComposing((v) => !v)} data-on={composing ? "1" : "0"}>
-          <Sigil name="forge" size={16} />
-          {composing ? "Close" : "Forge a persona"}
+        <button className="hmForge" onClick={() => setComposing((v) => (v === null ? "" : null))} data-on={composing !== null ? "1" : "0"}>
+          <Sigil name={asSigilName("forge")} size={16} />
+          {composing !== null ? "Close" : "Forge a persona"}
         </button>
       </div>
 
@@ -4661,7 +4671,14 @@ function HelmAgents({
         </div>
       ) : null}
 
-      {composing ? <PersonaComposer onWrite={(d) => { onWrite(d); setComposing(false); }} onCancel={() => setComposing(false)} /> : null}
+      {composing !== null ? (
+        <PersonaComposer
+          key={composing || "__new__"}
+          editing={composing ? roster.find((p) => p.name === composing) ?? null : null}
+          onWrite={(d) => { onWrite(d); setComposing(null); }}
+          onCancel={() => setComposing(null)}
+        />
+      ) : null}
 
       <div className="hmRoster">
         {roster.length === 0 ? (
@@ -4741,6 +4758,15 @@ function HelmAgents({
                   ) : (
                     <button className="hmAdopt" onClick={() => onAdopt(p.name)}>Wear {p.label}</button>
                   )}
+                  <button
+                    className="hmGhost"
+                    onClick={() => setComposing(p.name)}
+                    title={p.source === "builtin"
+                      ? `Editing ${p.label} writes your own version to disk, which shadows the built-in`
+                      : `Edit ${p.file}`}
+                  >
+                    Edit
+                  </button>
                   {p.source === "roster" ? (
                     <button className="hmGhost hmDanger" onClick={() => onDelete(p.name)} title="Delete this persona's AGENT.md">
                       Delete
@@ -4756,15 +4782,28 @@ function HelmAgents({
   );
 }
 
-function PersonaComposer({ onWrite, onCancel }: { onWrite: (draft: PersonaDraft) => void; onCancel: () => void }) {
-  const [label, setLabel] = useState("");
-  const [description, setDescription] = useState("");
-  const [greeting, setGreeting] = useState("");
-  const [body, setBody] = useState("");
-  const [triggers, setTriggers] = useState("");
-  const [glyph, setGlyph] = useState("helm");
-  const [tone, setTone] = useState<PersonaDraft["tone"]>("ember");
-  const [autonomy, setAutonomy] = useState<PersonaDraft["autonomy"]>("suggest");
+function PersonaComposer({
+  editing,
+  onWrite,
+  onCancel,
+}: {
+  /** Seed the form from this persona. null = a brand-new one. */
+  editing: PersonaVm | null;
+  onWrite: (draft: PersonaDraft) => void;
+  onCancel: () => void;
+}) {
+  // Seeded via useState initialisers, not an effect: the parent remounts this
+  // component with `key` when the target changes, so the initialisers run
+  // exactly when they should and a half-typed draft can never be clobbered by
+  // an unrelated roster refresh.
+  const [label, setLabel] = useState(editing?.label ?? "");
+  const [description, setDescription] = useState(editing?.description ?? "");
+  const [greeting, setGreeting] = useState(editing?.greeting ?? "");
+  const [body, setBody] = useState(editing?.body ?? "");
+  const [triggers, setTriggers] = useState((editing?.triggers ?? []).join(", "));
+  const [glyph, setGlyph] = useState(editing?.glyph ?? "helm");
+  const [tone, setTone] = useState<PersonaDraft["tone"]>(editing?.tone ?? "ember");
+  const [autonomy, setAutonomy] = useState<PersonaDraft["autonomy"]>(editing?.autonomy ?? "suggest");
   const ready = label.trim().length > 0 && body.trim().length > 0;
 
   return (
@@ -4772,8 +4811,14 @@ function PersonaComposer({ onWrite, onCancel }: { onWrite: (draft: PersonaDraft)
       <div className="hmComposerHead">
         <Medallion glyph={asSigilName(glyph)} size={40} tone={tone === "ivory" ? undefined : tone} />
         <div>
-          <strong>Forge a persona</strong>
-          <p>A name and a method are all it needs. Ares can fill in the rest later — or write the whole thing for you if you ask.</p>
+          <strong>{editing ? `Edit ${editing.label}` : "Forge a persona"}</strong>
+          <p>
+            {editing
+              ? editing.source === "builtin"
+                ? "This one ships built in. Saving writes your own copy to disk, which shadows it from now on — delete that copy to get the original back."
+                : "Saving overwrites this persona's AGENT.md."
+              : "A name and a method are all it needs. Ares can fill in the rest later — or write the whole thing for you if you ask."}
+          </p>
         </div>
       </div>
 
@@ -4855,7 +4900,7 @@ function PersonaComposer({ onWrite, onCancel }: { onWrite: (draft: PersonaDraft)
             })
           }
         >
-          Forge it
+          {editing ? "Save changes" : "Forge it"}
         </button>
       </div>
     </div>
@@ -7406,6 +7451,8 @@ interface PersonaVm {
   name: string;
   label: string;
   description: string;
+  /** The persona prompt itself — needed so Edit can load it back. */
+  body: string;
   greeting: string;
   glyph: string;
   tone: "ember" | "mint" | "ivory";
