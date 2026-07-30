@@ -11,6 +11,7 @@ import { makeTelegramSetupTool } from "../telegramSetupTool.js";
 import { makeTelegramRosterTool } from "../telegramRosterTool.js";
 import { BootstrapTool, MissionTool, PersonaTool, RunSkillTool, SelfEvolveTool, SelfTool, SkillCraftTool, listPersonas, makeSkillHubTool } from "@ares/agent";
 import { registerPersonaSubagents } from "./rosterBridge.js";
+import { withMissionRunRecorded } from "./missionLiveness.js";
 import { QueryEngineDispatcher, acquireCapability, createGoal, listGoals, listAcquisitions, listCapabilities, newGoalId, novelDeltaCurve, reliabilityOf, runGoalToCompletion, saveGoal, loadStandingOrders, addStandingOrder, removeStandingOrder, renderStandingOrders, type StandingOrder, type Goal, type AcquisitionKind, type VerificationSpec } from "@ares/operator";
 import { MemoryRouter, MemoryStore, withConsolidationLock } from "@ares/mind";
 import { makeBrowserTool } from "./browserBridge.js";
@@ -469,15 +470,20 @@ function makeOperatorChatTool(opts: {
             // hard "no prompt available" death (workspace-escape fleet killer).
             requestPermission: ctx.requestPermission,
           });
-          final = await runGoalToCompletion(
-            {
-              home,
-              dispatcher,
-              workspace: ctx.workspace,
-              signal: ctx.signal,
-            },
-            acquired.goal.id,
-            { maxTicks: ticks },
+          // Wrapped so the cockpit can report whether the mission loop actually
+          // ran. Previously it could only say "not instrumented" — the same
+          // blind spot that hid dead triage for three releases.
+          final = await withMissionRunRecorded(acquired.goal.id, ticks, () =>
+            runGoalToCompletion(
+              {
+                home,
+                dispatcher,
+                workspace: ctx.workspace,
+                signal: ctx.signal,
+              },
+              acquired.goal.id,
+              { maxTicks: ticks },
+            ),
           );
         }
         return {
@@ -519,15 +525,17 @@ function makeOperatorChatTool(opts: {
         const result: Goal[] = [];
         for (const goal of targets) {
           result.push(
-            await runGoalToCompletion(
-              {
-                home,
-                dispatcher,
-                workspace: ctx.workspace,
-                signal: ctx.signal,
-              },
-              goal.id,
-              { maxTicks: i.ticks ?? 1 },
+            await withMissionRunRecorded(goal.id, i.ticks ?? 1, () =>
+              runGoalToCompletion(
+                {
+                  home,
+                  dispatcher,
+                  workspace: ctx.workspace,
+                  signal: ctx.signal,
+                },
+                goal.id,
+                { maxTicks: i.ticks ?? 1 },
+              ),
             ),
           );
         }

@@ -30,6 +30,15 @@ export interface TriageLivenessRecord {
   files: number;
   observations: number;
   candidates: number;
+  /**
+   * Why the run did no work, when it deliberately did none.
+   *
+   * Load-bearing: triage returns an EMPTY run (files: 0) when it is throttled by
+   * cadence, disabled, lock-contended, or under test. Without this field a
+   * deliberate skip is indistinguishable from the v0.29 blindness bug, and the
+   * cockpit reports a healthy throttle as "dead".
+   */
+  skipped?: "disabled" | "test" | "cadence" | "locked";
 }
 
 // The result used to be discarded (`.then(() => undefined)`), which is exactly
@@ -55,6 +64,7 @@ function scheduleReliabilityMaintenance(live: LiveSession): void {
         files: run?.coverage?.files ?? 0,
         observations: run?.coverage?.observations ?? 0,
         candidates: run?.newCandidates?.length ?? 0,
+        skipped: run?.skipped,
       };
     }).catch((error: unknown) => {
       const now = Date.now();
@@ -369,6 +379,18 @@ export async function finishTurn(
 
   const ids = live.lastRecallIds ?? [];
   live.lastRecallIds = undefined;
+  {
+    // Keep a durable copy BEFORE the consuming branch below, and unconditionally
+    // — a turn that recalled nothing is itself a reportable fact, and the
+    // cockpit cannot distinguish "recalled nothing" from "I read the field too
+    // late" unless this is always written.
+    const workStatus = live.session.lastWorkStatus;
+    live.lastRecallSummary = {
+      ids: [...ids],
+      won: finalStatus === "completed" && (workStatus === "verified" || workStatus === "not_applicable"),
+      at: Date.now(),
+    };
+  }
   if (ids.length > 0) {
     try {
       const store = await MemoryStore.open(live.context.mind.memoryFile);

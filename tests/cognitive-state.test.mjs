@@ -103,16 +103,32 @@ test("cognitive_state reports a full, honest snapshot", async (t) => {
     assert.ok(row.detail && row.detail.length > 0, `${row.subsystem} explains itself instead of showing a bare status`);
   }
 
-  // Triage has not run in a fresh process. That must read as "unknown", NOT as
-  // healthy — the precise distinction that let it stay dead for three releases.
+  // ── The invariant, asserted as INTENT rather than exact copy ──
+  //
+  // Nothing that has not actually run may report "live". That single rule is
+  // what a dead subsystem hides behind, and it must hold for every row on a
+  // fresh process regardless of how the wording evolves.
+  for (const row of s.liveness) {
+    if (row.subsystem === "Working state (journal)") continue; // the journal IS open
+    assert.notEqual(row.state, "live", `${row.subsystem} must not claim "live" before doing anything`);
+  }
+
+  // Triage has not run in a fresh process — never "live", and it says why.
   const triage = s.liveness.find((l) => l.subsystem === "Reliability triage");
-  assert.equal(triage.state, "unknown", "a triage that never ran is 'unknown', never 'live'");
+  assert.equal(triage.state, "unknown", "a triage that never ran is 'unknown'");
   assert.match(triage.detail, /has not run/i);
 
-  // Mission loop is honest about not being instrumented rather than green.
+  // The mission loop is now instrumented, so a fresh process reports "idle"
+  // (not invoked) rather than "unknown" (cannot tell) — and still never "live".
   const mission = s.liveness.find((l) => l.subsystem === "Mission loop");
-  assert.equal(mission.state, "unknown", "an uninstrumented subsystem is never reported as live");
-  assert.match(mission.detail, /not yet instrumented/i, "and it says so, instead of implying it is fine");
+  assert.equal(mission.state, "idle", "an un-invoked mission loop is idle, not live and not unknowable");
+  assert.match(mission.detail, /has not been invoked/i, "and it says so plainly");
+
+  // Recall on a session with no completed turn is "unknown": the durable
+  // summary does not exist yet, so claiming it ran and found nothing would be
+  // an invention. This is the distinction that made working recall look dead.
+  const recall = s.liveness.find((l) => l.subsystem === "Memory recall");
+  assert.equal(recall.state, "unknown", "recall before any turn is 'unknown', not 'idle'");
 });
 
 test("cognitive_state is read-only — two calls agree, and it never mutates state", async (t) => {

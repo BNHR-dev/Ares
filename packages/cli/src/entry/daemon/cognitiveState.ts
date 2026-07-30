@@ -24,9 +24,13 @@
 // subsystem degrades to `null` (reported as unavailable) instead of taking the
 // command down with it.
 
+import path from "node:path";
+import { readdir } from "node:fs/promises";
 import { listGoals, loadMissionContract, missionContractSummary } from "@ares/operator";
 import type { CodingJournalState } from "@ares/core";
 import type { LiveSession } from "../sessionFactory.js";
+import type { TriageLivenessRecord } from "../turnPipeline.js";
+import { lastMissionRun } from "../missionLiveness.js";
 
 /** One thing Ares is pursuing, and where it has got to. */
 export interface MissionWire {
@@ -116,8 +120,17 @@ export interface CognitiveStateSources {
   /** Approvals currently parked waiting for the owner. */
   pendingApprovals: ReadonlyArray<{ tool: string; reason?: string; at: number }>;
   /** Last reliability-triage run, if this process has done one. */
-  lastTriage?: { at: number; files: number; observations: number; candidates: number } | null;
+  lastTriage?: TriageLivenessRecord | null;
 }
+
+/** Why triage did no work, in the owner's language. Each of these is a HEALTHY
+ *  state — the point of naming them is so none of them can look like a fault. */
+const TRIAGE_SKIP_COPY: Record<"disabled" | "test" | "cadence" | "locked", string> = {
+  cadence: "Skipped this turn — it already scanned recently and runs on a cadence, not every turn.",
+  disabled: "Turned off (ARES_SELF_TRIAGE=0), so it is not scanning at all.",
+  locked: "Another process was already scanning, so this run stood down to avoid clobbering it.",
+  test: "Not scanning under test conditions.",
+};
 
 const MAX_EVIDENCE = 8;
 const MAX_FAILURES = 6;
@@ -177,7 +190,24 @@ export async function assembleCognitiveState(sources: CognitiveStateSources): Pr
   // the panel can never disagree with what the completion gate believed.
   const uncertainty: string[] = [];
   const workStatus = journal?.lastWorkStatus;
-  if (workStatus === "unverified") uncertainty.push("The last turn changed things but no check proved them — treat any \"done\" from it as unproven.");
+  // workStatus is a snapshot taken AT TURN END. The verifier is debounced, so a
+  // green run can land a second or two later — leaving the panel asserting
+  // "nothing proved this" directly above a PASS row. Both are true of different
+  // moments; presenting them as simultaneous reads as self-contradiction and
+  // teaches the owner to distrust the panel. So reconcile explicitly.
+  const verifierSnapshot = safe(() => live.verifier.evidenceSnapshot(), null);
+  const passedSinceTurnEnd =
+    workStatus === "unverified" &&
+    !!verifierSnapshot?.latestPassedAt &&
+    !!journal?.updatedAt &&
+    verifierSnapshot.latestPassedAt >= new Date(journal.updatedAt).getTime() - 1_000;
+  if (workStatus === "unverified" && !passedSinceTurnEnd) {
+    uncertainty.push("The last turn changed things but no check proved them — treat any \"done\" from it as unproven.");
+  } else if (passedSinceTurnEnd) {
+    uncertainty.push(
+      "The turn ended before its checks finished, so it was recorded UNVERIFIED — but a check has passed since. The work is probably sound; the verdict was a timing artifact, not a failure.",
+    );
+  }
   if (workStatus === "blocked") uncertainty.push("The last turn was blocked before it could finish.");
   if (live.codingJournal?.verificationRequiredForCurrentTurn()) uncertainty.push("This objective still owes a verification run.");
   if (live.codingJournal?.persistedVerificationDebtForCurrentTurn()) uncertainty.push("There is carried-over verification debt from an earlier turn.");
@@ -197,7 +227,14 @@ export async function assembleCognitiveState(sources: CognitiveStateSources): Pr
   const todos = (journal?.todos ?? []).slice(0, 12).map((t) => ({ content: t.content, status: t.status }));
   const currentStep = (journal?.todos ?? []).find((t) => t.status === "in_progress")?.activeForm;
 
-  const recalled: RecalledMemoryWire[] = (live.lastRecallIds ?? []).map((id) => ({ id, used: true }));
+  // Read the DURABLE summary, not live.lastRecallIds — that field is consumed
+  // and cleared by finishTurn, so reading it post-turn always yielded 0 and made
+  // working recall look dead. Mid-turn the raw field is the only thing set, so
+  // fall back to it there.
+  const recallSummary = live.lastRecallSummary;
+  const recalled: RecalledMemoryWire[] = recallSummary
+    ? recallSummary.ids.map((id) => ({ id, used: recallSummary.won }))
+    : (live.lastRecallIds ?? []).map((id) => ({ id, used: false }));
 
   return {
     sessionId: live.session.meta.id,
@@ -220,8 +257,25 @@ export async function assembleCognitiveState(sources: CognitiveStateSources): Pr
       at: new Date(p.at).toISOString(),
     })),
     touchedFiles: (journal?.touchedFiles ?? []).slice(0, MAX_TOUCHED),
-    liveness: assembleLiveness({ journal, live, lastTriage, recalledCount: recalled.length }),
+    liveness: assembleLiveness({
+      journal,
+      live,
+      lastTriage,
+      recalledCount: recalled.length,
+      rolloutsOnDisk: await countRollouts(live.context.workspace),
+    }),
   };
+}
+
+/** How many session rollouts exist for this workspace. Cheap: one readdir. */
+async function countRollouts(workspace: string): Promise<number> {
+  try {
+    const dir = path.join(workspace, ".ares", "sessions");
+    const entries = await readdir(dir, { withFileTypes: true });
+    return entries.filter((e) => e.isDirectory()).length;
+  } catch {
+    return 0;
+  }
 }
 
 /**
@@ -235,10 +289,13 @@ export async function assembleCognitiveState(sources: CognitiveStateSources): Pr
 function assembleLiveness(input: {
   journal: CodingJournalState | null;
   live: LiveSession;
-  lastTriage?: { at: number; files: number; observations: number; candidates: number } | null;
+  lastTriage?: TriageLivenessRecord | null;
   recalledCount: number;
+  /** Rollout files present under <workspace>/.ares/sessions — the denominator
+   *  that tells "nothing to read" apart from "cannot read what is there". */
+  rolloutsOnDisk: number;
 }): LivenessWire[] {
-  const { journal, live, lastTriage, recalledCount } = input;
+  const { journal, live, lastTriage, recalledCount, rolloutsOnDisk } = input;
   const out: LivenessWire[] = [];
 
   // Coding journal — durable working state.
@@ -272,38 +329,77 @@ function assembleLiveness(input: {
       : { subsystem: "Continuous verification", state: "dead", detail: "The verifier did not answer — evidence is NOT being collected." },
   );
 
-  // Memory recall.
+  // Memory recall. The three-way split matters: a turn that recalled nothing is
+  // different from a turn that never asked, and both are different from recall
+  // being broken. Only the durable summary can tell them apart.
+  const summary = live.lastRecallSummary;
   out.push({
     subsystem: "Memory recall",
-    state: recalledCount > 0 ? "live" : "idle",
-    detail: recalledCount > 0
-      ? `${recalledCount} memory node(s) injected into the last turn.`
-      : "No memories were injected into the last turn. Legitimate for a trivial prompt — suspicious if it never changes.",
+    state: !summary ? "unknown" : recalledCount > 0 ? "live" : "idle",
+    detail: !summary
+      ? "No turn has completed yet in this session, so recall has not been exercised."
+      : recalledCount > 0
+        ? `${recalledCount} memory node(s) injected into the last turn, then ${summary.won ? "REINFORCED" : "weakened"} by its outcome.`
+        : "Recall ran for the last turn and selected nothing. Legitimate when the message needs no history — suspicious if it never changes.",
+    lastRunAt: summary ? new Date(summary.at).toISOString() : undefined,
   });
 
-  // Reliability triage. Explicitly the one that was dead: a run that reads zero
-  // files is reported as DEAD, not as a clean result.
+  // Reliability triage. Reading zero files is the v0.29-0.30 Windows failure
+  // mode — but ONLY if there were files to read. A fresh workspace has no
+  // rollouts yet, and calling that "dead" is the same idle-vs-dead conflation
+  // this panel exists to kill, just pointed the other way. `rolloutsOnDisk`
+  // decides between them instead of guessing.
   out.push(
     lastTriage
       ? {
           subsystem: "Reliability triage",
-          state: lastTriage.files === 0 ? "dead" : lastTriage.observations > 0 ? "live" : "idle",
-          detail: lastTriage.files === 0
-            ? "Ran but read ZERO rollout files — it is finding nothing because it can see nothing (the v0.29-0.30 Windows failure mode)."
-            : `${lastTriage.files} file(s) · ${lastTriage.observations} observation(s) · ${lastTriage.candidates} candidate(s).`,
+          // Order matters: a DELIBERATE skip is checked before any zero-coverage
+          // inference. Triage returns an empty run when throttled by cadence,
+          // disabled, or lock-contended, and reading that as death is a false
+          // alarm that trains the owner to ignore this row.
+          state: lastTriage.skipped
+            ? "idle"
+            : lastTriage.files > 0
+              ? (lastTriage.observations > 0 ? "live" : "idle")
+              : rolloutsOnDisk > 0
+                ? "dead"
+                : "idle",
+          detail: lastTriage.skipped
+            ? TRIAGE_SKIP_COPY[lastTriage.skipped]
+            : lastTriage.files > 0
+              ? `${lastTriage.files} file(s) · ${lastTriage.observations} observation(s) · ${lastTriage.candidates} candidate(s).`
+              : rolloutsOnDisk > 0
+                ? `Ran but read ZERO of the ${rolloutsOnDisk} rollout(s) on disk — it is finding nothing because it cannot see them (the v0.29-0.30 Windows failure mode).`
+                : "Ran with no rollouts on disk yet — nothing to learn from so far, which is expected in a fresh workspace.",
           lastRunAt: new Date(lastTriage.at).toISOString(),
         }
       : { subsystem: "Reliability triage", state: "unknown", detail: "Has not run in this process yet." },
   );
 
-  // Mission loop. Reported as "unknown" rather than green: it is reachable, but
-  // nothing yet records whether a run happened, so claiming liveness would be
-  // the exact thing this panel exists to prevent.
-  out.push({
-    subsystem: "Mission loop",
-    state: "unknown",
-    detail: "Reachable via the Operator tool, but not yet instrumented — this panel cannot tell you whether it ran.",
-  });
+  // Mission loop. Now recorded at the call sites, so this can distinguish
+  // "never invoked in this process" from "ran and stalled" — and an exhausted
+  // tick budget from a clean finish, which otherwise both read as a quiet stop.
+  const mission = lastMissionRun();
+  out.push(
+    mission.last
+      ? {
+          subsystem: "Mission loop",
+          state: mission.last.error ? "dead" : mission.last.steps > 0 ? "live" : "idle",
+          detail: mission.last.error
+            ? `Last run THREW: ${mission.last.error.slice(0, 160)}`
+            : `${mission.runs} run(s) this process · last: goal ${mission.last.goalId} → ${mission.last.status}, ${mission.last.steps} step(s), ${Math.round(mission.last.progress * 100)}%${
+                mission.last.maxTicks && mission.last.steps >= mission.last.maxTicks
+                  ? ` — stopped at its ${mission.last.maxTicks}-tick ceiling, not because it was finished`
+                  : ""
+              }.`,
+          lastRunAt: new Date(mission.last.at).toISOString(),
+        }
+      : {
+          subsystem: "Mission loop",
+          state: "idle",
+          detail: "Has not been invoked in this process. Reachable via the Operator tool.",
+        },
+  );
 
   return out;
 }

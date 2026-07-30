@@ -57,6 +57,18 @@ export interface LiveSession {
   resumed?: ResumedSessionInfo;
   /** V6: living-memory ids injected into the current turn — settled at turn end. */
   lastRecallIds?: string[];
+  /**
+   * Durable copy of the last turn's recall, for display.
+   *
+   * lastRecallIds above is CONSUMED at turn end (finishTurn reads it, records
+   * the outcome, then clears it), so anything reading it after a turn is
+   * structurally guaranteed to see nothing. The cockpit read it and therefore
+   * always reported "0 memories recalled" — which looked exactly like recall
+   * being dead. This survives the turn so the panel can tell the difference,
+   * and carries the outcome verdict so promotion/decay is visible rather than
+   * merely asserted.
+   */
+  lastRecallSummary?: { ids: string[]; won: boolean; at: number };
   /** Lazy coding-only repository cartography cadence. */
   repositoryMapCodingTurns?: number;
   repositoryMapLastTurn?: number;
