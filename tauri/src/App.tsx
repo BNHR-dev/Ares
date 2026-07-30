@@ -230,6 +230,62 @@ ${description}`,
   ];
 }
 
+/**
+ * A cognitive snapshot for the browser preview only.
+ *
+ * Shaped to show what the panel looks like when things have actually gone
+ * wrong — a red check, real uncertainty, a repeated tool failure, a dead
+ * subsystem — because a cockpit that has only ever been seen in its happy state
+ * is a cockpit nobody has really reviewed. The installed app replaces this on
+ * its first cognitive_state.
+ */
+function demoCognitive(): CognitiveStateVm {
+  return {
+    sessionId: "demo",
+    at: new Date(0).toISOString(),
+    missions: [
+      { id: "g1", statement: "Unify session validation and keep the middleware honest", status: "active", progress: 0.62, steps: 8,
+        contract: "Done when guard.ts delegates to validateSession() and the auth suite passes with no skips." },
+    ],
+    objective: "Unify the duplicated session validation",
+    phase: "implement",
+    steering: ["keep the public signature stable"],
+    currentStep: "Running the auth suite",
+    todos: [
+      { content: "Trace every validateSession caller", status: "completed" },
+      { content: "Delegate guard.ts to the canonical path", status: "completed" },
+      { content: "Run the auth suite", status: "in_progress" },
+      { content: "Check the middleware still short-circuits", status: "pending" },
+    ],
+    evidence: [
+      { label: "auth suite", command: "pnpm test -- auth", verdict: "fail", cached: false, durationMs: 4120, at: new Date(0).toISOString(),
+        outputTail: "not ok 12 - rejects an expired token\n  expected 401, got 200" },
+      { label: "typecheck", command: "tsc -b", verdict: "pass", cached: false, durationMs: 8830, at: new Date(0).toISOString() },
+      { label: "lint", command: "eslint src/auth", verdict: "skip", cached: true, durationMs: 0, at: new Date(0).toISOString() },
+    ],
+    uncertainty: [
+      "1 check is currently red: auth suite.",
+      "1 check was reused from cache rather than re-run.",
+      "The middleware path has not been exercised — only the validator was tested.",
+    ],
+    workStatus: "unverified",
+    recalled: [{ id: "mem_a41", used: true }, { id: "mem_7c2", used: true }, { id: "mem_ff9", used: true }],
+    failures: [
+      { tool: "Edit", signature: "a91f2c4e", count: 3, latest: "File has changed since it was last read — re-read before editing.", at: new Date(0).toISOString() },
+    ],
+    recovery: ["Edit failed 3× on the same signature — strategy change was demanded after each."],
+    blockedApprovals: [{ tool: "Bash", reason: "git push origin main — outward effect", at: new Date(0).toISOString() }],
+    touchedFiles: ["src/auth/session.ts", "src/middleware/guard.ts"],
+    liveness: [
+      { subsystem: "Working state (journal)", state: "live", detail: "6 turn(s) recorded · 3 check(s) · 1 failure signature(s)" },
+      { subsystem: "Continuous verification", state: "live", detail: "1 passed / 1 failed / 1 skipped · latest: failed (behavioral)" },
+      { subsystem: "Memory recall", state: "live", detail: "3 memory node(s) injected into the last turn." },
+      { subsystem: "Reliability triage", state: "dead", detail: "Ran but read ZERO rollout files — it is finding nothing because it can see nothing." },
+      { subsystem: "Mission loop", state: "unknown", detail: "Reachable via the Operator tool, but not yet instrumented — this panel cannot tell you whether it ran." },
+    ],
+  };
+}
+
 function demoSession(): SessionVm {
   let s = freshSession();
   s.title = "Refactor the auth flow";
@@ -366,6 +422,7 @@ function App() {
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [roster, setRoster] = useState<PersonaVm[]>(() => (native ? [] : demoRoster()));
+  const [cognitive, setCognitive] = useState<CognitiveStateVm | null>(() => (native ? null : demoCognitive()));
   const [activePersona, setActivePersona] = useState<PersonaVm | null>(null);
   const [personaSuggestion, setPersonaSuggestion] = useState<{ persona: PersonaVm; matched: string[] } | null>(null);
   const [usageStats, setUsageStats] = useState<UsageStats | null>(null);
@@ -916,14 +973,18 @@ function App() {
   const helmBusy = Boolean(active?.busy);
   useEffect(() => {
     if (view !== "helm" || !native || daemon === "stopped" || daemon === "error") return;
+    const scryCognitive = () => daemonCmd({ type: "cognitive_state", sessionId: activeRef.current });
     const scry = () => {
       daemonCmd({ type: "operator_status" });
       daemonCmd({ type: "usage_stats", days: 14 });
+      scryCognitive();
     };
     scry();
     // The roster changes only when someone edits it, so it rides the open/flip
     // effect rather than the 5s poll.
     daemonCmd({ type: "roster_list", sessionId: activeRef.current });
+    // Cognitive state DOES move during a turn, so it joins the 5s scry.
+    scryCognitive();
     const timer = window.setInterval(scry, 5_000);
     return () => window.clearInterval(timer);
   }, [view, native, daemon, helmBusy, daemonCmd]);
@@ -1210,6 +1271,9 @@ function App() {
           return true;
         case "skills_list":
           setSkills(Array.isArray(e.skills) ? (e.skills as SkillInfo[]) : []);
+          return true;
+        case "cognitive_state":
+          setCognitive((e.cognitive as CognitiveStateVm | undefined) ?? null);
           return true;
         case "roster_list":
           setRoster(Array.isArray(e.personas) ? (e.personas as PersonaVm[]) : []);
@@ -2814,6 +2878,7 @@ function App() {
             active={active}
             roster={roster}
             activePersona={activePersona}
+            cognitive={cognitive}
             onOpenSession={openSession}
             onToggleAutotick={() => daemonCmd({ type: "operator_autotick", enabled: !(opStatus?.autotick ?? true) })}
             onRefresh={() => { daemonCmd({ type: "operator_status" }); daemonCmd({ type: "usage_stats", days: 14 }); daemonCmd({ type: "roster_list", sessionId: activeId }); }}
@@ -4451,6 +4516,7 @@ function HelmModern({
   sessions,
   roster,
   activePersona,
+  cognitive,
   onOpenSession,
   onToggleAutotick,
   onRefresh,
@@ -4465,6 +4531,7 @@ function HelmModern({
   sessions: SessionVm[];
   roster: PersonaVm[];
   activePersona: PersonaVm | null;
+  cognitive: CognitiveStateVm | null;
   onOpenSession: (id: string) => void;
   onToggleAutotick: () => void;
   onRefresh: () => void;
@@ -4472,7 +4539,15 @@ function HelmModern({
   onDeletePersona: (name: string) => void;
   onWritePersona: (draft: PersonaDraft) => void;
 }) {
-  const [tab, setTab] = useState<"overview" | "agents">("overview");
+  const [tab, setTab] = useState<"overview" | "agents" | "mind">("overview");
+  // Anything the owner would want to notice without going looking. Drives the
+  // dot on the Mind tab — a red check or a dead subsystem should not require
+  // opening the panel to discover.
+  const attention =
+    (cognitive?.uncertainty.length ?? 0) +
+    (cognitive?.failures.length ?? 0) +
+    (cognitive?.blockedApprovals.length ?? 0) +
+    (cognitive?.liveness.filter((l) => l.state === "dead").length ?? 0);
   const goals = opStatus?.goals ?? [];
   const activeGoals = goals.filter((g) => g.status === "active");
   const trust = opStatus?.trust ?? [];
@@ -4510,6 +4585,7 @@ function HelmModern({
         {([
           { id: "overview" as const, label: "Overview", glyph: "helm" },
           { id: "agents" as const, label: "Agents", glyph: "skills" },
+          { id: "mind" as const, label: "Mind", glyph: "search" },
         ]).map((t) => (
           <button
             key={t.id}
@@ -4522,12 +4598,15 @@ function HelmModern({
             <Sigil name={asSigilName(t.glyph)} size={18} />
             <span>{t.label}</span>
             {t.id === "agents" && roster.length > 0 ? <em className="hmTabCount">{roster.length}</em> : null}
+            {t.id === "mind" && attention > 0 ? <em className="hmTabCount" data-alert="1">{attention}</em> : null}
           </button>
         ))}
         <span className="hmTabRail" data-at={tab} aria-hidden="true" />
       </div>
 
-      {tab === "agents" ? (
+      {tab === "mind" ? (
+        <HelmMind cognitive={cognitive} />
+      ) : tab === "agents" ? (
         <HelmAgents
           roster={roster}
           activePersona={activePersona}
@@ -4601,6 +4680,221 @@ function HelmModern({
       </div>
       </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * The cockpit. Read-only by design.
+ *
+ * Ares reported four capabilities as missing that all already existed in code;
+ * what was missing was any way to SEE them, so a subsystem that had quietly
+ * died looked identical to one that was never built. This panel is the
+ * instrument that tells those two apart.
+ *
+ * Two rules it holds to:
+ *   - a skipped or cached check is never displayed as a pass;
+ *   - an empty section says it is empty, and says what that means, rather than
+ *     being hidden (a hidden panel reads as "nothing to worry about").
+ */
+function HelmMind({ cognitive }: { cognitive: CognitiveStateVm | null }) {
+  const [openEvidence, setOpenEvidence] = useState<string | null>(null);
+
+  if (!cognitive) {
+    return (
+      <div className="hmPane hmMind" key="mind">
+        <p className="hmEmpty">No snapshot yet — the garrison has not reported in. Open a session and this fills in.</p>
+      </div>
+    );
+  }
+
+  const c = cognitive;
+  const dead = c.liveness.filter((l) => l.state === "dead");
+  const verdictWord = { pass: "PASS", fail: "FAIL", skip: "SKIP" } as const;
+
+  return (
+    <div className="hmPane hmMind" key="mind">
+      {/* The one thing worth reading first: a subsystem that should be working
+          and is not. This is the failure mode that hid for three releases. */}
+      {dead.length > 0 ? (
+        <div className="hmAlarm">
+          <Medallion glyph={asSigilName("shield")} size={34} tone="ember" />
+          <div className="hmAlarmText">
+            <strong>{dead.length === 1 ? "A subsystem is not working" : `${dead.length} subsystems are not working`}</strong>
+            {dead.map((d) => <span key={d.subsystem}>{d.subsystem} — {d.detail}</span>)}
+          </div>
+        </div>
+      ) : null}
+
+      <div className="hmMindGrid">
+        {/* ── Pursuing ─────────────────────────────────────────────── */}
+        <section className="hmPanel hmMindCard">
+          <div className="hmPanelLabel">Pursuing</div>
+          {c.missions.length === 0 && !c.objective ? (
+            <p className="hmEmpty">Nothing durable in flight. This session is answering turn by turn.</p>
+          ) : (
+            <>
+              {c.objective ? (
+                <div className="hmMindObjective">
+                  <strong>{c.objective}</strong>
+                  {c.phase ? <em className="hmPill">{c.phase}</em> : null}
+                </div>
+              ) : null}
+              {c.currentStep ? <div className="hmMindStep"><i className="hmStepDot" aria-hidden="true" />{c.currentStep}</div> : null}
+              {c.steering.length > 0 ? (
+                <div className="hmCardRow">
+                  <span className="hmCardRowLabel">You steered</span>
+                  {c.steering.map((t, i) => <q key={i} className="hmGreeting">{t}</q>)}
+                </div>
+              ) : null}
+              {c.missions.map((m) => (
+                <div className="hmGoal" key={m.id}>
+                  <div className="hmGoalTop">
+                    <span className="hmDiamond" aria-hidden="true">◈</span>
+                    <span className="hmGoalText">{compact(m.statement, 70)}</span>
+                    <span className="hmGoalPct">{Math.round(m.progress * 100)}%</span>
+                  </div>
+                  <span className="hmBar"><i style={{ width: `${Math.round(m.progress * 100)}%` }} /></span>
+                  {/* Without the contract, a progress number has no referent. */}
+                  {m.contract ? <p className="hmMindContract">Done means: {m.contract}</p> : (
+                    <p className="hmMindContract" data-warn="1">No mission contract — "done" is not defined for this goal.</p>
+                  )}
+                </div>
+              ))}
+              {c.todos.length > 0 ? (
+                <ul className="hmMindTodos">
+                  {c.todos.map((t, i) => (
+                    <li key={i} data-status={t.status}>{t.content}</li>
+                  ))}
+                </ul>
+              ) : null}
+            </>
+          )}
+        </section>
+
+        {/* ── Evidence ─────────────────────────────────────────────── */}
+        <section className="hmPanel hmMindCard">
+          <div className="hmPanelLabel">What proves it</div>
+          {c.evidence.length === 0 ? (
+            <p className="hmEmpty">Nothing has been checked yet. Any claim of "done" from this session is unproven.</p>
+          ) : (
+            c.evidence.map((e, i) => {
+              const key = `${e.label}-${i}`;
+              const open = openEvidence === key;
+              return (
+                <div className="hmProof" key={key} data-verdict={e.verdict}>
+                  <button className="hmProofTop" onClick={() => setOpenEvidence(open ? null : key)} aria-expanded={open}>
+                    <span className="hmProofVerdict" data-verdict={e.verdict}>{verdictWord[e.verdict]}</span>
+                    <span className="hmProofLabel">{e.label}</span>
+                    {e.cached ? <em className="hmPill" title="Reused from cache — not re-run against the current files">cached</em> : null}
+                    {e.durationMs > 0 ? <span className="hmProofMs">{Math.round(e.durationMs / 100) / 10}s</span> : null}
+                  </button>
+                  <code className="hmProofCmd">{e.command}</code>
+                  {e.outputTail ? (
+                    <SpringHeight>
+                      {open ? <pre className="hmProofOut">{e.outputTail}</pre> : null}
+                    </SpringHeight>
+                  ) : open ? (
+                    <p className="hmEmpty">No output was captured for this run.</p>
+                  ) : null}
+                </div>
+              );
+            })
+          )}
+        </section>
+
+        {/* ── Uncertainty ──────────────────────────────────────────── */}
+        <section className="hmPanel hmMindCard">
+          <div className="hmPanelLabel">Not sure about</div>
+          {c.workStatus ? (
+            <div className="hmMindWork" data-status={c.workStatus}>
+              last turn: {c.workStatus}
+            </div>
+          ) : null}
+          {c.uncertainty.length === 0 ? (
+            <p className="hmEmpty">Nothing flagged. That is only meaningful if checks have actually run — see the panel above.</p>
+          ) : (
+            <ul className="hmMindList">
+              {c.uncertainty.map((u, i) => <li key={i}>{u}</li>)}
+            </ul>
+          )}
+        </section>
+
+        {/* ── Failures + recovery ──────────────────────────────────── */}
+        <section className="hmPanel hmMindCard">
+          <div className="hmPanelLabel">What went wrong</div>
+          {c.failures.length === 0 ? (
+            <p className="hmEmpty">No repeated tool failures recorded.</p>
+          ) : (
+            c.failures.map((f) => (
+              <div className="hmFail" key={`${f.tool}-${f.signature}`}>
+                <div className="hmFailTop">
+                  <span className="hmFailTool">{f.tool}</span>
+                  <em className="hmFailCount" data-hot={f.count >= 3 ? "1" : "0"}>×{f.count}</em>
+                  <code className="hmFailSig">{f.signature}</code>
+                </div>
+                <p className="hmFailMsg">{f.latest}</p>
+              </div>
+            ))
+          )}
+          {c.recovery.length > 0 ? (
+            <>
+              <div className="hmPanelLabel hmPanelLabelInner">Recovery</div>
+              <ul className="hmMindList">{c.recovery.map((r, i) => <li key={i}>{r}</li>)}</ul>
+            </>
+          ) : null}
+        </section>
+
+        {/* ── Recalled + touched ───────────────────────────────────── */}
+        <section className="hmPanel hmMindCard">
+          <div className="hmPanelLabel">What I remembered</div>
+          {c.recalled.length === 0 ? (
+            <p className="hmEmpty">No memories were pulled into the last turn.</p>
+          ) : (
+            <>
+              <p className="hmMindCount">{c.recalled.length} fact{c.recalled.length === 1 ? "" : "s"} injected</p>
+              <span className="hmTriggers">{c.recalled.map((m) => <em key={m.id}>{m.id}</em>)}</span>
+            </>
+          )}
+          {c.touchedFiles.length > 0 ? (
+            <>
+              <div className="hmPanelLabel hmPanelLabelInner">Files touched</div>
+              <span className="hmTriggers">{c.touchedFiles.map((f) => <em key={f}>{f}</em>)}</span>
+            </>
+          ) : null}
+        </section>
+
+        {/* ── Waiting on you ──────────────────────────────────────── */}
+        <section className="hmPanel hmMindCard">
+          <div className="hmPanelLabel">Waiting on you</div>
+          {c.blockedApprovals.length === 0 ? (
+            <p className="hmEmpty">Nothing is blocked on your approval.</p>
+          ) : (
+            c.blockedApprovals.map((b, i) => (
+              <div className="hmBlocked" key={i}>
+                <Medallion glyph={asSigilName("shield")} size={28} tone="ember" />
+                <div>
+                  <strong>{b.tool}</strong>
+                  <span>{b.reason}</span>
+                </div>
+              </div>
+            ))
+          )}
+        </section>
+      </div>
+
+      {/* ── Liveness strip ─────────────────────────────────────────── */}
+      <div className="hmPanelLabel hmPanelLabelInner">Is each part actually running?</div>
+      <div className="hmLive">
+        {c.liveness.map((l) => (
+          <div className="hmLiveRow" key={l.subsystem} data-state={l.state}>
+            <i className="hmLiveDot" aria-hidden="true" />
+            <span className="hmLiveName">{l.subsystem}</span>
+            <span className="hmLiveState">{l.state}</span>
+            <span className="hmLiveDetail">{l.detail}</span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -4916,6 +5210,7 @@ function HelmView({
   active,
   roster,
   activePersona,
+  cognitive,
   onOpenSession,
   onToggleAutotick,
   onRefresh,
@@ -4931,6 +5226,7 @@ function HelmView({
   active: SessionVm | undefined;
   roster: PersonaVm[];
   activePersona: PersonaVm | null;
+  cognitive: CognitiveStateVm | null;
   onOpenSession: (id: string) => void;
   onToggleAutotick: () => void;
   onRefresh: () => void;
@@ -5001,6 +5297,7 @@ function HelmView({
         sessions={sessions}
         roster={roster}
         activePersona={activePersona}
+        cognitive={cognitive}
         onOpenSession={onOpenSession}
         onToggleAutotick={onToggleAutotick}
         onRefresh={onRefresh}
@@ -7446,6 +7743,28 @@ interface SkillSurface {
   input?: unknown;
   hint?: string;
 }
+/** What Ares knows and is doing (see cli/entry/daemon/cognitiveState.ts).
+ *  Read-only: this panel is an instrument, not a control surface. */
+interface CognitiveStateVm {
+  sessionId: string;
+  at: string;
+  missions: Array<{ id: string; statement: string; status: string; progress: number; steps: number; contract?: string }>;
+  objective?: string;
+  phase?: string;
+  steering: string[];
+  currentStep?: string;
+  todos: Array<{ content: string; status: string }>;
+  evidence: Array<{ label: string; command: string; verdict: "pass" | "fail" | "skip"; cached: boolean; durationMs: number; at: string; outputTail?: string }>;
+  uncertainty: string[];
+  workStatus?: string;
+  recalled: Array<{ id: string; used: boolean }>;
+  failures: Array<{ tool: string; signature: string; count: number; latest: string; at: string }>;
+  recovery: string[];
+  blockedApprovals: Array<{ tool: string; reason: string; at: string }>;
+  touchedFiles: string[];
+  liveness: Array<{ subsystem: string; state: "live" | "idle" | "dead" | "unknown"; detail: string; lastRunAt?: string }>;
+}
+
 /** A roster persona as the daemon wires it (see cli/entry/daemon/personas.ts). */
 interface PersonaVm {
   name: string;

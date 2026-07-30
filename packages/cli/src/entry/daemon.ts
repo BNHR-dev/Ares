@@ -20,6 +20,7 @@ import { ConsciousnessWatch, WATCHER_VOICE_PROMPT } from "../watch.js";
 import { recordConsciousnessObservation } from "../consciousnessContext.js";
 import { aresAgentHome, deletePersona, listPersonas, onLifecycle, runSkill, skillHubProbe, skillHubList, skillHubGet, skillHubPublish, installHubSkill, readLocalSkillFiles, writePersona } from "@ares/agent";
 import { adoptPersonaByName, applyPersonaToolResult, personaForMessage, personaToWire } from "./daemon/personas.js";
+import { assembleCognitiveState } from "./daemon/cognitiveState.js";
 import { QueryEngineDispatcher, OperatorBackgroundLoop, deriveLeash, domainOf, isOperatorPaused, listGoals, loadStandingOrders, materializeDueStandingOrders, type StandingOrder } from "@ares/operator";
 import { MemoryStore, reflectOnRun, detectWorkspaceProjectId, loadProjectState, buildConversationDigest, mergeDurableFacts, CONVERSATION_REFLECT_SYSTEM, DURABLE_FACTS_SCHEMA_HINT, type DurableFact } from "@ares/mind";
 import { OAUTH_PROVIDERS, PROVIDER_LABELS, startOAuthFlow, connectedProviders, getProviderConfig, setCredential, hasCredential, deleteCredential, clientIdName, clientSecretName, runAresAccountSignin, probeAresOauth } from "@ares/core";
@@ -35,7 +36,7 @@ import { ParsedArgs, cliVersion } from "./runtime.js";
 import { LiveSession, chatContextBudget, createSession, createSessionWithSelection, handleReasoningCommand, isProviderFatalError, makeSpanSummarizer, modelLikelyHasVision, pickCapacitySibling, pickHealthyFallback, pickVisionFallback, resolveReasoningLevel } from "./sessionFactory.js";
 import { startGatewayMirror } from "./telegramWiring.js";
 import { contentFromUserInput, undoLines } from "./terminalLines.js";
-import { buildSystemPrompt, disposeLiveSession, finishTurn, gatherGitRunFacts, mindSessionEnded, prepareUserTurn } from "./turnPipeline.js";
+import { buildSystemPrompt, disposeLiveSession, finishTurn, gatherGitRunFacts, lastTriageRun, mindSessionEnded, prepareUserTurn } from "./turnPipeline.js";
 
 // Satellite modules (extracted, closure-free helpers — command handlers and
 // their shared mutable state stay in this file):
@@ -135,6 +136,12 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
   // interrupted. Low-risk actions (web/browser/read/search/most tool use)
   // auto-approve; only genuinely sensitive ones (credentials, payments,
   // sending email, external accounts, destructive wipes) still ask the owner.
+  // Approvals currently parked waiting for the owner. Tracked here (rather than
+  // inferred later) because "what is blocked on me" is otherwise invisible —
+  // the prompt is in flight, not in any store, so nothing could report it.
+  const pendingApprovals = new Map<string, { tool: string; reason?: string; at: number }>();
+  let approvalSeq = 0;
+
   const requestPermission = (request: ToolPermissionRequest): Promise<PermissionPromptDecision> => {
     // The owner is present at the desktop, so this is the ATTENDED gate: a
     // hard-blocked or staged action escalates to the owner rather than being
@@ -151,10 +158,17 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
     // the regression the gate promises never to cause. Only a HARD block
     // (payments, email, credentials, destructive wipes) outranks the posture.
     const outcome = decidePermission(request, live?.runtime.permissions);
+    // One wrapper for both escalation paths so a parked approval can never be
+    // recorded on one branch and missed on the other.
+    const park = (req: ToolPermissionRequest): Promise<PermissionPromptDecision> => {
+      const key = `ap_${++approvalSeq}`;
+      pendingApprovals.set(key, { tool: req.toolName, reason: req.reason, at: Date.now() });
+      return commands.waitForPermission(req).finally(() => pendingApprovals.delete(key));
+    };
     if (gate.kind === "ask" && (gate.hardBlocked || outcome !== "allow")) {
-      return commands.waitForPermission({ ...request, reason: gate.reason ?? request.reason });
+      return park({ ...request, reason: gate.reason ?? request.reason });
     }
-    return outcome === "allow" ? Promise.resolve("allow_once") : commands.waitForPermission(request);
+    return outcome === "allow" ? Promise.resolve("allow_once") : park(request);
   };
   let live: LiveSession;
   let browserExtensionBridge: BrowserBridgeServer | null = null;
@@ -1243,6 +1257,31 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
           if (!entry.turnActive) entry.live.session.setMaxTurns(cfg.maxTurns);
         }
         process.stdout.write(JSON.stringify({ type: "engine_config_set", config: cfg }) + "\n");
+        continue;
+      }
+      if (command.type === "cognitive_state") {
+        // Read-only: assembling the snapshot must never mutate agent state.
+        const sid = typeof command.sessionId === "string" ? command.sessionId : undefined;
+        const entry = sid ? sessions.get(sid) : primaryEntry;
+        if (!entry) {
+          process.stdout.write(JSON.stringify({ type: "daemon_error", error: "cognitive_state: unknown session" }) + "\n");
+          continue;
+        }
+        const state = await assembleCognitiveState({
+          live: entry.live,
+          pendingApprovals: [...pendingApprovals.values()],
+          lastTriage: lastTriageRun(),
+        }).catch((err: unknown) => {
+          process.stdout.write(
+            JSON.stringify({ type: "daemon_error", error: `cognitive_state failed: ${err instanceof Error ? err.message : String(err)}` }) + "\n",
+          );
+          return null;
+        });
+        // Emitted as `cognitive`, not `state`: the desktop's AresEvent already
+        // uses `state` for daemon/consciousness status strings, and reusing it
+        // would be the same "keyed off a name that means something else"
+        // mistake that made routing blank the status capsule.
+        if (state) process.stdout.write(JSON.stringify({ type: "cognitive_state", cognitive: state }) + "\n");
         continue;
       }
       if (command.type === "roster_list") {

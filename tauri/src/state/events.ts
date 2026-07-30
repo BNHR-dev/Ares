@@ -27,6 +27,9 @@ export interface AresEvent {
   persona?: unknown;
   /** Trigger phrases that fired, so the UI can show WHY a persona stepped in. */
   matched?: unknown;
+  /** cognitive_state payload. Deliberately NOT `state` — that name is already
+   *  taken on this type by daemon/consciousness status strings. */
+  cognitive?: unknown;
   origin?: string;
   provider?: string;
   model?: string;

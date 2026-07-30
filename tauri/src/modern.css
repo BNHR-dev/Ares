@@ -2532,3 +2532,262 @@ html[data-perf="lite"] .ares[data-style="modern"] .composerRow {
 }
 
 html[data-perf="lite"] .ares[data-style="modern"] .hmCard:hover { transform: none; box-shadow: none; }
+
+/* ─────────────────────────────────────────────────────────────────────────
+   HELM → Mind: the cognitive cockpit
+   ─────────────────────────────────────────────────────────────────────────
+   Read-only instrument. Its whole job is to make a dead subsystem look
+   different from an absent one, so the visual language is deliberately blunt:
+   verdicts are words (PASS/FAIL/SKIP) not colours alone, a cached check is
+   labelled, and liveness carries a state word beside its dot. Colour-blind and
+   screenshot-legible both matter here — someone will paste this into a bug
+   report.
+
+   Nothing animates in luminance. Standing photosensitive doctrine.            */
+
+/* The rail now spans three tabs. Exact geometry rather than approximate:
+   each tab is (100% - 2 gaps of 4px - 8px of container padding) / 3, and one
+   step is the element's own width + one gap. translateX percentages resolve
+   against the element's own width, so `100% + 4px` is exactly one slot. */
+.ares[data-style="modern"] .hmTabRail {
+  width: calc((100% - 16px) / 3);
+}
+.ares[data-style="modern"] .hmTabRail[data-at="agents"] { transform: translateX(calc(100% + 4px)); }
+.ares[data-style="modern"] .hmTabRail[data-at="mind"] { transform: translateX(calc(200% + 8px)); }
+
+/* An attention count that is a warning, not an inventory. */
+.ares[data-style="modern"] .hmTabCount[data-alert="1"] {
+  background: rgba(var(--ember-rgb), 0.22);
+  color: var(--ember-text);
+}
+
+/* ── The alarm: a subsystem that should be working and is not ─────────── */
+.ares[data-style="modern"] .hmAlarm {
+  display: flex;
+  align-items: flex-start;
+  gap: 13px;
+  padding: 15px 17px;
+  margin-bottom: 18px;
+  border-radius: var(--r-lg);
+  border: 1px solid rgba(201, 86, 74, 0.5);
+  background: linear-gradient(180deg, rgba(201, 86, 74, 0.13), rgba(201, 86, 74, 0.04));
+}
+.ares[data-style="modern"] .hmAlarmText { display: grid; gap: 4px; min-width: 0; }
+.ares[data-style="modern"] .hmAlarmText strong { font: 650 13.5px/1.3 var(--font); color: #f3d3cd; }
+.ares[data-style="modern"] .hmAlarmText span { font: 400 12px/1.55 var(--font); color: var(--muted); }
+
+.ares[data-style="modern"] .hmMindGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+.ares[data-style="modern"] .hmMindCard { display: grid; gap: 10px; align-content: start; }
+
+/* ── Pursuing ─────────────────────────────────────────────────────────── */
+.ares[data-style="modern"] .hmMindObjective { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.ares[data-style="modern"] .hmMindObjective strong { font: 650 14px/1.35 var(--font); color: var(--text-hi); }
+.ares[data-style="modern"] .hmMindStep {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font: 500 12.5px/1.4 var(--font);
+  color: var(--ember-text);
+}
+/* A steady dot, never a blinking one. */
+.ares[data-style="modern"] .hmStepDot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--ember-hi);
+  box-shadow: 0 0 8px rgba(var(--ember-rgb), 0.55);
+}
+.ares[data-style="modern"] .hmMindContract {
+  margin: 6px 0 0;
+  font: 400 11.5px/1.55 var(--font);
+  color: var(--muted);
+}
+.ares[data-style="modern"] .hmMindContract[data-warn="1"] { color: var(--ember-text); }
+.ares[data-style="modern"] .hmMindTodos { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 5px; }
+.ares[data-style="modern"] .hmMindTodos li {
+  position: relative;
+  padding-left: 20px;
+  font: 400 12px/1.5 var(--font);
+  color: var(--muted);
+}
+.ares[data-style="modern"] .hmMindTodos li::before {
+  content: "○";
+  position: absolute;
+  left: 2px;
+  color: var(--faint);
+}
+.ares[data-style="modern"] .hmMindTodos li[data-status="completed"] { color: var(--faint); }
+.ares[data-style="modern"] .hmMindTodos li[data-status="completed"]::before { content: "●"; color: var(--steel); }
+.ares[data-style="modern"] .hmMindTodos li[data-status="in_progress"] { color: var(--text); }
+.ares[data-style="modern"] .hmMindTodos li[data-status="in_progress"]::before { content: "◉"; color: var(--ember-hi); }
+
+/* ── Evidence ─────────────────────────────────────────────────────────── */
+.ares[data-style="modern"] .hmProof {
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: 10px 12px;
+  background: rgba(8, 7, 6, 0.4);
+  display: grid;
+  gap: 7px;
+}
+.ares[data-style="modern"] .hmProof[data-verdict="fail"] { border-color: rgba(201, 86, 74, 0.42); }
+.ares[data-style="modern"] .hmProofTop {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  color: inherit;
+  text-align: left;
+}
+/* The verdict is a WORD, not just a colour — a red dot alone is unreadable to
+   a colour-blind owner and unreadable in a greyscale screenshot. */
+.ares[data-style="modern"] .hmProofVerdict {
+  flex: none;
+  font: 700 9.5px/1 var(--font);
+  letter-spacing: 0.12em;
+  padding: 5px 7px;
+  border-radius: 5px;
+}
+.ares[data-style="modern"] .hmProofVerdict[data-verdict="pass"] { background: rgba(94, 194, 122, 0.16); color: var(--mint-text); }
+.ares[data-style="modern"] .hmProofVerdict[data-verdict="fail"] { background: rgba(201, 86, 74, 0.2); color: #eda9a0; }
+.ares[data-style="modern"] .hmProofVerdict[data-verdict="skip"] { background: rgba(200, 155, 94, 0.14); color: rgba(232, 200, 147, 0.8); }
+.ares[data-style="modern"] .hmProofLabel { flex: 1 1 auto; min-width: 0; font: 600 12.5px/1.3 var(--font); color: var(--text-hi); }
+.ares[data-style="modern"] .hmProofMs { flex: none; font: 400 11px/1 var(--font); color: var(--faint); }
+.ares[data-style="modern"] .hmProofCmd {
+  font: 400 11px/1.5 ui-monospace, monospace;
+  color: var(--gold-hi);
+  word-break: break-all;
+}
+.ares[data-style="modern"] .hmProofOut {
+  margin: 0;
+  padding: 9px 11px;
+  border-radius: var(--r-sm);
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid var(--line);
+  font: 400 10.5px/1.6 ui-monospace, monospace;
+  color: var(--text);
+  white-space: pre-wrap;
+  /* Wide output scrolls inside itself; the column never scrolls sideways. */
+  overflow-x: auto;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+/* ── Uncertainty ──────────────────────────────────────────────────────── */
+.ares[data-style="modern"] .hmMindWork {
+  justify-self: start;
+  font: 700 9.5px/1 var(--font);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  padding: 6px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--line-raised);
+  color: var(--muted);
+}
+.ares[data-style="modern"] .hmMindWork[data-status="verified"] { border-color: rgba(94, 194, 122, 0.42); color: var(--mint-text); }
+.ares[data-style="modern"] .hmMindWork[data-status="unverified"] { border-color: var(--ember-rim); color: var(--ember-text); }
+.ares[data-style="modern"] .hmMindWork[data-status="blocked"] { border-color: rgba(201, 86, 74, 0.5); color: #eda9a0; }
+.ares[data-style="modern"] .hmMindList { list-style: none; margin: 0; padding: 0; display: grid; gap: 7px; }
+.ares[data-style="modern"] .hmMindList li {
+  position: relative;
+  padding-left: 16px;
+  font: 400 12px/1.55 var(--font);
+  color: var(--muted);
+}
+.ares[data-style="modern"] .hmMindList li::before {
+  content: "—";
+  position: absolute;
+  left: 0;
+  color: var(--faint);
+}
+
+/* ── Failures ─────────────────────────────────────────────────────────── */
+.ares[data-style="modern"] .hmFail {
+  border-left: 2px solid rgba(201, 86, 74, 0.45);
+  padding: 2px 0 2px 11px;
+  display: grid;
+  gap: 4px;
+}
+.ares[data-style="modern"] .hmFailTop { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ares[data-style="modern"] .hmFailTool { font: 650 12.5px/1 var(--font); color: var(--text-hi); }
+.ares[data-style="modern"] .hmFailCount {
+  font: 700 10px/1 var(--font);
+  font-style: normal;
+  padding: 3px 6px;
+  border-radius: 999px;
+  background: rgba(200, 155, 94, 0.14);
+  color: rgba(232, 200, 147, 0.85);
+}
+/* Three strikes on one signature is the threshold the engine itself acts on. */
+.ares[data-style="modern"] .hmFailCount[data-hot="1"] { background: rgba(201, 86, 74, 0.22); color: #eda9a0; }
+.ares[data-style="modern"] .hmFailSig { font: 400 10px/1 ui-monospace, monospace; color: var(--faint); }
+.ares[data-style="modern"] .hmFailMsg { margin: 0; font: 400 11.5px/1.55 var(--font); color: var(--muted); }
+
+/* ── Recalled / blocked ───────────────────────────────────────────────── */
+.ares[data-style="modern"] .hmMindCount { margin: 0; font: 600 12px/1.3 var(--font); color: var(--text); }
+.ares[data-style="modern"] .hmBlocked {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 10px 12px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--ember-rim);
+  background: rgba(var(--ember-rgb), 0.07);
+}
+.ares[data-style="modern"] .hmBlocked > div { display: grid; gap: 2px; min-width: 0; }
+.ares[data-style="modern"] .hmBlocked strong { font: 650 12.5px/1.2 var(--font); color: var(--text-hi); }
+.ares[data-style="modern"] .hmBlocked span { font: 400 11.5px/1.45 var(--font); color: var(--muted); }
+
+/* ── Liveness strip ───────────────────────────────────────────────────── */
+.ares[data-style="modern"] .hmLive {
+  display: grid;
+  gap: 1px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  overflow: hidden;
+  background: var(--line);
+}
+.ares[data-style="modern"] .hmLiveRow {
+  display: grid;
+  grid-template-columns: 12px minmax(140px, auto) 62px 1fr;
+  align-items: center;
+  gap: 11px;
+  padding: 11px 14px;
+  background: #0c0b0a;
+}
+.ares[data-style="modern"] .hmLiveDot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
+.ares[data-style="modern"] .hmLiveName { font: 600 12px/1.3 var(--font); color: var(--text); }
+.ares[data-style="modern"] .hmLiveState {
+  font: 700 9px/1 var(--font);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.ares[data-style="modern"] .hmLiveDetail { font: 400 11.5px/1.5 var(--font); color: var(--muted); min-width: 0; }
+
+.ares[data-style="modern"] .hmLiveRow[data-state="live"] .hmLiveDot { background: var(--steel); box-shadow: 0 0 8px rgba(94, 194, 122, 0.5); }
+.ares[data-style="modern"] .hmLiveRow[data-state="live"] .hmLiveState { color: var(--mint-text); }
+.ares[data-style="modern"] .hmLiveRow[data-state="idle"] .hmLiveDot { background: rgba(232, 200, 147, 0.5); }
+/* Dead is the state this whole panel exists to surface — it gets the loudest
+   treatment in the strip, and a tinted row so it reads at a glance. */
+.ares[data-style="modern"] .hmLiveRow[data-state="dead"] { background: rgba(201, 86, 74, 0.1); }
+.ares[data-style="modern"] .hmLiveRow[data-state="dead"] .hmLiveDot { background: var(--crimson); box-shadow: 0 0 9px rgba(201, 86, 74, 0.6); }
+.ares[data-style="modern"] .hmLiveRow[data-state="dead"] .hmLiveState { color: #eda9a0; }
+.ares[data-style="modern"] .hmLiveRow[data-state="unknown"] .hmLiveDot { background: transparent; border: 1px dashed var(--faint); }
+
+@container (max-width: 720px) {
+  .ares[data-style="modern"] .hmMindGrid { grid-template-columns: 1fr; }
+  /* Panels shrink; they never disappear. */
+  .ares[data-style="modern"] .hmLiveRow { grid-template-columns: 12px 1fr auto; row-gap: 4px; }
+  .ares[data-style="modern"] .hmLiveDetail { grid-column: 2 / -1; }
+}

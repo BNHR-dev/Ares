@@ -62,6 +62,7 @@ export interface DaemonInputCommand {
   /** skill_invoke correlation id — echoed back in skill_result so the UI can
    *  match a response to the exact call (TTS utterances, surface clicks). */
   invokeId?: string;
+  /** cognitive_state has no payload beyond sessionId. */
   /** persona_write payload — the roster card the owner authored in HELM → Agents.
    *  `name`, `label`, `model` and `reason` reuse the fields above. */
   body?: string;

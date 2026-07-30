@@ -24,6 +24,24 @@ const LIVE_MEMORY_ITEM_CHARS = 420;
 let reliabilityMaintenance: Promise<void> | null = null;
 let lastReliabilityMaintenanceErrorAt = 0;
 
+/** Outcome of the most recent triage run in this process. */
+export interface TriageLivenessRecord {
+  at: number;
+  files: number;
+  observations: number;
+  candidates: number;
+}
+
+// The result used to be discarded (`.then(() => undefined)`), which is exactly
+// how triage sat DEAD for three releases: it ran, read zero rollout files
+// because of a realpath guard, reported coverage.files === 0, and nobody ever
+// saw the number. Keeping the last run lets the cockpit show a zero as a zero.
+let lastTriage: TriageLivenessRecord | null = null;
+
+export function lastTriageRun(): TriageLivenessRecord | null {
+  return lastTriage;
+}
+
 function scheduleReliabilityMaintenance(live: LiveSession): void {
   if (reliabilityMaintenance) return;
   setImmediate(() => {
@@ -31,7 +49,14 @@ function scheduleReliabilityMaintenance(live: LiveSession): void {
     reliabilityMaintenance = runReliabilityTriage({
       home: live.context.aresHome,
       workspace: live.context.workspace,
-    }).then(() => undefined).catch((error: unknown) => {
+    }).then((run) => {
+      lastTriage = {
+        at: Date.now(),
+        files: run?.coverage?.files ?? 0,
+        observations: run?.coverage?.observations ?? 0,
+        candidates: run?.newCandidates?.length ?? 0,
+      };
+    }).catch((error: unknown) => {
       const now = Date.now();
       if (now - lastReliabilityMaintenanceErrorAt < 60 * 60_000) return;
       lastReliabilityMaintenanceErrorAt = now;
