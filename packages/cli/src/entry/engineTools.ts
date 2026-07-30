@@ -9,7 +9,8 @@ import { loadUiSettings } from "../uiSettings.js";
 import { aresGatewayBase } from "./providers.js";
 import { makeTelegramSetupTool } from "../telegramSetupTool.js";
 import { makeTelegramRosterTool } from "../telegramRosterTool.js";
-import { BootstrapTool, MissionTool, RunSkillTool, SelfEvolveTool, SelfTool, SkillCraftTool, makeSkillHubTool } from "@ares/agent";
+import { BootstrapTool, MissionTool, PersonaTool, RunSkillTool, SelfEvolveTool, SelfTool, SkillCraftTool, listPersonas, makeSkillHubTool } from "@ares/agent";
+import { registerPersonaSubagents } from "./rosterBridge.js";
 import { QueryEngineDispatcher, acquireCapability, createGoal, listGoals, listAcquisitions, listCapabilities, newGoalId, novelDeltaCurve, reliabilityOf, runGoalToCompletion, saveGoal, loadStandingOrders, addStandingOrder, removeStandingOrder, renderStandingOrders, type StandingOrder, type Goal, type AcquisitionKind, type VerificationSpec } from "@ares/operator";
 import { MemoryRouter, MemoryStore, withConsolidationLock } from "@ares/mind";
 import { makeBrowserTool } from "./browserBridge.js";
@@ -58,6 +59,7 @@ export async function buildEngineTools(
     RunSkillTool,
     MissionTool,
     SelfTool,
+    PersonaTool,
     makeTelegramSetupTool(),
     makeTelegramRosterTool(),
   ];
@@ -69,8 +71,14 @@ export async function buildEngineTools(
     return adapted as EngineTool;
   });
 
+  // Every persona on the roster becomes a delegable subagent type, so authoring
+  // one markdown file gets you both consumption modes. Never fatal: a broken or
+  // absent roster leaves the built-in types intact.
+  const subagentRegistry = new SubagentRegistry();
+  registerPersonaSubagents(subagentRegistry, await listPersonas(context.home).catch(() => []));
+
   const runner = new AresSubagentRunner({
-    registry: new SubagentRegistry(),
+    registry: subagentRegistry,
     provider: selection.provider,
     model: selection.model,
     // Explorer subagents fan out on the family's cheap sibling (flash/haiku/
@@ -192,8 +200,11 @@ export async function buildCodingTools(
   const baseTools = codingDefs.map((tool) => adaptToolForEngine(tool, enrich) as EngineTool);
   if (options.subagents === false) return baseTools;
 
+  const codingRegistry = new SubagentRegistry();
+  registerPersonaSubagents(codingRegistry, await listPersonas(context.home).catch(() => []));
+
   const runner = new AresSubagentRunner({
-    registry: new SubagentRegistry(),
+    registry: codingRegistry,
     provider: selection.provider,
     model: selection.model,
     fastModel: fastModelFor(selection),

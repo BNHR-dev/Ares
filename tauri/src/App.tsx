@@ -35,7 +35,7 @@ import { UpdateBanner } from "./UpdateBanner";
 import { WhatsNew } from "./WhatsNew";
 import { LivingSurface } from "./LivingSurface";
 import { StyleCtx, SpringNumber, SpringHeight, TokenFlowStrip, pushTokenFlow, useNewStyle, useUiStyle } from "./newStyle";
-import { AresSigils, Medallion, Sigil } from "./modernIcons";
+import { AresSigils, Medallion, Sigil, asSigilName } from "./modernIcons";
 import { CHANGELOG } from "./changelog";
 import { useTts, sidecarListen, wakeListen, fetchVoices, setVoiceToken, setVoiceEndpoint, type VoiceInfo, type WakeHandle } from "./voice";
 import {
@@ -186,6 +186,43 @@ function forgeFrameUrl(url: string, native: boolean, revision: number): string {
 
 // ─── Demo feed (browser preview) ───────────────────────────────────────────
 
+/**
+ * The roster, for the browser preview only.
+ *
+ * The real roster arrives from the daemon (`roster_list`), which the web
+ * preview has no access to. These mirror the built-ins in
+ * packages/agent/src/roster.ts so HELM → Agents is reviewable in `pnpm dev`
+ * instead of showing a permanently empty gallery. Same intent as demoSession.
+ * The installed app always overwrites this on its first roster_list.
+ */
+function demoRoster(): PersonaVm[] {
+  const make = (
+    name: string,
+    label: string,
+    description: string,
+    greeting: string,
+    glyph: string,
+    tone: PersonaVm["tone"],
+    autonomy: PersonaVm["autonomy"],
+    triggers: string[],
+    tools: string[],
+  ): PersonaVm => ({ name, label, description, greeting, glyph, tone, autonomy, triggers, tools, source: "builtin", file: "" });
+  return [
+    make("aegis", "Aegis", "Adversarial review. Tries to break the work — security, edge cases, and the last 20% nobody checks.",
+      "Aegis. I'm here to break it, not bless it. What am I attacking?", "shield", "ember", "auto",
+      ["review", "audit", "security", "edge case", "harden"], ["Read", "Glob", "Grep", "Bash"]),
+    make("forge", "Forge", "Implementation. Writes and ships code, verifies against the real thing, refuses to claim done without proof.",
+      "Forge here. Point me at it — I build, I run it, and I tell you what I actually saw.", "forge", "ember", "auto",
+      ["implement", "build", "refactor", "fix", "wire up"], []),
+    make("scribe", "Scribe", "Writing and explanation. Docs, changelogs, commit messages, and turning tangled work into plain language.",
+      "Scribe. Tell me what needs saying and who's reading it.", "scroll", "ivory", "auto",
+      ["document", "write up", "explain", "changelog", "commit message"], ["Read", "Grep", "Write", "Edit"]),
+    make("vitruvius", "Vitruvius", "Research and architecture. Reads widely, cites everything, argues trade-offs before writing code.",
+      "Research hat on. I read before I opine and I cite what I find — what are we digging into?", "search", "mint", "auto",
+      ["research", "investigate", "look into", "compare", "trade-off", "architecture"], ["Read", "Grep", "WebSearch", "WebFetch"]),
+  ];
+}
+
 function demoSession(): SessionVm {
   let s = freshSession();
   s.title = "Refactor the auth flow";
@@ -321,6 +358,9 @@ function App() {
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("model");
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
+  const [roster, setRoster] = useState<PersonaVm[]>(() => (native ? [] : demoRoster()));
+  const [activePersona, setActivePersona] = useState<PersonaVm | null>(null);
+  const [personaSuggestion, setPersonaSuggestion] = useState<{ persona: PersonaVm; matched: string[] } | null>(null);
   const [usageStats, setUsageStats] = useState<UsageStats | null>(null);
   const [consciousness, setConsciousness] = useState<ConsciousnessVm>({
     enabled: false,
@@ -424,6 +464,7 @@ function App() {
   const lastSeq = useRef(0);
   const scroller = useRef<HTMLDivElement | null>(null);
   const activeRef = useRef("");
+  const rosterRef = useRef<PersonaVm[]>([]);
   // While the experimental Living Surface owns this session it owns narration
   // too. The hidden Classic window must not read the JSON patch stream aloud.
   const livingSessionRef = useRef<string | null>(null);
@@ -439,6 +480,7 @@ function App() {
 
   const active = sessions.find((s) => s.id === activeId) ?? sessions[0];
   activeRef.current = active?.id ?? "";
+  rosterRef.current = roster;
 
   const apply = useCallback((fn: (s: SessionVm) => SessionVm) => {
     setSessions((prev) => prev.map((s) => (s.id === activeRef.current || (!activeRef.current && s === prev[0]) ? fn(s) : s)));
@@ -872,6 +914,9 @@ function App() {
       daemonCmd({ type: "usage_stats", days: 14 });
     };
     scry();
+    // The roster changes only when someone edits it, so it rides the open/flip
+    // effect rather than the 5s poll.
+    daemonCmd({ type: "roster_list", sessionId: activeRef.current });
     const timer = window.setInterval(scry, 5_000);
     return () => window.clearInterval(timer);
   }, [view, native, daemon, helmBusy, daemonCmd]);
@@ -891,6 +936,25 @@ function App() {
         });
     },
     [native, apply],
+  );
+
+  /** Wear a persona for the active session, or null to go back to plain Ares.
+   *  Adoption is per-session (the roster is global), so this always carries the
+   *  session id — otherwise the daemon would swap the primary session's prompt
+   *  while the owner is looking at a different tab. */
+  const adoptPersona = useCallback(
+    (name: string | null) => {
+      if (!native) {
+        // Browser preview: no daemon to swap a prompt, so reflect the choice
+        // locally. The installed app takes the real path below, where the
+        // daemon recomposes the system prompt and echoes persona_changed.
+        setActivePersona(name ? rosterRef.current.find((p) => p.name === name) ?? null : null);
+        setPersonaSuggestion(null);
+        return;
+      }
+      daemonCmd({ type: "persona_adopt", name: name ?? "", sessionId: activeRef.current });
+    },
+    [native, daemonCmd],
   );
 
   /** Push routing + reasoning into a freshly-ready daemon, flush queued goal. */
@@ -1139,6 +1203,33 @@ function App() {
           return true;
         case "skills_list":
           setSkills(Array.isArray(e.skills) ? (e.skills as SkillInfo[]) : []);
+          return true;
+        case "roster_list":
+          setRoster(Array.isArray(e.personas) ? (e.personas as PersonaVm[]) : []);
+          setActivePersona((e.active as PersonaVm | null) ?? null);
+          return true;
+        case "persona_changed": {
+          const active = (e.active as PersonaVm | null) ?? null;
+          setActivePersona(active);
+          // A resolved switch retires any pending suggestion — otherwise the
+          // chip would keep offering a persona that is already worn.
+          setPersonaSuggestion(null);
+          const err = (e as { error?: string }).error;
+          if (err) {
+            setSkillToast({ name: "Persona", text: err.slice(0, 180), ok: false });
+            window.setTimeout(() => setSkillToast(null), 4500);
+          }
+          return true;
+        }
+        case "persona_suggested":
+          setPersonaSuggestion({
+            persona: e.persona as PersonaVm,
+            matched: Array.isArray(e.matched) ? (e.matched as string[]) : [],
+          });
+          return true;
+        case "persona_written":
+        case "persona_deleted":
+          daemonCmd({ type: "roster_list", sessionId: activeRef.current });
           return true;
         case "skill_result": {
           const id = (e as { invokeId?: string }).invokeId;
@@ -2714,9 +2805,14 @@ function App() {
             keyStatus={keyStatus}
             sessions={sessions}
             active={active}
+            roster={roster}
+            activePersona={activePersona}
             onOpenSession={openSession}
             onToggleAutotick={() => daemonCmd({ type: "operator_autotick", enabled: !(opStatus?.autotick ?? true) })}
-            onRefresh={() => { daemonCmd({ type: "operator_status" }); daemonCmd({ type: "usage_stats", days: 14 }); }}
+            onRefresh={() => { daemonCmd({ type: "operator_status" }); daemonCmd({ type: "usage_stats", days: 14 }); daemonCmd({ type: "roster_list", sessionId: activeId }); }}
+            onAdoptPersona={adoptPersona}
+            onDeletePersona={(name) => daemonCmd({ type: "persona_delete", name })}
+            onWritePersona={(draft) => daemonCmd({ type: "persona_write", ...draft })}
           />
         ) : view === "artifacts" ? (
           <ArtifactsPage
@@ -2757,6 +2853,38 @@ function App() {
             {active?.items.map((item) => (
               <ItemView key={item.key} item={item} onPermission={respondPermission} onArtifact={openArtifact} onSignIn={startAnthropicSignIn} toolDisplay={prefs.toolDisplay} />
             ))}
+            {/* Who is answering, and why. An adopted persona is never silent:
+                this chip plus the persona's own greeting are the disclosure,
+                and "Back to Ares" is always one click away. */}
+            {activePersona ? (
+              <div className="personaChip" data-kind="active">
+                <Medallion glyph={asSigilName(activePersona.glyph)} size={34} tone={activePersona.tone === "ivory" ? undefined : activePersona.tone} />
+                <div className="personaChipText">
+                  <span className="personaChipTitle">Ares · {activePersona.label}</span>
+                  <span className="personaChipWhy">{activePersona.description}</span>
+                </div>
+                <div className="personaChipActions">
+                  <button className="personaChipBtn" onClick={() => adoptPersona(null)}>Back to Ares</button>
+                </div>
+              </div>
+            ) : personaSuggestion ? (
+              <div className="personaChip" data-kind="suggestion">
+                <Medallion glyph={asSigilName(personaSuggestion.persona.glyph)} size={34} tone={personaSuggestion.persona.tone === "ivory" ? undefined : personaSuggestion.persona.tone} />
+                <div className="personaChipText">
+                  <span className="personaChipTitle">{personaSuggestion.persona.label} could take this</span>
+                  <span className="personaChipWhy">
+                    {personaSuggestion.persona.description}
+                    {personaSuggestion.matched.length > 0 ? <> · matched <em>{personaSuggestion.matched.slice(0, 3).join(", ")}</em></> : null}
+                  </span>
+                </div>
+                <div className="personaChipActions">
+                  <button className="personaChipBtn" data-primary="1" onClick={() => adoptPersona(personaSuggestion.persona.name)}>
+                    Wear it
+                  </button>
+                  <button className="personaChipBtn" onClick={() => setPersonaSuggestion(null)}>Dismiss</button>
+                </div>
+              </div>
+            ) : null}
             {active?.busy ? (
               <div className="working">
                 <span className="workingForge" />
@@ -4314,19 +4442,30 @@ function HelmModern({
   usage,
   keyStatus,
   sessions,
+  roster,
+  activePersona,
   onOpenSession,
   onToggleAutotick,
   onRefresh,
+  onAdoptPersona,
+  onDeletePersona,
+  onWritePersona,
 }: {
   daemon: DaemonState;
   opStatus: { activeCount: number; goals: Array<{ id: string; statement: string; status: string; progress: number }>; autotick: boolean; trust?: Array<{ domain: string; level: number; proven: number }> } | null;
   usage: UsageStats | null;
   keyStatus: Record<string, boolean>;
   sessions: SessionVm[];
+  roster: PersonaVm[];
+  activePersona: PersonaVm | null;
   onOpenSession: (id: string) => void;
   onToggleAutotick: () => void;
   onRefresh: () => void;
+  onAdoptPersona: (name: string | null) => void;
+  onDeletePersona: (name: string) => void;
+  onWritePersona: (draft: PersonaDraft) => void;
 }) {
+  const [tab, setTab] = useState<"overview" | "agents">("overview");
   const goals = opStatus?.goals ?? [];
   const activeGoals = goals.filter((g) => g.status === "active");
   const trust = opStatus?.trust ?? [];
@@ -4360,6 +4499,37 @@ function HelmModern({
         <button className="hmGhost" onClick={onRefresh}>Re-scry</button>
       </header>
 
+      <div className="hmTabs" role="tablist">
+        {([
+          { id: "overview" as const, label: "Overview", glyph: "helm" },
+          { id: "agents" as const, label: "Agents", glyph: "skills" },
+        ]).map((t) => (
+          <button
+            key={t.id}
+            className="hmTab"
+            role="tab"
+            aria-selected={tab === t.id}
+            data-on={tab === t.id ? "1" : "0"}
+            onClick={() => setTab(t.id)}
+          >
+            <Sigil name={asSigilName(t.glyph)} size={18} />
+            <span>{t.label}</span>
+            {t.id === "agents" && roster.length > 0 ? <em className="hmTabCount">{roster.length}</em> : null}
+          </button>
+        ))}
+        <span className="hmTabRail" data-at={tab} aria-hidden="true" />
+      </div>
+
+      {tab === "agents" ? (
+        <HelmAgents
+          roster={roster}
+          activePersona={activePersona}
+          onAdopt={onAdoptPersona}
+          onDelete={onDeletePersona}
+          onWrite={onWritePersona}
+        />
+      ) : (
+      <div className="hmPane" key="overview">
       <div className="hmStats">
         {stats.map((s) => (
           <div className="hmStat" key={s.label}>
@@ -4422,6 +4592,272 @@ function HelmModern({
           )}
         </section>
       </div>
+      </div>
+      )}
+    </div>
+  );
+}
+
+/** Fields the owner can author from HELM → Agents. Mirrors persona_write. */
+interface PersonaDraft {
+  name: string;
+  label: string;
+  description: string;
+  greeting: string;
+  body: string;
+  triggers: string[];
+  glyph: string;
+  tone: "ember" | "mint" | "ivory";
+  autonomy: "auto" | "suggest" | "manual";
+}
+
+const AUTONOMY_COPY: Record<PersonaVm["autonomy"], { label: string; hint: string }> = {
+  auto: { label: "Steps in", hint: "Takes over when its triggers match, and announces itself so you always know." },
+  suggest: { label: "Offers", hint: "Suggests itself when its triggers match — nothing changes until you tap." },
+  manual: { label: "On call", hint: "Only when you pick it, or when Ares delegates a task to it." },
+};
+
+const PERSONA_GLYPHS = ["helm", "forge", "shield", "search", "scroll", "skills", "sessions", "usage", "messaging", "flame"];
+
+function HelmAgents({
+  roster,
+  activePersona,
+  onAdopt,
+  onDelete,
+  onWrite,
+}: {
+  roster: PersonaVm[];
+  activePersona: PersonaVm | null;
+  onAdopt: (name: string | null) => void;
+  onDelete: (name: string) => void;
+  onWrite: (draft: PersonaDraft) => void;
+}) {
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [composing, setComposing] = useState(false);
+
+  return (
+    <div className="hmPane hmAgents" key="agents">
+      <div className="hmAgentsLede">
+        <p>
+          Personas are specialists you can <strong>wear</strong> — Ares keeps this conversation and its full tool belt, and
+          shifts into that expertise. Ares can also <strong>delegate</strong> to any of them, so each one doubles as a
+          background worker with its own narrower tools.
+        </p>
+        <button className="hmForge" onClick={() => setComposing((v) => !v)} data-on={composing ? "1" : "0"}>
+          <Sigil name="forge" size={16} />
+          {composing ? "Close" : "Forge a persona"}
+        </button>
+      </div>
+
+      {activePersona ? (
+        <div className="hmWearing">
+          <Medallion glyph={asSigilName(activePersona.glyph)} size={40} tone={activePersona.tone === "ivory" ? undefined : activePersona.tone} />
+          <div className="hmWearingText">
+            <span className="hmWearingLabel">Wearing now</span>
+            <strong>Ares · {activePersona.label}</strong>
+            <span className="hmWearingDesc">{activePersona.description}</span>
+          </div>
+          <button className="hmGhost" onClick={() => onAdopt(null)}>Back to Ares</button>
+        </div>
+      ) : null}
+
+      {composing ? <PersonaComposer onWrite={(d) => { onWrite(d); setComposing(false); }} onCancel={() => setComposing(false)} /> : null}
+
+      <div className="hmRoster">
+        {roster.length === 0 ? (
+          <p className="hmEmpty">No personas yet. Forge one, or ask Ares to build the specialist you keep needing.</p>
+        ) : (
+          roster.map((p) => {
+            const worn = activePersona?.name === p.name;
+            const open = expanded === p.name;
+            return (
+              <article className="hmCard" key={p.name} data-tone={p.tone} data-worn={worn ? "1" : "0"}>
+                <button
+                  className="hmCardTop"
+                  onClick={() => setExpanded(open ? null : p.name)}
+                  aria-expanded={open}
+                  title={open ? "Hide details" : "Show details"}
+                >
+                  <Medallion glyph={asSigilName(p.glyph)} size={44} tone={p.tone === "ivory" ? undefined : p.tone} />
+                  <div className="hmCardText">
+                    <div className="hmCardName">
+                      <strong>{p.label}</strong>
+                      {worn ? <em className="hmCardWorn">worn</em> : null}
+                      {p.source === "builtin" ? <em className="hmCardOrigin">built in</em> : null}
+                    </div>
+                    <p className="hmCardDesc">{p.description}</p>
+                  </div>
+                  <i className="hmCardChevron" data-open={open ? "1" : "0"} aria-hidden="true" />
+                </button>
+
+                <div className="hmCardMeta">
+                  <span className="hmPill" title={AUTONOMY_COPY[p.autonomy].hint}>{AUTONOMY_COPY[p.autonomy].label}</span>
+                  {p.tools.length > 0 ? (
+                    <span className="hmPill" title={`When delegated to, it can only use: ${p.tools.join(", ")}`}>
+                      {p.tools.length} tools when delegated
+                    </span>
+                  ) : (
+                    <span className="hmPill" title="Inherits the full tool belt when delegated to">Full belt</span>
+                  )}
+                  {p.model ? <span className="hmPill" title="Preferred model — your pin always wins">prefers {p.model}</span> : null}
+                </div>
+
+                <SpringHeight>
+                  {open ? (
+                  <div className="hmCardBody">
+                    {p.triggers.length > 0 ? (
+                      <div className="hmCardRow">
+                        <span className="hmCardRowLabel">Triggers on</span>
+                        <span className="hmTriggers">
+                          {p.triggers.map((t) => <em key={t}>{t}</em>)}
+                        </span>
+                      </div>
+                    ) : null}
+                    {p.greeting ? (
+                      <div className="hmCardRow">
+                        <span className="hmCardRowLabel">Greets with</span>
+                        <q className="hmGreeting">{p.greeting}</q>
+                      </div>
+                    ) : null}
+                    {p.tools.length > 0 ? (
+                      <div className="hmCardRow">
+                        <span className="hmCardRowLabel">Delegated tools</span>
+                        <span className="hmTriggers">{p.tools.map((t) => <em key={t}>{t}</em>)}</span>
+                      </div>
+                    ) : null}
+                    {p.file ? (
+                      <div className="hmCardRow">
+                        <span className="hmCardRowLabel">Defined in</span>
+                        <code className="hmCardFile">{p.file}</code>
+                      </div>
+                    ) : null}
+                  </div>
+                  ) : null}
+                </SpringHeight>
+
+                <div className="hmCardActions">
+                  {worn ? (
+                    <button className="hmGhost" onClick={() => onAdopt(null)}>Take it off</button>
+                  ) : (
+                    <button className="hmAdopt" onClick={() => onAdopt(p.name)}>Wear {p.label}</button>
+                  )}
+                  {p.source === "roster" ? (
+                    <button className="hmGhost hmDanger" onClick={() => onDelete(p.name)} title="Delete this persona's AGENT.md">
+                      Delete
+                    </button>
+                  ) : null}
+                </div>
+              </article>
+            );
+          })
+        )}
+      </div>
+    </div>
+  );
+}
+
+function PersonaComposer({ onWrite, onCancel }: { onWrite: (draft: PersonaDraft) => void; onCancel: () => void }) {
+  const [label, setLabel] = useState("");
+  const [description, setDescription] = useState("");
+  const [greeting, setGreeting] = useState("");
+  const [body, setBody] = useState("");
+  const [triggers, setTriggers] = useState("");
+  const [glyph, setGlyph] = useState("helm");
+  const [tone, setTone] = useState<PersonaDraft["tone"]>("ember");
+  const [autonomy, setAutonomy] = useState<PersonaDraft["autonomy"]>("suggest");
+  const ready = label.trim().length > 0 && body.trim().length > 0;
+
+  return (
+    <div className="hmComposer">
+      <div className="hmComposerHead">
+        <Medallion glyph={asSigilName(glyph)} size={40} tone={tone === "ivory" ? undefined : tone} />
+        <div>
+          <strong>Forge a persona</strong>
+          <p>A name and a method are all it needs. Ares can fill in the rest later — or write the whole thing for you if you ask.</p>
+        </div>
+      </div>
+
+      <label className="hmField">
+        <span>Name</span>
+        <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Vitruvius" />
+      </label>
+      <label className="hmField">
+        <span>What it's expert at</span>
+        <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Research and architecture — reads widely, cites everything." />
+      </label>
+      <label className="hmField">
+        <span>Method <em>— the persona itself</em></span>
+        <textarea
+          value={body}
+          onChange={(e) => setBody(e.target.value)}
+          rows={6}
+          placeholder={"You are working as Vitruvius.\n\nMethod:\n- Read before you opine. Cite every claim.\n- Name the option you would NOT take, and why."}
+        />
+      </label>
+      <label className="hmField">
+        <span>Greeting <em>— optional</em></span>
+        <input value={greeting} onChange={(e) => setGreeting(e.target.value)} placeholder="Research hat on. What are we digging into?" />
+      </label>
+      <label className="hmField">
+        <span>Triggers <em>— comma separated</em></span>
+        <input value={triggers} onChange={(e) => setTriggers(e.target.value)} placeholder="research, look into, trade-off" />
+      </label>
+
+      <div className="hmFieldRow">
+        <label className="hmField">
+          <span>Sigil</span>
+          <div className="hmGlyphPick">
+            {PERSONA_GLYPHS.map((g) => (
+              <button key={g} data-on={glyph === g ? "1" : "0"} onClick={() => setGlyph(g)} title={g} type="button">
+                <Sigil name={asSigilName(g)} size={20} />
+              </button>
+            ))}
+          </div>
+        </label>
+        <label className="hmField">
+          <span>Accent</span>
+          <div className="hmTonePick">
+            {(["ember", "mint", "ivory"] as const).map((t) => (
+              <button key={t} data-tone={t} data-on={tone === t ? "1" : "0"} onClick={() => setTone(t)} type="button">{t}</button>
+            ))}
+          </div>
+        </label>
+      </div>
+
+      <label className="hmField">
+        <span>When should it step in?</span>
+        <div className="hmAutonomyPick">
+          {(["auto", "suggest", "manual"] as const).map((a) => (
+            <button key={a} data-on={autonomy === a ? "1" : "0"} onClick={() => setAutonomy(a)} type="button" title={AUTONOMY_COPY[a].hint}>
+              <strong>{AUTONOMY_COPY[a].label}</strong>
+              <span>{AUTONOMY_COPY[a].hint}</span>
+            </button>
+          ))}
+        </div>
+      </label>
+
+      <div className="hmComposerActions">
+        <button className="hmGhost" onClick={onCancel}>Cancel</button>
+        <button
+          className="hmAdopt"
+          disabled={!ready}
+          onClick={() =>
+            onWrite({
+              name: label.trim(),
+              label: label.trim(),
+              description: description.trim(),
+              greeting: greeting.trim(),
+              body: body.trim(),
+              triggers: triggers.split(",").map((t) => t.trim().toLowerCase()).filter(Boolean),
+              glyph,
+              tone,
+              autonomy,
+            })
+          }
+        >
+          Forge it
+        </button>
+      </div>
     </div>
   );
 }
@@ -4433,9 +4869,14 @@ function HelmView({
   keyStatus,
   sessions,
   active,
+  roster,
+  activePersona,
   onOpenSession,
   onToggleAutotick,
   onRefresh,
+  onAdoptPersona,
+  onDeletePersona,
+  onWritePersona,
 }: {
   daemon: DaemonState;
   opStatus: { activeCount: number; goals: Array<{ id: string; statement: string; status: string; progress: number }>; autotick: boolean; trust?: Array<{ domain: string; level: number; proven: number }> } | null;
@@ -4443,9 +4884,14 @@ function HelmView({
   keyStatus: Record<string, boolean>;
   sessions: SessionVm[];
   active: SessionVm | undefined;
+  roster: PersonaVm[];
+  activePersona: PersonaVm | null;
   onOpenSession: (id: string) => void;
   onToggleAutotick: () => void;
   onRefresh: () => void;
+  onAdoptPersona: (name: string | null) => void;
+  onDeletePersona: (name: string) => void;
+  onWritePersona: (draft: PersonaDraft) => void;
 }) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const modern = useUiStyle() === "modern";
@@ -4508,9 +4954,14 @@ function HelmView({
         usage={usage}
         keyStatus={keyStatus}
         sessions={sessions}
+        roster={roster}
+        activePersona={activePersona}
         onOpenSession={onOpenSession}
         onToggleAutotick={onToggleAutotick}
         onRefresh={onRefresh}
+        onAdoptPersona={onAdoptPersona}
+        onDeletePersona={onDeletePersona}
+        onWritePersona={onWritePersona}
       />
     );
   }
@@ -6949,6 +7400,24 @@ interface SkillSurface {
   kind?: "button" | "toggle";
   input?: unknown;
   hint?: string;
+}
+/** A roster persona as the daemon wires it (see cli/entry/daemon/personas.ts). */
+interface PersonaVm {
+  name: string;
+  label: string;
+  description: string;
+  greeting: string;
+  glyph: string;
+  tone: "ember" | "mint" | "ivory";
+  autonomy: "auto" | "suggest" | "manual";
+  triggers: string[];
+  tools: string[];
+  source: "builtin" | "roster";
+  model?: string;
+  effort?: string;
+  maxTurns?: number;
+  file: string;
+  modifiedAt?: number;
 }
 interface SkillInfo {
   name: string;

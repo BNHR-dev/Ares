@@ -32,6 +32,24 @@ export type SigilName =
   | "scroll"
   | "flame";
 
+/** Every sigil name, for runtime validation of author-supplied glyphs. */
+export const SIGIL_NAMES: readonly SigilName[] = [
+  "helm", "new-session", "sessions", "artifacts", "search", "undo", "forge",
+  "settings", "voice", "send", "usage", "messaging", "skills", "shield",
+  "scroll", "flame",
+];
+
+/**
+ * Narrow an arbitrary string to a SigilName.
+ *
+ * Persona glyphs come from markdown that Ares (or the owner) wrote by hand, so
+ * an unknown name is expected rather than exceptional — falling back keeps a
+ * typo from rendering an empty coin.
+ */
+export function asSigilName(name: string | undefined, fallback: SigilName = "helm"): SigilName {
+  return SIGIL_NAMES.includes(name as SigilName) ? (name as SigilName) : fallback;
+}
+
 /** The sprite. Mount once, near the top of the app tree. */
 export function AresSigils(): React.ReactElement {
   return (
@@ -153,7 +171,9 @@ export function Medallion({
 }: {
   glyph: SigilName;
   size?: number;
-  tone?: "gold" | "ember";
+  /** gold = default chrome, ember = action/warm, mint = ready/analysis (the
+   *  design's cool accent, reserved for success and completed states). */
+  tone?: "gold" | "ember" | "mint";
   className?: string;
 }): React.ReactElement {
   return (

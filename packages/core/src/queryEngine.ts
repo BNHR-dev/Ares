@@ -890,6 +890,18 @@ export class QueryEngine {
     this.cfg.maxTurns = maxTurns;
   }
 
+  /**
+   * Replace the system prompt mid-session — applies to the next turn.
+   *
+   * Message history is deliberately untouched: this exists so a persona can be
+   * adopted or dropped inside a live conversation without losing what has
+   * already been said. The system prompt is sent fresh with every request, so
+   * the swap is complete on the next turn with no re-hydration.
+   */
+  setSystemPrompt(systemPrompt: string): void {
+    this.cfg.systemPrompt = systemPrompt;
+  }
+
   /** Swap provider/model and all model-specific context controls in place. */
   setProvider(
     provider: Provider,

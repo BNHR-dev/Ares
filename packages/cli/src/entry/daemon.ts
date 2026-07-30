@@ -18,7 +18,8 @@ import { prepareEngineBinary } from "../engineBinary.js";
 import { captureScreen } from "../screenCapture.js";
 import { ConsciousnessWatch, WATCHER_VOICE_PROMPT } from "../watch.js";
 import { recordConsciousnessObservation } from "../consciousnessContext.js";
-import { aresAgentHome, onLifecycle, runSkill, skillHubProbe, skillHubList, skillHubGet, skillHubPublish, installHubSkill, readLocalSkillFiles } from "@ares/agent";
+import { aresAgentHome, deletePersona, listPersonas, onLifecycle, runSkill, skillHubProbe, skillHubList, skillHubGet, skillHubPublish, installHubSkill, readLocalSkillFiles, writePersona } from "@ares/agent";
+import { adoptPersonaByName, applyPersonaToolResult, personaForMessage, personaToWire } from "./daemon/personas.js";
 import { QueryEngineDispatcher, OperatorBackgroundLoop, deriveLeash, domainOf, isOperatorPaused, listGoals, loadStandingOrders, materializeDueStandingOrders, type StandingOrder } from "@ares/operator";
 import { MemoryStore, reflectOnRun, detectWorkspaceProjectId, loadProjectState, buildConversationDigest, mergeDurableFacts, CONVERSATION_REFLECT_SYSTEM, DURABLE_FACTS_SCHEMA_HINT, type DurableFact } from "@ares/mind";
 import { OAUTH_PROVIDERS, PROVIDER_LABELS, startOAuthFlow, connectedProviders, getProviderConfig, setCredential, hasCredential, deleteCredential, clientIdName, clientSecretName, runAresAccountSignin, probeAresOauth } from "@ares/core";
@@ -1244,6 +1245,98 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
         process.stdout.write(JSON.stringify({ type: "engine_config_set", config: cfg }) + "\n");
         continue;
       }
+      if (command.type === "roster_list") {
+        const personas = await listPersonas(live.context.home).catch(() => []);
+        const sid = typeof command.sessionId === "string" ? command.sessionId : undefined;
+        const entry = sid ? sessions.get(sid) : primaryEntry;
+        process.stdout.write(
+          JSON.stringify({
+            type: "roster_list",
+            personas: personas.map(personaToWire),
+            active: entry?.live.activePersona() ? personaToWire(entry.live.activePersona()!) : null,
+          }) + "\n",
+        );
+        continue;
+      }
+      if (command.type === "persona_adopt") {
+        // name omitted (or null) means "release" — one command for both so the
+        // desktop's chip revert and its adopt button share a path.
+        const sid = typeof command.sessionId === "string" ? command.sessionId : undefined;
+        const entry = sid ? sessions.get(sid) : primaryEntry;
+        if (!entry) {
+          process.stdout.write(JSON.stringify({ type: "daemon_error", error: "persona_adopt: unknown session" }) + "\n");
+          continue;
+        }
+        const name = typeof command.name === "string" && command.name.trim() ? command.name.trim() : undefined;
+        const result = await adoptPersonaByName(entry.live, name);
+        process.stdout.write(
+          JSON.stringify({
+            type: "persona_changed",
+            sessionId: entry.live.session.meta.id,
+            active: result.active,
+            origin: "owner",
+            error: result.error,
+          }) + "\n",
+        );
+        continue;
+      }
+      if (command.type === "persona_write") {
+        const name = typeof command.name === "string" ? command.name.trim() : "";
+        const body = typeof command.body === "string" ? command.body : "";
+        if (!name || !body.trim()) {
+          process.stdout.write(JSON.stringify({ type: "daemon_error", error: "persona_write requires name and body" }) + "\n");
+          continue;
+        }
+        try {
+          const persona = await writePersona(
+            {
+              name,
+              body,
+              label: typeof command.label === "string" ? command.label : undefined,
+              description: typeof command.description === "string" ? command.description : undefined,
+              greeting: typeof command.greeting === "string" ? command.greeting : undefined,
+              triggers: Array.isArray(command.triggers) ? command.triggers.filter((t): t is string => typeof t === "string") : undefined,
+              tools: Array.isArray(command.tools) ? command.tools.filter((t): t is string => typeof t === "string") : undefined,
+              glyph: typeof command.glyph === "string" ? command.glyph : undefined,
+              tone: command.tone === "ember" || command.tone === "mint" || command.tone === "ivory" ? command.tone : undefined,
+              autonomy:
+                command.autonomy === "auto" || command.autonomy === "suggest" || command.autonomy === "manual"
+                  ? command.autonomy
+                  : undefined,
+              model: typeof command.model === "string" ? command.model : undefined,
+              effort: typeof command.effort === "string" ? command.effort : undefined,
+              maxTurns: typeof command.maxTurns === "number" ? command.maxTurns : undefined,
+            },
+            live.context.home,
+          );
+          process.stdout.write(JSON.stringify({ type: "persona_written", persona: personaToWire(persona) }) + "\n");
+        } catch (err) {
+          process.stdout.write(
+            JSON.stringify({ type: "daemon_error", error: `persona_write failed: ${err instanceof Error ? err.message : String(err)}` }) + "\n",
+          );
+        }
+        continue;
+      }
+      if (command.type === "persona_delete") {
+        const name = typeof command.name === "string" ? command.name.trim() : "";
+        if (!name) {
+          process.stdout.write(JSON.stringify({ type: "daemon_error", error: "persona_delete requires name" }) + "\n");
+          continue;
+        }
+        const removed = await deletePersona(name, live.context.home).catch(() => false);
+        // A deleted persona must not stay worn — recheck every session, because
+        // the roster is global while adoption is per-session.
+        for (const entry of new Set([primaryEntry, ...sessions.values()])) {
+          if (entry.live.activePersona()?.name === name) {
+            entry.live.adoptPersona(null);
+            process.stdout.write(
+              JSON.stringify({ type: "persona_changed", sessionId: entry.live.session.meta.id, active: null, origin: "owner" }) + "\n",
+            );
+          }
+        }
+        process.stdout.write(JSON.stringify({ type: "persona_deleted", name, ok: removed }) + "\n");
+        continue;
+      }
       if (command.type === "skills_list") {
         const skills = await daemonSkillsList(live.context.home).catch(() => []);
         process.stdout.write(JSON.stringify({ type: "skills_list", skills }) + "\n");
@@ -1739,6 +1832,18 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
         let escalatedSelection: ProviderSelection | null = null;
         try {
           await prepareUserTurn(entry.live, goal);
+          // Persona triggers. Runs BEFORE the prompt is sent so an "auto"
+          // persona is worn for the very turn that summoned it. It never
+          // overrides a persona already in play, and it always emits an event —
+          // the owner sees the switch (and can revert) rather than wondering why
+          // the tone changed.
+          const autoPersona = await personaForMessage(entry.live, goal, (payload) => tagEmit(sid, payload)).catch(() => null);
+          if (autoPersona) {
+            entry.live.queueSystemReminder(
+              `You are now wearing the ${autoPersona.label} persona (matched from the owner's message). Open your reply by greeting them briefly in that persona's voice — one or two sentences — so they know who they're talking to, then get to work. If they ask you to drop it, call Persona with action:"release".`,
+              "instructions",
+            );
+          }
           // ── Vision guard: never ship a pasted image to a blind model. ──
           // A pinned text-only model (deepseek et al) used to receive the image
           // blocks anyway and answer "can't view the image" or guess blind
@@ -1774,9 +1879,23 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
               );
             }
           }
+          // tool_end carries only `id`, so the name has to be remembered from
+          // tool_start. Turn-scoped (not per-generator) because a steer can
+          // interrupt between the two halves of one tool call.
+          const toolNamesById = new Map<string, string>();
           const streamOnce = async (gen: AsyncGenerator<unknown>) => {
             for await (const event of gen) {
-              const ev = event as { type: string; status?: "completed" | "interrupted" | "failed"; error?: { code?: string; message?: string }; touchedFiles?: string[]; text?: string };
+              const ev = event as { type: string; status?: "completed" | "interrupted" | "failed"; error?: { code?: string; message?: string }; touchedFiles?: string[]; text?: string; id?: string; name?: string; output?: unknown };
+              if (ev.type === "tool_start" && ev.id && ev.name) toolNamesById.set(ev.id, ev.name);
+              // Persona adopt/release: the tool itself only validates and echoes
+              // (it has no session handle), so the daemon is what actually swaps
+              // the prompt layer. Doing it here — rather than inside the tool —
+              // is also what lets the swap take effect on the NEXT turn while
+              // this one keeps running with the belt it started with.
+              if (ev.type === "tool_end" && ev.id && toolNamesById.get(ev.id) === "Persona") {
+                toolNamesById.delete(ev.id);
+                applyPersonaToolResult(entry.live, ev.output, (payload) => tagEmit(sid, payload));
+              }
               // Continuous verification, daemon path: every edited file feeds the
               // verifier (same as the chat paths); the engine's end-of-turn gate
               // settles it and refuses "done" over red verdicts.

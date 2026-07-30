@@ -20,6 +20,14 @@ export interface AresEvent {
   reason?: string;
   decision?: string;
   level?: string;
+  /** roster_list / persona_changed / persona_suggested — the persona roster and
+   *  whichever one this session is currently wearing (null = plain Ares). */
+  personas?: unknown;
+  active?: unknown;
+  persona?: unknown;
+  /** Trigger phrases that fired, so the UI can show WHY a persona stepped in. */
+  matched?: unknown;
+  origin?: string;
   provider?: string;
   model?: string;
   currentProvider?: string;

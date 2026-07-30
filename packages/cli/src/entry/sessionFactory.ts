@@ -8,7 +8,7 @@ import { isReasoningLevel } from "@ares/protocol";
 import type { ToolPermissionRequest } from "@ares/core";
 import { notice } from "../terminalUi.js";
 import { loadUiSettings, updateUiSettings, type UiSettings } from "../uiSettings.js";
-import { AresAgentRuntime, prepareAresAgent } from "@ares/agent";
+import { AresAgentRuntime, prepareAresAgent, type PersonaDef } from "@ares/agent";
 import { listCapabilities, seedAllCapabilities, writeCapabilitiesDoc } from "@ares/operator";
 import { ManualReminderSource, applyEngineConfigEnv } from "./daemon.js";
 import { buildEngineTools } from "./engineTools.js";
@@ -41,6 +41,19 @@ export interface LiveSession {
   tools: readonly EngineTool[];
   agentRuntime?: AresAgentRuntime;
   queueSystemReminder(text: string, source?: ManualReminderSource): void;
+  /**
+   * Wear a persona (or null to drop it) for the rest of this conversation.
+   *
+   * Recomposes the system prompt and swaps it in place — message history is
+   * untouched, so adopting mid-conversation keeps everything already said. This
+   * lives on LiveSession rather than being rebuilt per channel because the same
+   * recomposition (agent layer + live mind + git context) has to be reproduced
+   * exactly; doing it in one place is what keeps the daemon, TUI, and Telegram
+   * from drifting apart.
+   */
+  adoptPersona(persona: PersonaDef | null): void;
+  /** The persona currently worn, or null. */
+  activePersona(): PersonaDef | null;
   resumed?: ResumedSessionInfo;
   /** V6: living-memory ids injected into the current turn — settled at turn end. */
   lastRecallIds?: string[];
@@ -573,10 +586,19 @@ export async function createSessionWithSelection(
     .then(() => listCapabilities(context.home))
     .then((caps) => writeCapabilitiesDoc(context.home, caps))
     .catch(() => undefined);
-  const systemPrompt =
-    agent.composeSystemPrompt(buildSystemPrompt(runtime.permissionMode, context)) +
-    (await loadLiveMindContext(context)) +
-    (await loadGitContext(context));
+  // Held so a persona swap can recompose the SAME prompt with one section
+  // changed, instead of half-rebuilding it and silently dropping the mind or
+  // git context.
+  const promptBase = buildSystemPrompt(runtime.permissionMode, context);
+  const promptTail = (await loadLiveMindContext(context)) + (await loadGitContext(context));
+  const systemPrompt = agent.composeSystemPrompt(promptBase) + promptTail;
+  // agent.setPersona mutates the slot composeSystemPrompt reads, so this is the
+  // whole implementation: set, recompose, swap. Every channel that goes through
+  // composeSystemPrompt gets the persona for free.
+  const makePersonaSwap = (session: Session) => (persona: PersonaDef | null) => {
+    agent.setPersona(persona);
+    session.setSystemPrompt(agent.composeSystemPrompt(promptBase) + promptTail);
+  };
   let sessionRef: Session | undefined;
   const summarizeSpan = makeSpanSummarizer(selection, (usage) =>
     sessionRef?.recordAuxiliaryUsage("compaction", selection.provider.name, selection.model, usage),
@@ -640,6 +662,8 @@ export async function createSessionWithSelection(
       queueSystemReminder,
       reasoningLevel: resolveReasoningLevel(settings),
       codingJournal,
+      adoptPersona: makePersonaSwap(session),
+      activePersona: () => agent.activePersona(),
     };
     live.agentRuntime = new AresAgentRuntime(agent, {
       workspace: context.workspace,
@@ -679,7 +703,7 @@ export async function createSessionWithSelection(
   sessionRef = session;
   codingJournal = await CodingJournal.open({ workspace: context.workspace, sessionId: session.meta.id });
   session.observeEvents((event) => codingJournal?.recordTurnEvent(event));
-  const live: LiveSession = { session, selection, context, runtime, verifier, hooks, shellRegistry, todoStore, tools, queueSystemReminder, reasoningLevel: resolveReasoningLevel(settings), codingJournal };
+  const live: LiveSession = { session, selection, context, runtime, verifier, hooks, shellRegistry, todoStore, tools, queueSystemReminder, reasoningLevel: resolveReasoningLevel(settings), codingJournal, adoptPersona: makePersonaSwap(session), activePersona: () => agent.activePersona() };
   live.agentRuntime = new AresAgentRuntime(agent, {
     workspace: context.workspace,
     sessionId: session.meta.id,

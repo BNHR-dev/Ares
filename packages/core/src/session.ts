@@ -210,6 +210,12 @@ export class Session {
     this.engine.setMaxTurns(maxTurns);
   }
 
+  /** Swap the system prompt in place, keeping all message history — how a
+   *  persona is adopted or dropped mid-conversation. Applies to the next turn. */
+  setSystemPrompt(systemPrompt: string): void {
+    this.engine.setSystemPrompt(systemPrompt);
+  }
+
   /** Subscribe below every UI surface so durable state and verification taps
    * cannot be forgotten by one chat/daemon consumer. Returns an unsubscribe. */
   observeEvents(observer: (event: TurnEvent) => void): () => void {

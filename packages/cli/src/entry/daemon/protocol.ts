@@ -62,6 +62,18 @@ export interface DaemonInputCommand {
   /** skill_invoke correlation id — echoed back in skill_result so the UI can
    *  match a response to the exact call (TTS utterances, surface clicks). */
   invokeId?: string;
+  /** persona_write payload — the roster card the owner authored in HELM → Agents.
+   *  `name`, `label`, `model` and `reason` reuse the fields above. */
+  body?: string;
+  description?: string;
+  greeting?: string;
+  triggers?: unknown[];
+  tools?: unknown[];
+  glyph?: string;
+  tone?: string;
+  autonomy?: string;
+  effort?: string;
+  maxTurns?: number;
 }
 
 export class AsyncQueue<T> {

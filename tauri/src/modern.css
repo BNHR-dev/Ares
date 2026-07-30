@@ -117,6 +117,12 @@
   background: var(--coin-ember);
   border-color: var(--ember-rim);
 }
+/* mint — the design's cool accent, reserved for ready/analysis states. */
+.ares[data-style="modern"] .medallion[data-tone="mint"] {
+  color: #bfe6c9;
+  background: radial-gradient(120% 120% at 30% 22%, rgba(94, 194, 122, 0.22), rgba(20, 30, 24, 0.9));
+  border-color: rgba(94, 194, 122, 0.42);
+}
 .ares[data-style="modern"] .medallion svg { display: block; }
 /* hover state is owned by whatever the coin sits inside */
 .ares[data-style="modern"] button:hover > .medallion,
@@ -2079,3 +2085,437 @@ html[data-perf="lite"] .ares[data-style="modern"] .composerRow {
   backdrop-filter: none;
   background: rgba(12, 10, 9, 0.97);
 }
+
+/* ─────────────────────────────────────────────────────────────────────────
+   HELM tabs + the Agents roster
+   ─────────────────────────────────────────────────────────────────────────
+   HELM is two rooms now: Overview (the war room) and Agents (the persona
+   roster). The bar is a real tablist with a sliding underline, and the panes
+   fade+lift in — transform/opacity only, so nothing here pulses or oscillates
+   in luminance. Photosensitive doctrine: nothing flashes, anywhere, in any
+   mode.                                                                    */
+
+.ares[data-style="modern"] .hmTabs {
+  position: relative;
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  margin: 0 0 20px;
+  border: 1px solid rgba(200, 155, 94, 0.16);
+  border-radius: var(--r-md);
+  background: linear-gradient(180deg, rgba(19, 17, 16, 0.9), rgba(11, 10, 9, 0.9));
+}
+.ares[data-style="modern"] .hmTab {
+  position: relative;
+  z-index: 1;
+  flex: 1 1 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  padding: 11px 16px;
+  border: 0;
+  border-radius: calc(var(--r-md) - 5px);
+  background: transparent;
+  color: var(--muted);
+  font: 600 12.5px/1 var(--font);
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: color 160ms ease, background-color 160ms ease;
+}
+.ares[data-style="modern"] .hmTab svg { opacity: 0.7; transition: opacity 160ms ease; }
+.ares[data-style="modern"] .hmTab:hover { color: var(--text); background: rgba(255, 246, 236, 0.04); }
+.ares[data-style="modern"] .hmTab:hover svg { opacity: 1; }
+.ares[data-style="modern"] .hmTab[data-on="1"] { color: var(--text-hi); }
+.ares[data-style="modern"] .hmTab[data-on="1"] svg { opacity: 1; color: var(--gold-hi); }
+.ares[data-style="modern"] .hmTabCount {
+  font: 700 10px/1 var(--font);
+  font-style: normal;
+  padding: 3px 6px;
+  border-radius: 999px;
+  background: rgba(200, 155, 94, 0.16);
+  color: var(--gold-hi);
+}
+/* The sliding highlight. Two tabs → 50% each; keyed off data-at so adding a
+   third tab is one more rule, not a JS measurement pass. */
+.ares[data-style="modern"] .hmTabRail {
+  position: absolute;
+  z-index: 0;
+  top: 4px;
+  bottom: 4px;
+  left: 4px;
+  width: calc(50% - 4px);
+  border-radius: calc(var(--r-md) - 5px);
+  background: linear-gradient(180deg, rgba(255, 246, 236, 0.1), rgba(255, 246, 236, 0.03));
+  border: 1px solid rgba(200, 155, 94, 0.3);
+  box-shadow: inset 0 1px 0 rgba(255, 246, 236, 0.14);
+  transition: transform 260ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+.ares[data-style="modern"] .hmTabRail[data-at="agents"] { transform: translateX(100%); }
+
+.ares[data-style="modern"] .hmPane { animation: hmPaneIn 260ms cubic-bezier(0.32, 0.72, 0, 1) both; }
+@keyframes hmPaneIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ares[data-style="modern"] .hmPane { animation: none; }
+  .ares[data-style="modern"] .hmTabRail { transition: none; }
+}
+
+/* ── The lede: what a persona IS, in two sentences ───────────────────── */
+.ares[data-style="modern"] .hmAgentsLede {
+  display: flex;
+  align-items: flex-start;
+  gap: 18px;
+  margin-bottom: 20px;
+}
+.ares[data-style="modern"] .hmAgentsLede p {
+  flex: 1 1 auto;
+  margin: 0;
+  max-width: 64ch;
+  font: 400 13px/1.65 var(--font);
+  color: var(--muted);
+}
+.ares[data-style="modern"] .hmAgentsLede strong { color: var(--text-hi); font-weight: 650; }
+.ares[data-style="modern"] .hmForge {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--ember-rim);
+  background: linear-gradient(180deg, rgba(var(--ember-rgb), 0.18), rgba(var(--ember-rgb), 0.07));
+  color: var(--ember-text);
+  font: 650 12px/1 var(--font);
+  cursor: pointer;
+  transition: filter 160ms ease, border-color 160ms ease;
+}
+.ares[data-style="modern"] .hmForge:hover { filter: brightness(1.12); border-color: var(--ember-hi); }
+.ares[data-style="modern"] .hmForge[data-on="1"] {
+  background: rgba(255, 246, 236, 0.05);
+  color: var(--muted);
+  border-color: var(--line-raised);
+}
+
+/* ── "Wearing now" banner ────────────────────────────────────────────── */
+.ares[data-style="modern"] .hmWearing {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 18px;
+  margin-bottom: 18px;
+  border-radius: var(--r-lg);
+  border: 1px solid var(--ember-rim);
+  background: linear-gradient(180deg, rgba(var(--ember-rgb), 0.1), rgba(var(--ember-rgb), 0.03));
+}
+.ares[data-style="modern"] .hmWearingText { flex: 1 1 auto; min-width: 0; display: grid; gap: 3px; }
+.ares[data-style="modern"] .hmWearingLabel {
+  font: 600 9.5px/1 var(--display);
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: rgba(255, 176, 131, 0.72);
+}
+.ares[data-style="modern"] .hmWearingText strong { font: 650 15px/1.25 var(--font); color: var(--text-hi); }
+.ares[data-style="modern"] .hmWearingDesc { font: 400 12px/1.5 var(--font); color: var(--muted); }
+
+/* ── The gallery ─────────────────────────────────────────────────────── */
+.ares[data-style="modern"] .hmRoster {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+.ares[data-style="modern"] .hmCard {
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--r-lg);
+  border: 1px solid rgba(200, 155, 94, 0.16);
+  background: linear-gradient(180deg, #131110, #0b0a09);
+  overflow: hidden;
+  transition: border-color 180ms ease, transform 180ms cubic-bezier(0.32, 0.72, 0, 1), box-shadow 180ms ease;
+}
+.ares[data-style="modern"] .hmCard:hover {
+  transform: translateY(-2px);
+  border-color: var(--line-active);
+  box-shadow: 0 14px 34px -18px rgba(0, 0, 0, 0.9);
+}
+.ares[data-style="modern"] .hmCard[data-worn="1"] { border-color: var(--ember-rim); }
+.ares[data-style="modern"] .hmCard[data-tone="mint"]:hover { border-color: rgba(94, 194, 122, 0.42); }
+
+.ares[data-style="modern"] .hmCardTop {
+  display: flex;
+  align-items: flex-start;
+  gap: 13px;
+  width: 100%;
+  padding: 16px 16px 12px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+}
+.ares[data-style="modern"] .hmCardText { flex: 1 1 auto; min-width: 0; }
+.ares[data-style="modern"] .hmCardName { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ares[data-style="modern"] .hmCardName strong { font: 650 14.5px/1.2 var(--font); color: var(--text-hi); }
+.ares[data-style="modern"] .hmCardWorn,
+.ares[data-style="modern"] .hmCardOrigin {
+  font: 700 9px/1 var(--font);
+  font-style: normal;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  padding: 3px 6px;
+  border-radius: 999px;
+}
+.ares[data-style="modern"] .hmCardWorn { background: rgba(var(--ember-rgb), 0.18); color: var(--ember-text); }
+.ares[data-style="modern"] .hmCardOrigin { background: rgba(200, 155, 94, 0.12); color: rgba(232, 200, 147, 0.72); }
+.ares[data-style="modern"] .hmCardDesc {
+  margin: 5px 0 0;
+  font: 400 12.5px/1.55 var(--font);
+  color: var(--muted);
+}
+.ares[data-style="modern"] .hmCardChevron {
+  flex: 0 0 auto;
+  width: 9px;
+  height: 9px;
+  margin-top: 6px;
+  border-right: 1.5px solid var(--faint);
+  border-bottom: 1.5px solid var(--faint);
+  transform: rotate(45deg);
+  transition: transform 200ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+.ares[data-style="modern"] .hmCardChevron[data-open="1"] { transform: rotate(-135deg); }
+
+.ares[data-style="modern"] .hmCardMeta { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 16px 12px; }
+.ares[data-style="modern"] .hmPill {
+  font: 600 10.5px/1 var(--font);
+  padding: 5px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(255, 246, 236, 0.03);
+  color: var(--muted);
+  cursor: help;
+}
+
+.ares[data-style="modern"] .hmCardBody {
+  display: grid;
+  gap: 11px;
+  padding: 14px 16px;
+  border-top: 1px solid var(--line);
+}
+.ares[data-style="modern"] .hmCardRow { display: grid; gap: 5px; }
+.ares[data-style="modern"] .hmCardRowLabel {
+  font: 600 9px/1 var(--display);
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: rgba(232, 200, 147, 0.46);
+}
+.ares[data-style="modern"] .hmTriggers { display: flex; flex-wrap: wrap; gap: 5px; }
+.ares[data-style="modern"] .hmTriggers em {
+  font: 500 11px/1 var(--font);
+  font-style: normal;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: rgba(200, 155, 94, 0.1);
+  color: rgba(239, 227, 207, 0.8);
+}
+.ares[data-style="modern"] .hmGreeting {
+  font: 400 12.5px/1.6 var(--font);
+  font-style: italic;
+  color: var(--text);
+}
+.ares[data-style="modern"] .hmCardFile {
+  font: 400 10.5px/1.5 ui-monospace, monospace;
+  color: var(--faint);
+  word-break: break-all;
+}
+
+.ares[data-style="modern"] .hmCardActions {
+  display: flex;
+  gap: 8px;
+  padding: 0 16px 16px;
+  margin-top: auto;
+}
+.ares[data-style="modern"] .hmAdopt {
+  flex: 1 1 auto;
+  padding: 10px 14px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--ember-rim);
+  background: linear-gradient(180deg, rgba(var(--ember-rgb), 0.2), rgba(var(--ember-rgb), 0.08));
+  color: var(--ember-text);
+  font: 650 12px/1 var(--font);
+  cursor: pointer;
+  transition: filter 160ms ease;
+}
+.ares[data-style="modern"] .hmAdopt:hover:not(:disabled) { filter: brightness(1.14); }
+.ares[data-style="modern"] .hmAdopt:disabled { opacity: 0.4; cursor: not-allowed; }
+.ares[data-style="modern"] .hmCardActions .hmGhost { flex: 0 0 auto; }
+.ares[data-style="modern"] .hmDanger:hover { color: var(--crimson); border-color: rgba(201, 86, 74, 0.5); }
+
+/* ── The composer ────────────────────────────────────────────────────── */
+.ares[data-style="modern"] .hmComposer {
+  display: grid;
+  gap: 14px;
+  padding: 20px;
+  margin-bottom: 18px;
+  border-radius: var(--r-lg);
+  border: 1px solid var(--line-raised);
+  background: linear-gradient(180deg, #151312, #0c0b0a);
+  animation: hmPaneIn 220ms cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+.ares[data-style="modern"] .hmComposerHead { display: flex; align-items: flex-start; gap: 14px; }
+.ares[data-style="modern"] .hmComposerHead strong { font: 650 15px/1.3 var(--font); color: var(--text-hi); }
+.ares[data-style="modern"] .hmComposerHead p {
+  margin: 4px 0 0;
+  max-width: 62ch;
+  font: 400 12.5px/1.6 var(--font);
+  color: var(--muted);
+}
+.ares[data-style="modern"] .hmField { display: grid; gap: 6px; }
+.ares[data-style="modern"] .hmField > span {
+  font: 600 9.5px/1 var(--display);
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: rgba(232, 200, 147, 0.5);
+}
+.ares[data-style="modern"] .hmField > span em {
+  font-style: normal;
+  letter-spacing: 0.04em;
+  text-transform: none;
+  color: var(--faint);
+}
+.ares[data-style="modern"] .hmField input,
+.ares[data-style="modern"] .hmField textarea {
+  width: 100%;
+  padding: 11px 13px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line-raised);
+  background: rgba(8, 7, 6, 0.7);
+  color: var(--text);
+  font: 400 13px/1.6 var(--font);
+  resize: vertical;
+}
+.ares[data-style="modern"] .hmField textarea { font-family: ui-monospace, monospace; font-size: 12px; }
+.ares[data-style="modern"] .hmField input:focus,
+.ares[data-style="modern"] .hmField textarea:focus {
+  outline: none;
+  border-color: var(--ember-rim);
+  box-shadow: 0 0 0 3px rgba(var(--ember-rgb), 0.12);
+}
+.ares[data-style="modern"] .hmFieldRow { display: grid; grid-template-columns: 1fr auto; gap: 14px; align-items: start; }
+
+.ares[data-style="modern"] .hmGlyphPick { display: flex; flex-wrap: wrap; gap: 6px; }
+.ares[data-style="modern"] .hmGlyphPick button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  border: 1px solid var(--line-raised);
+  background: var(--coin);
+  color: var(--gold-glyph);
+  cursor: pointer;
+  transition: border-color 150ms ease, color 150ms ease;
+}
+.ares[data-style="modern"] .hmGlyphPick button:hover { border-color: var(--line-active); color: var(--gold-hi); }
+.ares[data-style="modern"] .hmGlyphPick button[data-on="1"] {
+  border-color: var(--ember-rim);
+  color: #e8bd83;
+  background: var(--coin-ember);
+}
+
+.ares[data-style="modern"] .hmTonePick { display: flex; gap: 6px; }
+.ares[data-style="modern"] .hmTonePick button {
+  padding: 9px 14px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line-raised);
+  background: rgba(255, 246, 236, 0.03);
+  color: var(--muted);
+  font: 600 11px/1 var(--font);
+  text-transform: capitalize;
+  cursor: pointer;
+}
+.ares[data-style="modern"] .hmTonePick button[data-tone="ember"][data-on="1"] { border-color: var(--ember-rim); color: var(--ember-text); background: rgba(var(--ember-rgb), 0.12); }
+.ares[data-style="modern"] .hmTonePick button[data-tone="mint"][data-on="1"] { border-color: rgba(94, 194, 122, 0.42); color: var(--mint-text); background: rgba(94, 194, 122, 0.1); }
+.ares[data-style="modern"] .hmTonePick button[data-tone="ivory"][data-on="1"] { border-color: var(--line-active); color: var(--text-hi); background: rgba(255, 246, 236, 0.07); }
+
+.ares[data-style="modern"] .hmAutonomyPick { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 8px; }
+.ares[data-style="modern"] .hmAutonomyPick button {
+  display: grid;
+  gap: 4px;
+  padding: 12px 14px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line-raised);
+  background: rgba(255, 246, 236, 0.02);
+  text-align: left;
+  cursor: pointer;
+}
+.ares[data-style="modern"] .hmAutonomyPick button strong { font: 650 12.5px/1.2 var(--font); color: var(--text); }
+.ares[data-style="modern"] .hmAutonomyPick button span { font: 400 11px/1.5 var(--font); color: var(--muted); }
+.ares[data-style="modern"] .hmAutonomyPick button[data-on="1"] {
+  border-color: var(--ember-rim);
+  background: rgba(var(--ember-rgb), 0.09);
+}
+.ares[data-style="modern"] .hmAutonomyPick button[data-on="1"] strong { color: var(--ember-text); }
+
+.ares[data-style="modern"] .hmComposerActions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* ── The inline chip: which persona is answering, and why ─────────────── */
+.ares[data-style="modern"] .personaChip {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  /* No `width` here on purpose. `.chat > *` already sets the transcript measure
+     (min(880px, 92%) with auto margins) at the SAME specificity, and this block
+     loads later — so declaring width:100% here silently won and the chip jutted
+     out past every turn on both sides. Inherit the column instead.
+     For the same reason the margin shorthand keeps `auto` on the inline sides:
+     writing `margin: 6px 0 10px` zeroed them and pinned the chip to the far
+     left of the column. */
+  padding: 11px 14px;
+  margin: 6px auto 10px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--ember-rim);
+  background: linear-gradient(180deg, rgba(var(--ember-rgb), 0.11), rgba(var(--ember-rgb), 0.035));
+  animation: hmPaneIn 240ms cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+.ares[data-style="modern"] .personaChip[data-kind="suggestion"] {
+  border-color: var(--line-active);
+  background: linear-gradient(180deg, rgba(255, 246, 236, 0.055), rgba(255, 246, 236, 0.02));
+}
+.ares[data-style="modern"] .personaChipText { flex: 1 1 auto; min-width: 0; display: grid; gap: 2px; }
+.ares[data-style="modern"] .personaChipTitle { font: 650 12.5px/1.3 var(--font); color: var(--text-hi); }
+.ares[data-style="modern"] .personaChipWhy { font: 400 11px/1.45 var(--font); color: var(--muted); }
+.ares[data-style="modern"] .personaChipWhy em { font-style: normal; color: var(--ember-text); }
+.ares[data-style="modern"] .personaChipActions { flex: 0 0 auto; display: flex; gap: 6px; }
+.ares[data-style="modern"] .personaChipBtn {
+  padding: 7px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--line-raised);
+  background: rgba(255, 246, 236, 0.04);
+  color: var(--muted);
+  font: 600 11px/1 var(--font);
+  cursor: pointer;
+  transition: color 150ms ease, border-color 150ms ease;
+}
+.ares[data-style="modern"] .personaChipBtn:hover { color: var(--text-hi); border-color: var(--line-active); }
+.ares[data-style="modern"] .personaChipBtn[data-primary="1"] {
+  border-color: var(--ember-rim);
+  background: rgba(var(--ember-rgb), 0.16);
+  color: var(--ember-text);
+}
+
+/* Narrow windows: the roster becomes one column and the lede stacks. Panels
+   SHRINK, they never disappear — a viewport query must never countermand an
+   explicit user action. */
+@container (max-width: 720px) {
+  .ares[data-style="modern"] .hmRoster { grid-template-columns: 1fr; }
+  .ares[data-style="modern"] .hmAgentsLede { flex-direction: column; gap: 12px; }
+  .ares[data-style="modern"] .hmForge { align-self: flex-start; }
+  .ares[data-style="modern"] .hmFieldRow { grid-template-columns: 1fr; }
+  .ares[data-style="modern"] .personaChip { flex-wrap: wrap; }
+}
+
+html[data-perf="lite"] .ares[data-style="modern"] .hmCard:hover { transform: none; box-shadow: none; }
