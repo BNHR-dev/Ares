@@ -446,6 +446,7 @@ function builtInEvalTasks(): EvalTask[] {
 function evalToolCtx(workspace: string): RichToolContext {
   return {
     workspace,
+    sessionId: "eval",
     signal: new AbortController().signal,
     permissionMode: "workspace-write",
     fileReadStamps: new Map<string, FileReadStamp>(),

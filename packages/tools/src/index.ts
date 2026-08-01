@@ -6,6 +6,7 @@ export * from "./_shared.js";
 export { ReadTool } from "./Read.js";
 export { WriteTool } from "./Write.js";
 export { EditTool, nearMissHint, looksLineNumberPrefixed } from "./Edit.js";
+export { ApplyPatchTool, type ApplyPatchOutput } from "./ApplyPatch.js";
 export { ApplyIntentTool, type ApplyIntentOutput } from "./ApplyIntent.js";
 export { safeOverwrite, assessShrink, type SafeOverwriteOptions, type SafeOverwriteResult, type ShrinkVerdict } from "./safeWrite.js";
 export { GlobTool } from "./Glob.js";
@@ -14,7 +15,16 @@ export { BashTool } from "./Bash.js";
 export { PowerShellTool } from "./PowerShell.js";
 export { LspTool, type LspOutput, type LspLocation } from "./LSP.js";
 export { TodoStore, makeTodoWriteTool, type TodoWriteOutput } from "./TodoWrite.js";
-export { makeTaskTool, type SubagentRunner, type TaskOutput } from "./Task.js";
+export {
+  makeTaskTool,
+  makeTaskOutputTool,
+  makeKillTaskTool,
+  type SubagentRunner,
+  type TaskOutput,
+  type TaskBackgroundOutput,
+  type BackgroundTaskSnapshot,
+  type BackgroundTaskStatus,
+} from "./Task.js";
 export {
   makeCodingBackendTool,
   buildAresHarnessPrompt,
@@ -81,7 +91,17 @@ export { makeBashOutputTool, type BashOutputResult } from "./BashOutput.js";
 export { makeKillShellTool, type KillShellOutput } from "./KillShell.js";
 export { McpListToolsTool, McpCallTool, HttpMcpClient, listMcpServerTools, type McpListOutput, type McpCallOutput } from "./Mcp.js";
 export { SkillsListTool, SkillReadTool, type SkillsListOutput, type SkillReadOutput, type SkillSummary } from "./Skills.js";
-export { MemoryTool, type MemoryOutput, type MemoryItem } from "./Memory.js";
+export {
+  MemoryTool,
+  makeMemoryTool,
+  memoryContentVersion,
+  MemoryConflictError,
+  MemoryLockTimeoutError,
+  type MemoryOutput,
+  type MemoryItem,
+  type MemoryCommitContext,
+  type MemoryToolOptions,
+} from "./Memory.js";
 export {
   ComputerUseTool,
   makeComputerUseTool,
@@ -98,7 +118,13 @@ export { StripeTool, type StripeOutput } from "./Stripe.js";
 export { EmailTool, type EmailOutput } from "./Email.js";
 export { RequestUserActionTool, type RequestUserActionOutput } from "./RequestUserAction.js";
 export { SetUiEffectTool, type SetUiEffectOutput } from "./SetUiEffect.js";
-export { makeEnterPlanModeTool, makeExitPlanModeTool, type PlanModeState } from "./PlanMode.js";
+export {
+  makeEnterPlanModeTool,
+  makeUpdatePlanDraftTool,
+  makeExitPlanModeTool,
+  type PlanModeState,
+  type PlanModeStateSource,
+} from "./PlanMode.js";
 export { WeatherTool, getWeatherText, type WeatherOutput, type WeatherCondition, type WeatherForecast } from "./Weather.js";
 export { RemindTool, setRemindScheduler, type RemindOutput, type SchedulerLike } from "./Remind.js";
 export { ConnectTool, type ConnectOutput } from "./Connect.js";
@@ -109,6 +135,7 @@ export { SpotifyTool, type SpotifyOutput } from "./Spotify.js";
 import { ReadTool } from "./Read.js";
 import { WriteTool } from "./Write.js";
 import { EditTool } from "./Edit.js";
+import { ApplyPatchTool } from "./ApplyPatch.js";
 import { ApplyIntentTool } from "./ApplyIntent.js";
 import { GlobTool } from "./Glob.js";
 import { GrepTool } from "./Grep.js";
@@ -140,6 +167,7 @@ export const DEFAULT_TOOLS = process.platform === "win32"
       ReadTool,
       WriteTool,
       EditTool,
+      ApplyPatchTool,
       ApplyIntentTool,
       GlobTool,
       GrepTool,
@@ -171,6 +199,7 @@ export const DEFAULT_TOOLS = process.platform === "win32"
       ReadTool,
       WriteTool,
       EditTool,
+      ApplyPatchTool,
       ApplyIntentTool,
       GlobTool,
       GrepTool,

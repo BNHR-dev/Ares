@@ -87,9 +87,16 @@ test("M0: ares run persists the same ordered rollout stream", async () => {
   const eventsPath = path.join(workspaceRoot, ".ares", "sessions", sessionId, "events.jsonl");
   const persisted = (await readFile(eventsPath, "utf8")).trim().split("\n").map((l) => JSON.parse(l));
 
-  assert.equal(persisted.length, events.length);
-  assert.deepEqual(persisted.map((e) => e.seq), events.map((_e, i) => i));
-  assert.deepEqual(persisted.map((e) => e.event.type), events.map((e) => e.type));
+  // Canonical Session admission is deliberately audit-only: the idempotent
+  // input record is persisted before the provider can run, but is not emitted
+  // as part of the model-facing turn stream. The rollout therefore contains
+  // one additional write-ahead boundary ahead of the visible events.
+  assert.equal(persisted.length, events.length + 1);
+  assert.deepEqual(persisted.map((e) => e.seq), persisted.map((_e, i) => i));
+  assert.deepEqual(
+    persisted.map((e) => e.event.type),
+    ["input_admitted", ...events.map((e) => e.type)],
+  );
 });
 
 test("M0: saved sessions can be listed and replayed into messages", async () => {
@@ -100,8 +107,8 @@ test("M0: saved sessions can be listed and replayed into messages", async () => 
 
   const events = r.stdout.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
   const snapshot = await loadSessionSnapshot(workspaceRoot, sessionId);
-  assert.equal(snapshot.eventCount, events.length);
-  assert.equal(snapshot.nextSeq, events.length);
+  assert.equal(snapshot.eventCount, events.length + 1, "includes the durable input admission boundary");
+  assert.equal(snapshot.nextSeq, events.length + 1);
   assert.equal(snapshot.compacted, false);
   assert.equal(snapshot.replayedMessageCount, 2);
   assert.deepEqual(snapshot.messages.map((message) => message.role), ["user", "assistant"]);
@@ -202,7 +209,7 @@ test("M0: permission denial stops the turn instead of re-querying provider", asy
       throw err;
     },
   };
-  const engine = new QueryEngine(
+  const engine = QueryEngine.forTesting(
     {
       provider,
       model: "test",
@@ -275,7 +282,7 @@ test("M0: interrupted multi-tool turns record output for every pending tool call
       return { output: "should not run" };
     },
   };
-  const engine = new QueryEngine(
+  const engine = QueryEngine.forTesting(
     {
       provider,
       model: "test",
@@ -330,7 +337,7 @@ test("M0: workspace-write tools can run without magic write wording", async () =
       return { output: "edited" };
     },
   };
-  const engine = new QueryEngine(
+  const engine = QueryEngine.forTesting(
     {
       provider,
       model: "test",
@@ -383,7 +390,7 @@ test("M0: explicit write intent allows workspace-write tools", async () => {
       return { output: "edited" };
     },
   };
-  const engine = new QueryEngine(
+  const engine = QueryEngine.forTesting(
     {
       provider,
       model: "test",
@@ -441,7 +448,7 @@ test("M3: parallel-safe tools execute concurrently and forward progress", async 
       return { output: input.id };
     },
   };
-  const engine = new QueryEngine(
+  const engine = QueryEngine.forTesting(
     {
       provider,
       model: "test",

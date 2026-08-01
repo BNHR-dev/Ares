@@ -138,7 +138,7 @@ test("engine: reasoning stall downgrades one notch and the turn completes", asyn
         yield msgDone("done thinking, here you go");
       },
     };
-    const engine = new QueryEngine(
+    const engine = QueryEngine.forTesting(
       { provider, model: "test", systemPrompt: "test", tools: [], workspace: "D:\\Ares", maxTurns: 2, reasoningLevel: "high" },
       "sess_effort_dial",
     );
@@ -184,7 +184,7 @@ test("engine: ARES_STALL_DOWNGRADE=0 retries at the same level", async () => {
         yield msgDone("ok");
       },
     };
-    const engine = new QueryEngine(
+    const engine = QueryEngine.forTesting(
       { provider, model: "test", systemPrompt: "test", tools: [], workspace: "D:\\Ares", maxTurns: 2, reasoningLevel: "high" },
       "sess_effort_flat",
     );
@@ -209,7 +209,7 @@ test("engine: an empty premature provider close retries and completes", async ()
       yield msgDone("recovered");
     },
   };
-  const engine = new QueryEngine(
+  const engine = QueryEngine.forTesting(
     { provider, model: "test", systemPrompt: "test", tools: [], workspace: "D:\\Ares", maxTurns: 2 },
     "sess_close_retry",
   );

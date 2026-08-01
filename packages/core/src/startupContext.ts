@@ -1,15 +1,22 @@
 import { promises as fs } from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { aresHome } from "./providers/openaiAuth.js";
+import {
+  REPOSITORY_INSTRUCTION_FILES,
+  type RepositoryInstructionClaim,
+} from "./repositoryInstructions.js";
 
 export type StartupReminderSource = "memory" | "instructions";
 
 export interface StartupReminder {
   text: string;
   source: StartupReminderSource;
+  /** Canonical files whose contents this reminder already put in the Session's
+   * model context. QueryEngine claims them before path-sensitive discovery. */
+  instructionClaims?: RepositoryInstructionClaim[];
 }
 
-const INSTRUCTION_FILES = ["ARES.md", "CRIX.md", "AGENTS.md", "CLAUDE.md"] as const;
 const MAX_CONTEXT_CHARS = 24_000;
 
 export async function loadStartupReminders(workspace: string): Promise<StartupReminder[]> {
@@ -39,13 +46,18 @@ export async function loadMemoryReminders(workspace: string): Promise<StartupRem
 export async function loadInstructionReminders(workspace: string): Promise<StartupReminder[]> {
   const reminders: StartupReminder[] = [];
   for (const dir of ancestorDirs(path.resolve(workspace))) {
-    for (const name of INSTRUCTION_FILES) {
+    for (const name of REPOSITORY_INSTRUCTION_FILES) {
       const file = path.join(dir, name);
       const text = await readSmallText(file);
       if (!text) continue;
+      const contentHash = await fs.readFile(file)
+        .then((bytes) => createHash("sha256").update(bytes).digest("hex"))
+        .catch(() => null);
+      if (!contentHash) continue;
       reminders.push({
         source: "instructions",
-        text: `Loaded project instructions from ${file}:\n\n${text}`,
+        text: `Loaded project instructions from ${file} [sha256:${contentHash}]:\n\n${text}`,
+        instructionClaims: [{ path: path.resolve(file), contentHash }],
       });
     }
   }

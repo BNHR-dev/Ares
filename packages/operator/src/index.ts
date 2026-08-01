@@ -34,6 +34,7 @@ export {
 export {
   QueryEngineDispatcher,
   defaultEvaluate,
+  scopeOperatorWorkerTools,
   type QueryEngineDispatcherOptions,
 } from "./dispatcher.js";
 
@@ -301,6 +302,7 @@ export type {
   Goal,
   GoalStatus,
   GoalStepRecord,
+  OperatorWorkStatus,
   StepVerdict,
   VerificationSpec,
   Dispatcher,

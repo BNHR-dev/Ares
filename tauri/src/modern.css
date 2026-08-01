@@ -1142,8 +1142,10 @@
 
    Shedding order is by data-seg, most expendable first: effects → perms →
    effort → route. Route outlives the others because it now NAMES its lanes and
-   is the door to the War Table; model and Garrison are last, because "which
-   model am I talking to" is the whole point of the readout. */
+   is the door to the War Table; persona, model and Garrison are last, because
+   "who and what am I talking to" is the whole point of the readout. Persona is
+   never shed at all — it only renders when one is worn, and the moment it is
+   worn it outranks everything else here. */
 @container (max-width: 940px) {
   .ares[data-style="modern"] .statusBar .statusSeg b { display: none; }
 }
@@ -1182,6 +1184,12 @@
   background: rgba(200, 155, 94, 0.14);
 }
 .ares[data-style="modern"] .statusSeg:hover { background: rgba(200, 155, 94, 0.06); }
+/* Worn persona: the one segment that says the answer is coming from a shifted
+   Ares, so it carries the ember accent rather than the neutral gold. Static —
+   nothing here pulses or flashes (see the photosensitivity doctrine). */
+.ares[data-style="modern"] .statusSeg.personaSeg { background: rgba(var(--ember-rgb), 0.1); }
+.ares[data-style="modern"] .statusSeg.personaSeg:hover { background: rgba(var(--ember-rgb), 0.16); }
+.ares[data-style="modern"] .statusSeg.personaSeg > span { color: var(--ember-text); }
 /* the design reads as a sentence, not a telemetry rack: a plain-case label in
    Manrope followed by its live value in mono gold. The base bar's 8.5px
    all-caps micro-labels were the "still old" tell. */

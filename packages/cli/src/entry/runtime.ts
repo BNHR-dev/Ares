@@ -37,9 +37,35 @@ export async function cliVersion(): Promise<string> {
 
 export interface AresRuntimeState {
   permissionMode: PermissionMode;
+  /** Late-bound full child prompt composition. Tool catalogs are constructed
+   * before agent persona/memory/git context is loaded, so Task and Conductor
+   * resolve this at dispatch time instead of capturing a reduced prompt. */
+  composeChildSystemPrompt?(): string | Promise<string>;
   /** Live owner permission posture (master + per-category + fleet inherit).
    *  Mutated by the set_permissions daemon command so toggles apply mid-session. */
   permissions?: PermissionSettings;
+  /** Session-owned transition hook. Mode changes are workflow state, not just
+   * a mutable UI bit: this recomposes the prompt and persists the transition. */
+  onPermissionModeChanged?(mode: PermissionMode): Promise<void> | void;
+  onPlanStarted?(reason: string): Promise<void> | void;
+  onPlanDraftUpdated?(plan: string): Promise<void> | void;
+  currentPlan?(): Promise<string | null> | string | null;
+  onPlanProposed?(plan: string): Promise<void> | void;
+  onPlanApproved?(plan: string): Promise<void> | void;
+}
+
+export async function transitionPermissionMode(
+  runtime: AresRuntimeState,
+  mode: PermissionMode,
+): Promise<void> {
+  const previous = runtime.permissionMode;
+  runtime.permissionMode = mode;
+  try {
+    await runtime.onPermissionModeChanged?.(mode);
+  } catch (error) {
+    runtime.permissionMode = previous;
+    throw error;
+  }
 }
 
 export interface CliRuntimeContext {
@@ -150,6 +176,8 @@ export async function printHelp(): Promise<void> {
       "                              Override Ollama Cloud slot models.",
       "  ARES_HOME                   Override auth/config dir (default ~/.ares).",
       "  ARES_RESUME_MESSAGES        Max replay messages before compaction (default 80, 0=all).",
+      "  ARES_SESSION_LEASE_TTL_MS    Crash-takeover window for a running session (default 30000).",
+      "  ARES_SESSION_LEASE_HEARTBEAT_MS  Lease renewal cadence (default 10000; capped at TTL/3).",
       "  ARES_SELF_TRIAGE             Set to 0 to disable automatic post-turn reliability scans.",
       "  ARES_SELF_TRIAGE_INTERVAL_MS Minimum automatic scan cadence (default 6 hours).",
       "  ARES_TRIAGE_WORKSPACES       Extra workspace roots (OS path-delimiter separated).",

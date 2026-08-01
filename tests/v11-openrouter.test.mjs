@@ -266,3 +266,47 @@ test("fetchDeepSeekModels uses bearer auth and parses the enabled catalog", asyn
   assert.equal(authorization, "Bearer ds-key");
   assert.deepEqual(models.map((model) => model.id), ["deepseek-v4-flash", "deepseek-v4-pro"]);
 });
+
+// ─── Tool-schema narrowing on the wire ─────────────────────────────────
+//
+// Regression for the 422 that killed every turn on an OpenRouter route:
+//   "auto tool schemas do not support multi-type anyOf/oneOf unions"
+// OpenRouter had failed the request over from Google AI Studio (429) to a
+// stricter upstream, which rejected the WHOLE tool array over one union in
+// Grep's `path`. What matters is the bytes that leave the process, so this
+// asserts on the captured request body rather than on the narrowing helper.
+
+test("OpenRouter: the request body carries no anyOf/oneOf unions", async () => {
+  let sent = null;
+  const fetchImpl = async (_url, init) => {
+    sent = JSON.parse(init.body);
+    return sse([{ choices: [{ delta: { content: "ok" } }] }, "[DONE]"]);
+  };
+  const p = new OpenRouterProvider({ apiKey: "k", model: "x/y", fetchImpl });
+  const tools = [
+    {
+      name: "Grep",
+      description: "search",
+      input_schema: {
+        type: "object",
+        properties: {
+          path: { anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }], description: "Where." },
+          limit: { type: ["number", "null"] },
+        },
+        required: ["path"],
+      },
+    },
+  ];
+  for await (const _ of p.stream({ model: "x/y", system: "s", messages: [], tools })) void _;
+
+  const wire = JSON.stringify(sent.tools);
+  assert.ok(!wire.includes("anyOf"), "a union reached the wire");
+  assert.ok(!wire.includes("oneOf"), "a union reached the wire");
+  const params = sent.tools[0].function.parameters;
+  assert.equal(params.properties.path.type, "string");
+  assert.equal(params.properties.limit.type, "number");
+  // Narrowing is lossy, so the lost shape has to survive in prose.
+  assert.match(params.properties.path.description, /array of strings/);
+  // Everything the endpoint DOES understand is left alone.
+  assert.deepEqual(params.required, ["path"]);
+});

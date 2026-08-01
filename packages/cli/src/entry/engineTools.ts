@@ -1,8 +1,8 @@
 // Extracted from entry.ts — engineTools.
 
-import { AresSubagentRunner, SubagentRegistry, type EngineTool, type ToolCallContext } from "@ares/core";
+import { AresSubagentRunner, SubagentRegistry, openWorkspaceSessionKernel, type EngineTool, type QueryEngineConfig, type SessionKernelStore, type ToolCallContext } from "@ares/core";
 import path from "node:path";
-import { DEFAULT_TOOLS, ReadTool, WriteTool, EditTool, ApplyIntentTool, GlobTool, GrepTool, CodebaseSearchTool, LspTool, PowerShellTool, BashTool, FindAndEditTool, CodeModeTool, adaptToolForEngine, buildTool, makeTodoWriteTool, makeTaskTool, makeConductorTool, makeCodingBackendTool, makeWebFetchTool, makeWebSearchTool, makeImageSearchTool, makeBashOutputTool, makeKillShellTool, makeEnterPlanModeTool, makeExitPlanModeTool, TodoStore, ShellRegistry, type RichToolContext, type FileReadStamp, type PathPermissionStore, type CommandPermissionStore } from "@ares/tools";
+import { DEFAULT_TOOLS, ReadTool, WriteTool, EditTool, ApplyPatchTool, ApplyIntentTool, GlobTool, GrepTool, CodebaseSearchTool, LspTool, PowerShellTool, BashTool, FindAndEditTool, CodeModeTool, adaptToolForEngine, buildTool, makeTodoWriteTool, makeTaskTool, makeTaskOutputTool, makeKillTaskTool, makeConductorTool, makeCodingBackendTool, makeWebFetchTool, makeWebSearchTool, makeImageSearchTool, makeBashOutputTool, makeKillShellTool, makeEnterPlanModeTool, makeUpdatePlanDraftTool, makeExitPlanModeTool, TodoStore, ShellRegistry, type RichToolContext, type FileReadStamp, type PathPermissionStore, type CommandPermissionStore, type PlanModeState } from "@ares/tools";
 import { z } from "zod";
 import { decidePermission } from "../permissionPolicy.js";
 import { loadUiSettings } from "../uiSettings.js";
@@ -19,6 +19,33 @@ import { ProviderSelection, fastModelFor } from "./providers.js";
 import { AresRuntimeState, CliRuntimeContext, compactLine } from "./runtime.js";
 import { buildSystemPrompt } from "./turnPipeline.js";
 
+export interface EngineToolStateResolver {
+  shellRegistryFor(sessionId: string): ShellRegistry;
+  todoStoreFor(sessionId: string): TodoStore;
+  /** Multi-session hosts must resolve workflow authority from the calling
+   * Session. Capturing the process-global runtime lets session A change the
+   * permission posture (and plan) observed by session B. */
+  planModeStateFor?(sessionId: string): PlanModeState;
+}
+
+export const SESSION_TRANSITION_TOOL_NAMES = new Set(["EnterPlanMode", "UpdatePlanDraft", "ExitPlanMode"]);
+
+function childSpanSummarizer(selection: ProviderSelection): QueryEngineConfig["summarizeSpan"] | undefined {
+  if (!selection.subModel) return undefined;
+  return async (messages) => selection.subModel!.summarize({
+    input: JSON.stringify(messages.map((message) => ({ role: message.role, content: message.content }))),
+    instructions:
+      "Compact this child coding session into a dense factual continuation: objective, completed work, exact files/symbols, decisions, failures, verification, and remaining steps. Do not address the user.",
+  });
+}
+
+/** Leaf engines receive their own durable Session but no owner-facing workflow
+ * surface. A child may edit under the authority delegated by its parent; it may
+ * never enter/approve the parent's plan or mutate a shared host runtime. */
+export function scopeChildEngineTools(tools: readonly EngineTool[]): EngineTool[] {
+  return tools.filter((tool) => !SESSION_TRANSITION_TOOL_NAMES.has(tool.schema.name));
+}
+
 export async function buildEngineTools(
   pathPermissions: PathPermissionStore,
   commandPermissions: CommandPermissionStore,
@@ -30,17 +57,54 @@ export async function buildEngineTools(
   // Shared per-session state populated by the tool harness. Callers that need
   // to invalidate stamps (context-trim recovery) own the map and pass it in.
   fileReadStamps: Map<string, FileReadStamp> = new Map(),
+  providedSessionKernel?: SessionKernelStore,
+  stateResolver?: EngineToolStateResolver,
 ): Promise<EngineTool[]> {
+  const sessionKernel = providedSessionKernel ?? await openWorkspaceSessionKernel(context.workspace);
+  const planModeStateFor = (sessionId: string): PlanModeState =>
+    stateResolver?.planModeStateFor?.(sessionId) ?? runtime;
+  // The first caller is the owner Session (Task/Conductor cannot launch before
+  // that call). Every durable child thereafter receives isolated mutable tool
+  // state instead of sharing the parent's background processes and todo list.
+  let ownerStateSessionId: string | undefined;
+  const childShellRegistries = new Map<string, ShellRegistry>();
+  const childTodoStores = new Map<string, TodoStore>();
+  const fallbackShellRegistryFor = (sessionId: string): ShellRegistry => {
+    ownerStateSessionId ??= sessionId;
+    if (sessionId === ownerStateSessionId) return shellRegistry;
+    let registry = childShellRegistries.get(sessionId);
+    if (!registry) {
+      registry = new ShellRegistry();
+      childShellRegistries.set(sessionId, registry);
+    }
+    return registry;
+  };
+  const fallbackTodoStoreFor = (sessionId: string): TodoStore => {
+    ownerStateSessionId ??= sessionId;
+    if (sessionId === ownerStateSessionId) return todoStore;
+    let store = childTodoStores.get(sessionId);
+    if (!store) {
+      store = new TodoStore();
+      childTodoStores.set(sessionId, store);
+    }
+    return store;
+  };
+  const durableShellRegistryFor = (sessionId: string): ShellRegistry => {
+    const registry = stateResolver?.shellRegistryFor(sessionId) ?? fallbackShellRegistryFor(sessionId);
+    registry.configureDurability({ kernel: sessionKernel, workspace: context.workspace });
+    registry.registerSession(sessionId);
+    return registry;
+  };
   const enrich = (base: ToolCallContext): RichToolContext => ({
     ...base,
-    permissionMode: runtime.permissionMode,
+    permissionMode: planModeStateFor(base.sessionId).permissionMode,
     // Prefer the engine-owned map (subagents supply their own) so parent and
     // child never share read state; fall back to the parent's shared map.
     fileReadStamps: (base.fileReadStamps as Map<string, FileReadStamp>) ?? fileReadStamps,
     pathPermissions,
     commandPermissions,
-    shellRegistry,
-    todoStore,
+    shellRegistry: durableShellRegistryFor(base.sessionId),
+    todoStore: stateResolver?.todoStoreFor(base.sessionId) ?? fallbackTodoStoreFor(base.sessionId),
     subModel: selection.subModel,
   });
 
@@ -52,8 +116,9 @@ export async function buildEngineTools(
     makeWebFetchTool(selection.subModel),
     makeBashOutputTool(shellRegistry),
     makeKillShellTool(shellRegistry),
-    makeEnterPlanModeTool(runtime),
-    makeExitPlanModeTool(runtime),
+    makeEnterPlanModeTool((call) => planModeStateFor(call.sessionId)),
+    makeUpdatePlanDraftTool((call) => planModeStateFor(call.sessionId)),
+    makeExitPlanModeTool((call) => planModeStateFor(call.sessionId)),
     BootstrapTool,
     SelfEvolveTool,
     SkillCraftTool,
@@ -71,6 +136,7 @@ export async function buildEngineTools(
     }));
     return adapted as EngineTool;
   });
+  const childBaseTools = scopeChildEngineTools(baseTools);
 
   // Every persona on the roster becomes a delegable subagent type, so authoring
   // one markdown file gets you both consumption modes. Never fatal: a broken or
@@ -85,30 +151,39 @@ export async function buildEngineTools(
     // Explorer subagents fan out on the family's cheap sibling (flash/haiku/
     // gateway-fast) — wide search shouldn't burn frontier tokens.
     fastModel: fastModelFor(selection),
-    parentTools: baseTools,
-    baseSystemPrompt: buildSystemPrompt(runtime.permissionMode, context),
+    parentTools: childBaseTools,
+    baseSystemPrompt: () =>
+      runtime.composeChildSystemPrompt?.() ?? buildSystemPrompt(runtime.permissionMode, context),
+    sessionKernel,
+    summarizeSpan: childSpanSummarizer(selection),
+    contextBudgetTokens: Number(process.env.ARES_SUBAGENT_CONTEXT_BUDGET) || 128_000,
     maxTurns: () => {
       const value = Number(process.env.ARES_SUBAGENT_TURN_LIMIT);
       return Number.isFinite(value) && value > 0 ? Math.floor(value) : undefined;
     },
   });
   const taskTool = adaptToolForEngine(makeTaskTool(runner), enrich) as EngineTool;
-  const workerTools = [...baseTools, taskTool];
+  const taskOutputTool = adaptToolForEngine(makeTaskOutputTool(runner), enrich) as EngineTool;
+  const killTaskTool = adaptToolForEngine(makeKillTaskTool(runner), enrich) as EngineTool;
+  const workerTools = [...baseTools, taskTool, taskOutputTool, killTaskTool];
   // The Conductor — author + run a deterministic agent FLEET (capped parallel
   // fan-out, typed pipelines, schema-validated leaves, token budget). parentTools
-  // is baseTools (NOT workerTools) so fleet leaves can't get Task/Conductor and
-  // recurse; it's added to the MAIN agent list only, so subagents can't orchestrate.
+  // is the child-scoped base catalog (NOT workerTools), so fleet leaves get
+  // neither recursive orchestration nor owner-facing plan transitions.
   const conductorTool = adaptToolForEngine(
     makeConductorTool({
       provider: selection.provider,
       model: selection.model,
-      parentTools: baseTools,
-      baseSystemPrompt: buildSystemPrompt(runtime.permissionMode, context),
+      parentTools: childBaseTools,
+      baseSystemPrompt: () =>
+        runtime.composeChildSystemPrompt?.() ?? buildSystemPrompt(runtime.permissionMode, context),
       subModel: selection.subModel,
       // Was 20 — leaves doing several reads + producing structured output ran out
       // of turns mid-read and died, which read as "the fleet always fails." 40
       // gives a leaf room to finish; per-fleet overrides still apply.
       defaultMaxTurns: 40,
+      sessionKernel,
+      summarizeSpan: childSpanSummarizer(selection),
       // "Fleets inherit my permissions" toggle: leaves can't prompt, so the policy
       // resolves to allow_once / deny. Reads runtime.permissions LIVE so the
       // toggle applies to the next fleet without rebuilding the session.
@@ -140,13 +215,14 @@ export async function buildEngineTools(
     }),
     enrich,
   ) as EngineTool;
-  const operatorWorkerTools = [...workerTools, livingMindTool, browserTool];
+  const operatorWorkerTools = [...childBaseTools, taskTool, livingMindTool, browserTool];
   const operatorTool = adaptToolForEngine(
     makeOperatorChatTool({
       selection,
       runtime,
       context,
       workerTools: operatorWorkerTools,
+      sessionKernel,
     }),
     enrich,
   ) as EngineTool;
@@ -170,21 +246,53 @@ export async function buildCodingTools(
   todoStore: TodoStore,
   fileReadStamps: Map<string, FileReadStamp> = new Map(),
   options: { subagents?: boolean; conductor?: boolean; shell?: boolean } = {},
+  providedSessionKernel?: SessionKernelStore,
 ): Promise<EngineTool[]> {
+  const sessionKernel = providedSessionKernel ?? await openWorkspaceSessionKernel(context.workspace);
+  let ownerStateSessionId: string | undefined;
+  const childShellRegistries = new Map<string, ShellRegistry>();
+  const childTodoStores = new Map<string, TodoStore>();
+  const shellRegistryFor = (sessionId: string): ShellRegistry => {
+    ownerStateSessionId ??= sessionId;
+    if (sessionId === ownerStateSessionId) return shellRegistry;
+    let registry = childShellRegistries.get(sessionId);
+    if (!registry) {
+      registry = new ShellRegistry();
+      childShellRegistries.set(sessionId, registry);
+    }
+    return registry;
+  };
+  const todoStoreFor = (sessionId: string): TodoStore => {
+    ownerStateSessionId ??= sessionId;
+    if (sessionId === ownerStateSessionId) return todoStore;
+    let store = childTodoStores.get(sessionId);
+    if (!store) {
+      store = new TodoStore();
+      childTodoStores.set(sessionId, store);
+    }
+    return store;
+  };
+  const durableShellRegistryFor = (sessionId: string): ShellRegistry => {
+    const registry = shellRegistryFor(sessionId);
+    registry.configureDurability({ kernel: sessionKernel, workspace: context.workspace });
+    registry.registerSession(sessionId);
+    return registry;
+  };
   const enrich = (base: ToolCallContext): RichToolContext => ({
     ...base,
     permissionMode: runtime.permissionMode,
     fileReadStamps: (base.fileReadStamps as Map<string, FileReadStamp>) ?? fileReadStamps,
     pathPermissions,
     commandPermissions,
-    shellRegistry,
-    todoStore,
+    shellRegistry: durableShellRegistryFor(base.sessionId),
+    todoStore: todoStoreFor(base.sessionId),
     subModel: selection.subModel,
   });
   const codingDefs = [
     ReadTool,
     WriteTool,
     EditTool,
+    ApplyPatchTool,
     ApplyIntentTool,
     GlobTool,
     GrepTool,
@@ -196,10 +304,12 @@ export async function buildCodingTools(
     makeTodoWriteTool(todoStore),
     ...(options.shell === false ? [] : [makeBashOutputTool(shellRegistry), makeKillShellTool(shellRegistry)]),
     makeEnterPlanModeTool(runtime),
+    makeUpdatePlanDraftTool(runtime),
     makeExitPlanModeTool(runtime),
   ];
   const baseTools = codingDefs.map((tool) => adaptToolForEngine(tool, enrich) as EngineTool);
   if (options.subagents === false) return baseTools;
+  const childBaseTools = scopeChildEngineTools(baseTools);
 
   const codingRegistry = new SubagentRegistry();
   registerPersonaSubagents(codingRegistry, await listPersonas(context.home).catch(() => []));
@@ -209,29 +319,38 @@ export async function buildCodingTools(
     provider: selection.provider,
     model: selection.model,
     fastModel: fastModelFor(selection),
-    parentTools: baseTools,
-    baseSystemPrompt: buildSystemPrompt(runtime.permissionMode, context),
+    parentTools: childBaseTools,
+    baseSystemPrompt: () =>
+      runtime.composeChildSystemPrompt?.() ?? buildSystemPrompt(runtime.permissionMode, context),
+    sessionKernel,
+    summarizeSpan: childSpanSummarizer(selection),
+    contextBudgetTokens: Number(process.env.ARES_SUBAGENT_CONTEXT_BUDGET) || 128_000,
     maxTurns: () => {
       const value = Number(process.env.ARES_SUBAGENT_TURN_LIMIT);
       return Number.isFinite(value) && value > 0 ? Math.floor(value) : undefined;
     },
   });
   const taskTool = adaptToolForEngine(makeTaskTool(runner), enrich) as EngineTool;
-  if (options.conductor === false) return [...baseTools, taskTool];
+  const taskOutputTool = adaptToolForEngine(makeTaskOutputTool(runner), enrich) as EngineTool;
+  const killTaskTool = adaptToolForEngine(makeKillTaskTool(runner), enrich) as EngineTool;
+  if (options.conductor === false) return [...baseTools, taskTool, taskOutputTool, killTaskTool];
   const conductorTool = adaptToolForEngine(
     makeConductorTool({
       provider: selection.provider,
       model: selection.model,
-      parentTools: baseTools,
-      baseSystemPrompt: buildSystemPrompt(runtime.permissionMode, context),
+      parentTools: childBaseTools,
+      baseSystemPrompt: () =>
+        runtime.composeChildSystemPrompt?.() ?? buildSystemPrompt(runtime.permissionMode, context),
       subModel: selection.subModel,
       defaultMaxTurns: 40,
+      sessionKernel,
+      summarizeSpan: childSpanSummarizer(selection),
       leafRequestPermission: async (request) =>
         decidePermission(request, runtime.permissions, { fleet: true }) === "allow" ? "allow_once" : "deny",
     }),
     enrich,
   ) as EngineTool;
-  return [...baseTools, taskTool, conductorTool];
+  return [...baseTools, taskTool, taskOutputTool, killTaskTool, conductorTool];
 }
 
 const livingMindInput = z
@@ -417,6 +536,7 @@ function makeOperatorChatTool(opts: {
   runtime: AresRuntimeState;
   context: CliRuntimeContext;
   workerTools: readonly EngineTool[];
+  sessionKernel: SessionKernelStore;
 }) {
   return buildTool({
     name: "Operator",
@@ -465,6 +585,10 @@ function makeOperatorChatTool(opts: {
             workspace: ctx.workspace,
             tools: opts.workerTools,
             systemPrompt: buildSystemPrompt(opts.runtime.permissionMode, opts.context),
+            sessionKernel: opts.sessionKernel,
+            parentSessionId: ctx.sessionId,
+            telemetryDir: path.join(opts.context.home, "telemetry"),
+            sessionRegistryHome: opts.context.home,
             // This dispatcher runs INSIDE an interactive tool call — bubble the
             // Worker's permission prompts to the live session instead of the
             // hard "no prompt available" death (workspace-escape fleet killer).
@@ -519,6 +643,10 @@ function makeOperatorChatTool(opts: {
           workspace: ctx.workspace,
           tools: opts.workerTools,
           systemPrompt: buildSystemPrompt(opts.runtime.permissionMode, opts.context),
+          sessionKernel: opts.sessionKernel,
+          parentSessionId: ctx.sessionId,
+          telemetryDir: path.join(opts.context.home, "telemetry"),
+          sessionRegistryHome: opts.context.home,
           // Interactive context — bubble Worker permission prompts (see acquire).
           requestPermission: ctx.requestPermission,
         });

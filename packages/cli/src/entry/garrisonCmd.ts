@@ -1,6 +1,18 @@
 // Extracted from entry.ts — garrisonCmd.
 
-import { QueryEngine, installGlobalCrashHandlers, runReliabilityTriage, writeCrashLogSync } from "@ares/core";
+import {
+  composeVerifiedChildSessionSync,
+  installGlobalCrashHandlers,
+  loadChildVerificationDebt,
+  openWorkspaceSessionKernel,
+  runReliabilityTriage,
+  writeCrashLogSync,
+  type ChildVerificationDebt,
+  type ChildSessionCompositionOptions,
+  type ComposedVerifiedChildSession,
+  type SessionKernelStore,
+  type VerifierOptions,
+} from "@ares/core";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -22,7 +34,48 @@ import { AresRuntimeState, ParsedArgs, cliRuntimeContext } from "./runtime.js";
 import { chatContextBudget, chatMaxOutputTokens, invalidateTrimmedReadStamps, makeSpanSummarizer, resolveReasoningLevel } from "./sessionFactory.js";
 import { TelegramModelControl, buildOperatorReporter, sendWarMapBriefing, startTelegramBridge, startTelegramCheckins } from "./telegramWiring.js";
 import { persistTerminalModelPreference, terminalModelCatalogLines } from "./terminalLines.js";
-import { buildSystemPrompt, loadGitContext } from "./turnPipeline.js";
+import { buildSystemPrompt, loadGitContext, loadLiveMindContext } from "./turnPipeline.js";
+import { SessionPlanModeRegistry } from "./sessionPlanModes.js";
+
+export type VerifiedGarrisonCoreSession = ComposedVerifiedChildSession;
+
+/** Production Garrison composition seam. Remote sessions must get the same
+ * post-edit verifier/proof loop as interactive sessions; keeping the wiring in
+ * one testable helper prevents the inline gateway factory from drifting. */
+export function createVerifiedGarrisonCoreSession(
+  options: Omit<ChildSessionCompositionOptions, "surface" | "verifierOptions" | "persistedDebt">,
+  verifierOptions: Omit<VerifierOptions, "workspace"> = {},
+  persistedDebt?: ChildVerificationDebt,
+): VerifiedGarrisonCoreSession {
+  return composeVerifiedChildSessionSync({
+    ...options,
+    surface: "garrison",
+    verifierOptions,
+    persistedDebt,
+  });
+}
+
+/** Load canonical red-session scope before the synchronous SessionManager
+ * factory starts constructing resumed sessions. The shared loader reads the
+ * SQLite mutation ledger and owns fail-closed semantics. */
+export async function loadCanonicalGarrisonVerificationDebt(
+  kernel: SessionKernelStore,
+  defaultWorkspace: string,
+): Promise<Map<string, ChildVerificationDebt>> {
+  const entries = await Promise.all(
+    kernel.listSessions({ includeArchived: true })
+      .filter((session) => !session.archived)
+      .map(async (session) => [
+        session.id,
+        await loadChildVerificationDebt(
+          kernel,
+          session.workspaceKey ?? defaultWorkspace,
+          session.id,
+        ),
+      ] as const),
+  );
+  return new Map(entries);
+}
 
 /**
  * The Holotable — `ares holo [model.glb] [--out file] [--title text]`.
@@ -95,59 +148,148 @@ export async function garrisonCommand(args: ParsedArgs): Promise<number> {
     emit: (notice) => process.stderr.write(`garrison: crash(${notice.kind}): ${notice.message} → ${notice.logFile ?? "(unwritten)"}\n`),
     handleSignals: false,
   });
-  // V1 slice tradeoff: one shared tool harness across daemon sessions (shell
-  // registry and todo state are daemon-global). Per-session isolation arrives
-  // with the full V2 composition.
+  // The immutable catalog is shared, but mutable shell/todo state is routed by
+  // ToolCallContext.sessionId. This keeps gateway sessions and their child
+  // Workers from reading, polling, killing, or overwriting each other's state.
   const shellRegistry = new ShellRegistry();
   const todoStore = new TodoStore();
+  const sessionShellRegistries = new Map<string, ShellRegistry>();
+  const sessionTodoStores = new Map<string, TodoStore>();
   const garrisonReadStamps = new Map<string, FileReadStamp>();
-  const tools = await buildEngineTools(pathPermissions, commandPermissions, selection, runtime, context, shellRegistry, todoStore, garrisonReadStamps);
+  const sessionKernel = await openWorkspaceSessionKernel(context.workspace);
+  const verifiedSessions = new Map<string, VerifiedGarrisonCoreSession>();
+  let composeGarrisonSystemPrompt = (mode: AresRuntimeState["permissionMode"]) =>
+    buildSystemPrompt(mode, context);
+  const planModes = new SessionPlanModeRegistry({
+    kernel: sessionKernel,
+    defaultPermissionMode:
+      runtime.permissionMode === "plan" ? "workspace-write" : runtime.permissionMode,
+    sessionFor: (sessionId) => verifiedSessions.get(sessionId)?.session,
+    systemPromptFor: (mode) => composeGarrisonSystemPrompt(mode),
+  });
+  const canonicalVerificationDebt = await loadCanonicalGarrisonVerificationDebt(
+    sessionKernel,
+    context.workspace,
+  );
+  const tools = await buildEngineTools(
+    pathPermissions,
+    commandPermissions,
+    selection,
+    runtime,
+    context,
+    shellRegistry,
+    todoStore,
+    garrisonReadStamps,
+    sessionKernel,
+    {
+      shellRegistryFor: (sessionId) => {
+        let registry = sessionShellRegistries.get(sessionId);
+        if (!registry) {
+          registry = new ShellRegistry();
+          sessionShellRegistries.set(sessionId, registry);
+        }
+        return registry;
+      },
+      todoStoreFor: (sessionId) => {
+        let store = sessionTodoStores.get(sessionId);
+        if (!store) {
+          store = new TodoStore();
+          sessionTodoStores.set(sessionId, store);
+        }
+        return store;
+      },
+      planModeStateFor: (sessionId) => planModes.stateFor(sessionId),
+    },
+  );
   const isMock = selection.provider.name.startsWith("mock");
   const agent = await prepareAresAgent({
     home: context.home,
     workspace: context.workspace,
     enabled: process.env.ARES_AGENT_ENABLED === "1" || (!isMock && process.env.ARES_AGENT_ENABLED !== "0"),
   });
-  const systemPrompt =
-    agent.composeSystemPrompt(buildSystemPrompt(runtime.permissionMode, context)) + (await loadGitContext(context));
+  const promptTail = (await loadLiveMindContext(context)) + (await loadGitContext(context));
+  composeGarrisonSystemPrompt = (mode) =>
+    agent.composeSystemPrompt(buildSystemPrompt(mode, context)) + promptTail;
+  runtime.composeChildSystemPrompt = async () =>
+    agent.composeSystemPrompt(buildSystemPrompt(runtime.permissionMode, context)) +
+    (await loadLiveMindContext(context)) +
+    (await loadGitContext(context));
 
   const sessions = new SessionManager({
     home: context.home,
-    factory: (req) => ({
-      engine: new QueryEngine(
-        {
-          provider: selection.provider,
-          model: req.model ?? selection.model,
-          systemPrompt,
-          tools,
-          workspace: req.workspace ?? context.workspace,
-          signal: req.signal,
-          // Remote-autonomy gate: safe work (research, fetch, read, navigate,
-          // desktop control, workspace edits) runs without a prompt so Ares
-          // doesn't freeze waiting on a tap nobody's there to give. Only the
-          // dangerous few — money, mail, publish, credentials, wipes — escalate
-          // to the owner's phone (and auto-deny if unanswered — the safe miss).
-          requestPermission: req.requestPermission
-            ? async (request) => {
-                const decision = remoteAutonomyDecision(request);
-                if (decision === "allow") return "allow_once";
-                if (decision === "deny") return "deny";
-                return req.requestPermission!(request);
-              }
-            : req.requestPermission,
-          reasoningLevel: resolveReasoningLevel(settings),
-          maxOutputTokens: chatMaxOutputTokens(selection),
-          contextBudgetTokens: chatContextBudget(selection),
-          onHistoryTrimmed: (dropped) =>
-            invalidateTrimmedReadStamps(garrisonReadStamps, req.workspace ?? context.workspace, dropped),
-          summarizeSpan: makeSpanSummarizer(selection),
-        },
-        req.sessionId,
-      ),
-      providerName: selection.provider.name,
-      model: req.model ?? selection.model,
-      workspace: req.workspace ?? context.workspace,
-    }),
+    sessionKernel,
+    factory: (req) => {
+      const workspace = req.workspace ?? context.workspace;
+      const model = req.model ?? selection.model;
+      planModes.refresh(req.sessionId);
+      const liveSystemPrompt = () =>
+        composeGarrisonSystemPrompt(planModes.stateFor(req.sessionId).permissionMode);
+      const fileReadStamps = new Map<string, FileReadStamp>();
+      const requestPermission = req.requestPermission
+        ? async (request: Parameters<typeof req.requestPermission>[0]) => {
+            const decision = remoteAutonomyDecision(request);
+            if (decision === "allow") return "allow_once" as const;
+            if (decision === "deny") return "deny" as const;
+            return req.requestPermission(request);
+          }
+        : req.requestPermission;
+      const durable = sessionKernel.getSession(req.sessionId);
+      const persistedDebt = canonicalVerificationDebt.get(req.sessionId) ?? (
+        durable && (durable.workOutcome === "pending" || durable.workOutcome === "unverified" || durable.workOutcome === "blocked")
+          ? { required: true, touchedFiles: [], scopeComplete: false }
+          : undefined
+      );
+      const verified = createVerifiedGarrisonCoreSession({
+        workspace,
+        provider: selection.provider,
+        model,
+        systemPrompt: liveSystemPrompt,
+        tools,
+        signal: req.signal,
+        // Remote-autonomy gate: safe work (research, fetch, read, navigate,
+        // desktop control, workspace edits) runs without a prompt so Ares
+        // doesn't freeze waiting on a tap nobody's there to give. Only the
+        // dangerous few — money, mail, publish, credentials, wipes — escalate
+        // to the owner's phone (and auto-deny if unanswered — the safe miss).
+        requestPermission,
+        reasoningLevel: resolveReasoningLevel(settings),
+        maxOutputTokens: chatMaxOutputTokens(selection),
+        contextBudgetTokens: chatContextBudget(selection),
+        fileReadStamps,
+        onHistoryTrimmed: (dropped) =>
+          invalidateTrimmedReadStamps(fileReadStamps, workspace, dropped),
+        summarizeSpan: makeSpanSummarizer(selection),
+        contextInputs: () => ({
+          persona: agent.activePersona() ?? null,
+          livingMemoryAndGit: promptTail,
+        }),
+        sessionId: req.sessionId,
+        initialMessages: req.initialMessages,
+        initialSeq: req.initialEventCount,
+        sessionMeta: req.createdAt
+          ? {
+              id: req.sessionId,
+              workspace,
+              provider: { name: selection.provider.name, model },
+              createdAt: req.createdAt,
+              label: req.title,
+            }
+          : undefined,
+        telemetryDir: path.join(context.home, "telemetry"),
+        sessionRegistryHome: context.home,
+        sessionKernel,
+      }, {}, persistedDebt);
+      canonicalVerificationDebt.delete(req.sessionId);
+      const prior = verifiedSessions.get(req.sessionId);
+      if (prior) void prior.dispose();
+      verifiedSessions.set(req.sessionId, verified);
+      return {
+        session: verified.session,
+        providerName: selection.provider.name,
+        model,
+        workspace,
+      };
+    },
   });
   const restored = await sessions.rehydrate();
 
@@ -215,6 +357,9 @@ export async function garrisonCommand(args: ParsedArgs): Promise<number> {
             workspace: context.workspace,
             tools,
             systemPrompt: agent.composeSystemPrompt(buildSystemPrompt("workspace-write", context)),
+            sessionKernel,
+            telemetryDir: path.join(context.home, "telemetry"),
+            sessionRegistryHome: context.home,
             requestPermission: async (request) => {
               const gate = gateToolPermission(request, { attended: false });
               return gate.kind === "allow" ? "allow_once" : "deny";
@@ -307,7 +452,10 @@ export async function garrisonCommand(args: ParsedArgs): Promise<number> {
   );
 
   return await new Promise<number>((resolve) => {
+    let shuttingDown = false;
     const shutdown = () => {
+      if (shuttingDown) return;
+      shuttingDown = true;
       process.stdout.write("\ngarrison: standing down…\n");
       uninstallGarrisonCrashHandlers();
       scheduler.stop();
@@ -315,7 +463,13 @@ export async function garrisonCommand(args: ParsedArgs): Promise<number> {
       operatorLoop?.stop();
       void telegramBridge?.stop().catch(() => {});
       approvals.dispose();
-      void sessions.flush().finally(() => server.close().finally(() => resolve(0)));
+      const cancelVerifiers = Promise.all(
+        [...verifiedSessions.values()].map((verified) => verified.dispose()),
+      ).finally(() => verifiedSessions.clear());
+      void Promise.all([sessions.flush(), cancelVerifiers])
+        .then(() => server.close())
+        .catch(() => undefined)
+        .finally(() => resolve(0));
     };
     process.once("SIGINT", shutdown);
     process.once("SIGTERM", shutdown);

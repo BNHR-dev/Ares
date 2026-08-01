@@ -21,6 +21,7 @@ import type {
   StopReason,
 } from "@ares/protocol";
 import { thinkingBudgetTokens, reasoningEnabled } from "@ares/protocol";
+import { narrowToolSchema } from "./toolSchema.js";
 import type { Provider, ProviderRequest } from "../queryEngine.js";
 import { createStallGuard, stallErrorEvent } from "./stallGuard.js";
 import { parseRetryAfterMs } from "./retryAfter.js";
@@ -245,7 +246,8 @@ export class OllamaCloudPool {
               function: {
                 name: t.name,
                 description: t.description,
-                parameters: t.input_schema,
+                // Narrowed for the OpenAI-shaped wire — see toolSchema.ts.
+                parameters: narrowToolSchema(t.input_schema),
               },
             }))
           : undefined,

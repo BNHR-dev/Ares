@@ -3,6 +3,7 @@
 import { stat } from "node:fs/promises";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
+import { randomUUID } from "node:crypto";
 import { stdin, stdout } from "node:process";
 import { isReasoningLevel, reasoningLabel, REASONING_LEVELS } from "@ares/protocol";
 import { chatHeader, availableThemes, dim, interactiveHelp, notice, promptLabel, providerError, setTheme, themeChanged, themesList, thinkingPrefix, toolEnd, toolError, toolStart } from "../terminalUi.js";
@@ -12,7 +13,7 @@ import { loadUiSettings, updateUiSettings } from "../uiSettings.js";
 import { onLifecycle } from "@ares/agent";
 import { briefingLines, buildBriefing, buildContinuitySummary, buildWorldGraph, checkpointDiffCommand, checkpointsCommand, continuityLines, doctorCommand, loginCommand, rollbackCommand, worldGraphLines } from "./introspect.js";
 import { ProviderSelection, TERMINAL_PROVIDERS, daemonModelCatalog, defaultTerminalModel, providerFamilyForSelection } from "./providers.js";
-import { ParsedArgs, cliRuntimeContext, printHelp } from "./runtime.js";
+import { ParsedArgs, cliRuntimeContext, printHelp, transitionPermissionMode } from "./runtime.js";
 import { LiveSession, createSession, createSessionWithSelection, guardVisionForTurn, handleReasoningCommand } from "./sessionFactory.js";
 import { promptPermission } from "./permissions.js";
 import type { ToolPermissionRequest } from "@ares/core";
@@ -51,7 +52,7 @@ export async function runCommand(args: ParsedArgs): Promise<number> {
   const turnContent = await contentFromUserInput(goal, live.context.workspace);
   guardVisionForTurn(live, turnContent);
   for await (const event of live.session.sendContent(turnContent)) {
-    if (event.type === "tool_end" && event.touchedFiles?.length) {
+    if ((event.type === "tool_end" || event.type === "tool_error") && event.touchedFiles?.length) {
       live.verifier.scheduleFor(event.touchedFiles);
     }
     if (event.type === "turn_end") finalStatus = event.status;
@@ -145,12 +146,24 @@ export async function chatCommand(args: ParsedArgs, resumeSessionId?: string): P
         inkPermissionHandler = handler;
       },
       steer: (text) => {
-        // Same contract as the daemon's steer verb: course-correct the LIVE
-        // turn without restarting it (drained after the current tool round).
-        live.queueSystemReminder(
-          `The user STEERED mid-task: "${text}". Adjust course to honor this, but keep your current objective and everything you've already done — do not restart.`,
-          "instructions",
-        );
+        // A steer is a real durable user input, not an in-memory reminder. Start
+        // the generator so admission crosses SQLite + JSONL immediately; the
+        // active QueryEngine claims it only at a settled model/tool boundary.
+        // Its stable ID makes a crash/reconnect replay idempotent.
+        const correction = text.trim();
+        if (!correction) return;
+        const inputId = `steer_${randomUUID()}`;
+        void (async () => {
+          for await (const _event of live.session.sendContent(
+            [{ type: "text", text: correction }],
+            { inputId, delivery: "steer" },
+          )) {
+            // The already-active turn owns visible output. This generator only
+            // waits for durable acknowledgement of the correction.
+          }
+        })().catch((error) => {
+          process.stderr.write(`steer admission failed: ${error instanceof Error ? error.message : String(error)}\n`);
+        });
       },
       sendMessage: async (goal, onEvent) => {
         await pendingFinish;
@@ -160,7 +173,7 @@ export async function chatCommand(args: ParsedArgs, resumeSessionId?: string): P
         const turnContent = await contentFromUserInput(goal, live.context.workspace);
         guardVisionForTurn(live, turnContent);
         for await (const event of live.session.sendContent(turnContent)) {
-          if (event.type === "tool_end" && event.touchedFiles?.length) {
+          if ((event.type === "tool_end" || event.type === "tool_error") && event.touchedFiles?.length) {
             live.verifier.scheduleFor(event.touchedFiles);
           }
           if (event.type === "turn_end") finalStatus = event.status;
@@ -213,17 +226,20 @@ export async function chatCommand(args: ParsedArgs, resumeSessionId?: string): P
         if (line === "/themes") return { kind: "handled", lines: themeLines(), snapshot: snapshot() };
         if (line === "/sessions") return { kind: "handled", lines: await sessionsLines(20, live.context), snapshot: snapshot() };
         if (line === "/plan") {
-          live.runtime.permissionMode = "plan";
+          await transitionPermissionMode(live.runtime, "plan");
           await updateUiSettings({ dangerousBypass: false });
           return { kind: "handled", lines: ["Plan mode enabled. Writes are blocked."], snapshot: snapshot() };
         }
         if (line === "/code" || line === "/exitplan") {
-          live.runtime.permissionMode = "workspace-write";
+          await transitionPermissionMode(live.runtime, "workspace-write");
           await updateUiSettings({ dangerousBypass: false });
           return { kind: "handled", lines: ["Workspace-write mode restored."], snapshot: snapshot() };
         }
         if (line === "/danger" || line === "/bypass") {
-          live.runtime.permissionMode = live.runtime.permissionMode === "bypass" ? "workspace-write" : "bypass";
+          await transitionPermissionMode(
+            live.runtime,
+            live.runtime.permissionMode === "bypass" ? "workspace-write" : "bypass",
+          );
           await updateUiSettings({ dangerousBypass: live.runtime.permissionMode === "bypass" });
           return {
             kind: "handled",
@@ -410,19 +426,22 @@ export async function chatCommand(args: ParsedArgs, resumeSessionId?: string): P
       continue;
     }
     if (line === "/plan") {
-      live.runtime.permissionMode = "plan";
+      await transitionPermissionMode(live.runtime, "plan");
       await updateUiSettings({ dangerousBypass: false });
       process.stdout.write(notice("Plan Mode", ["Writes are blocked. Use /code to return to workspace-write mode."], "warn"));
       continue;
     }
     if (line === "/code" || line === "/exitplan") {
-      live.runtime.permissionMode = "workspace-write";
+      await transitionPermissionMode(live.runtime, "workspace-write");
       await updateUiSettings({ dangerousBypass: false });
       process.stdout.write(notice("Plan Mode", ["Workspace-write mode restored."], "success"));
       continue;
     }
     if (line === "/danger" || line === "/bypass") {
-      live.runtime.permissionMode = live.runtime.permissionMode === "bypass" ? "workspace-write" : "bypass";
+      await transitionPermissionMode(
+        live.runtime,
+        live.runtime.permissionMode === "bypass" ? "workspace-write" : "bypass",
+      );
       await updateUiSettings({ dangerousBypass: live.runtime.permissionMode === "bypass" });
       process.stdout.write(
         notice(
@@ -575,6 +594,7 @@ async function renderTurn(live: LiveSession, goal: string): Promise<void> {
       continue;
     }
     if (event.type === "tool_error") {
+      if (event.touchedFiles?.length) live.verifier.scheduleFor(event.touchedFiles);
       process.stderr.write(toolError(event));
       continue;
     }

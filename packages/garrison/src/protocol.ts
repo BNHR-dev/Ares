@@ -39,7 +39,17 @@ export type GatewayClientFrame =
   | { type: "hello"; token: string; client: string; proto: typeof PROTO_VERSION }
   | { type: "session.create"; provider?: string; model?: string; workspace?: string }
   | { type: "session.attach"; sessionId: string }
-  | { type: "session.send"; sessionId: string; text: string }
+  | {
+      type: "session.send";
+      sessionId: string;
+      text: string;
+      /** Stable owner-generated identity. Reusing it retries one logical input
+       * instead of creating a second coding turn after an ambiguous disconnect. */
+      inputId?: string;
+      /** queue starts a later turn; steer injects the correction at the next
+       * safe boundary of the active canonical turn. Defaults to queue. */
+      delivery?: "queue" | "steer";
+    }
   | { type: "session.interrupt"; sessionId: string }
   | { type: "sessions.list" }
   | { type: "status" }

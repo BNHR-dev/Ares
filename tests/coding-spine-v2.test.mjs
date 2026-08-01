@@ -68,7 +68,7 @@ function bashTool() {
 test("coding proof gate marks post-edit checked work verified", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "ares-proof-"));
   const file = path.join(root, "src", "feature.ts");
-  const engine = new QueryEngine({
+  const engine = QueryEngine.forTesting({
     provider: scriptedProvider([
       { tool: { name: "Edit", input: { file_path: "src/feature.ts" } } },
       { text: "done" },
@@ -92,7 +92,7 @@ test("coding proof gate marks post-edit checked work verified", async () => {
 
 test("coding proof gate surfaces an honest unverified work status", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "ares-proof-"));
-  const engine = new QueryEngine({
+  const engine = QueryEngine.forTesting({
     provider: scriptedProvider([
       { tool: { name: "Edit", input: { file_path: "a.ts" } } },
       { text: "done" },
@@ -114,7 +114,7 @@ test("coding proof gate surfaces an honest unverified work status", async () => 
 test("manual proof rejects lookalike commands and shell-chain forgery", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "ares-proof-forgery-"));
   for (const command of ["echo test", "pnpm test; exit 0", "cargo test --no-run", "npx tsc --version", "vitest --passWithNoTests"]) {
-    const engine = new QueryEngine({
+    const engine = QueryEngine.forTesting({
       provider: scriptedProvider([
         { tool: { name: "Edit", input: { file_path: "a.ts" } } },
         { tool: { name: "Bash", input: { command, description: "Pretend to test" } } },
@@ -143,7 +143,7 @@ test("a later failed manual check invalidates an earlier pass", async () => {
       return { output: { command: input.command, exitCode: failed ? 1 : 0, timedOut: false, stdout: "", stderr: failed ? "red" : "" } };
     },
   };
-  const engine = new QueryEngine({
+  const engine = QueryEngine.forTesting({
     provider: scriptedProvider([
       { tool: { name: "Edit", input: { file_path: "a.ts" } } },
       { tool: { name: "Bash", input: { command: "pnpm test -- first", description: "First run" } } },
@@ -172,7 +172,7 @@ test("a narrower manual pass cannot clear a broader failed command", async () =>
       return { output: { command: input.command, exitCode: broadFailure ? 1 : 0, timedOut: false, stdout: "", stderr: broadFailure ? "integration red" : "" } };
     },
   };
-  const engine = new QueryEngine({
+  const engine = QueryEngine.forTesting({
     provider: scriptedProvider([
       { tool: { name: "Edit", input: { file_path: "a.ts" } } },
       { tool: { name: "Bash", input: { command: "pnpm test", description: "Broad suite" } } },
@@ -194,7 +194,7 @@ test("a narrower manual pass cannot clear a broader failed command", async () =>
 
 test("manual proof cannot reuse no-checks evidence from an older mutation generation", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "ares-proof-generation-"));
-  const engine = new QueryEngine({
+  const engine = QueryEngine.forTesting({
     provider: scriptedProvider([
       { tool: { name: "Edit", input: { file_path: "a.unknown" } } },
       { tool: { name: "Bash", input: { command: "pnpm test", description: "Run tests" } } },
@@ -226,7 +226,7 @@ test("manual proof cannot reuse no-checks evidence from an older mutation genera
 
 test("persisted proof cannot certify a brand-new mutation in the resumed turn", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "ares-proof-resume-edit-"));
-  const engine = new QueryEngine({
+  const engine = QueryEngine.forTesting({
     provider: scriptedProvider([
       { tool: { name: "Edit", input: { file_path: "fresh.ts" } } },
       { text: "done" },
@@ -259,7 +259,7 @@ test("persisted proof cannot certify a brand-new mutation in the resumed turn", 
 
 test("syntax-only automatic evidence is not behavioral completion", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "ares-proof-strength-"));
-  const engine = new QueryEngine({
+  const engine = QueryEngine.forTesting({
     provider: scriptedProvider([{ text: "done" }, { text: "still done" }]),
     model: "scripted",
     systemPrompt: "code",
@@ -291,7 +291,7 @@ test("a broader manual failure after automatic green invalidates completion", as
     schema: { name: "Bash", description: "shell", inputJsonSchema: { type: "object" }, safety: "workspace-write", concurrency: "exclusive" },
     async call(input) { return { output: { command: input.command, exitCode: 1, timedOut: false, stdout: "", stderr: "integration red" } }; },
   };
-  const engine = new QueryEngine({
+  const engine = QueryEngine.forTesting({
     provider: scriptedProvider([
       { tool: { name: "Bash", input: { command: "pnpm test", description: "Run broader suite" } } },
       { text: "done" },
@@ -344,7 +344,7 @@ test("a later narrow automatic pass cannot erase an unresolved broader manual fa
       return { output: "automatic syntax check passed" };
     },
   };
-  const engine = new QueryEngine({
+  const engine = QueryEngine.forTesting({
     provider: scriptedProvider([
       { tool: { name: "Bash", input: { command: "pnpm test", description: "Run broader suite" } } },
       { tool: { name: "Read", input: { file_path: "automatic-result" } } },
@@ -390,6 +390,84 @@ test("Session derives touched files and diffs for shell-mediated edits", async (
   const diff = events.find((event) => event.type === "workspace_diff");
   assert.ok(diff.files.includes("created.txt"));
   assert.match(diff.diff, /\+created/);
+  assert.equal(events.findLast((event) => event.type === "turn_end").workStatus, "unverified");
+  await rm(root, { recursive: true, force: true });
+});
+
+test("Session preserves mutation evidence when a shell writes then exits non-zero", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "ares-failed-shell-diff-"));
+  const target = path.join(root, "created-before-failure.txt");
+  const session = new Session({
+    provider: scriptedProvider([
+      { tool: { name: "Bash", input: { command: "echo created > created-before-failure.txt; exit 7", description: "Create then fail" } } },
+      { text: "I saw the failure and retained its diagnostics." },
+    ]),
+    model: "scripted",
+    systemPrompt: "code",
+    workspace: root,
+    tools: [{
+      schema: { name: "Bash", description: "shell", inputJsonSchema: { type: "object" }, safety: "workspace-write", concurrency: "exclusive" },
+      async call() {
+        await writeFile(target, "created before failure\n");
+        return {
+          output: {
+            command: "echo created > created-before-failure.txt; exit 7",
+            exitCode: 7,
+            timedOut: false,
+            stdout: "partial stdout",
+            stderr: "command failed after write",
+          },
+          failure: "Bash exited with code 7",
+        };
+      },
+    }],
+  });
+
+  const events = [];
+  for await (const event of session.send("create it even if the command fails")) events.push(event);
+
+  const failed = events.find((event) => event.type === "tool_error");
+  assert.equal(failed.error, "Bash exited with code 7");
+  assert.equal(failed.output.exitCode, 7);
+  assert.ok(failed.touchedFiles.includes(target), JSON.stringify(failed));
+  assert.ok(!events.some((event) => event.type === "tool_end"));
+  const diff = events.find((event) => event.type === "workspace_diff");
+  assert.ok(diff.files.includes("created-before-failure.txt"));
+  assert.match(diff.diff, /\+created before failure/);
+  assert.equal(events.findLast((event) => event.type === "turn_end").workStatus, "unverified");
+  await rm(root, { recursive: true, force: true });
+});
+
+test("Session preserves mutation evidence when a shell writes then throws", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "ares-thrown-shell-diff-"));
+  const target = path.join(root, "created-before-throw.txt");
+  const session = new Session({
+    provider: scriptedProvider([
+      { tool: { name: "Bash", input: { command: "node generator.mjs", description: "Generate then throw" } } },
+      { text: "I retained the ambiguous mutation evidence." },
+    ]),
+    model: "scripted",
+    systemPrompt: "code",
+    workspace: root,
+    tools: [{
+      schema: { name: "Bash", description: "shell", inputJsonSchema: { type: "object" }, safety: "workspace-write", concurrency: "exclusive" },
+      async call() {
+        await writeFile(target, "created before throw\n");
+        throw new Error("shell transport failed after process effects");
+      },
+    }],
+  });
+
+  const events = [];
+  for await (const event of session.send("run the generator")) events.push(event);
+
+  const failed = events.find((event) => event.type === "tool_error");
+  assert.match(failed.error, /transport failed/);
+  assert.equal(failed.output, undefined);
+  assert.ok(failed.touchedFiles.includes(target), JSON.stringify(failed));
+  const diff = events.find((event) => event.type === "workspace_diff");
+  assert.ok(diff.files.includes("created-before-throw.txt"));
+  assert.match(diff.diff, /\+created before throw/);
   assert.equal(events.findLast((event) => event.type === "turn_end").workStatus, "unverified");
   await rm(root, { recursive: true, force: true });
 });
@@ -652,6 +730,60 @@ test("coding journal persists objective, todos, touched files, and check evidenc
   await rm(root, { recursive: true, force: true });
 });
 
+test("coding journal retains mutation debt from a completed tool_error", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "ares-journal-failed-mutation-"));
+  const touched = path.join(root, "src", "generated.ts");
+  const journal = await CodingJournal.open({ workspace: root, sessionId: "sess_failed_mutation" });
+  journal.beginTurn("Generate the module and verify it");
+  journal.recordTurnEvent({
+    type: "tool_start",
+    id: "shell-failed-after-write",
+    name: "Bash",
+    input: { command: "generate; exit 7" },
+    activityDescription: "generate then fail",
+  });
+  journal.recordTurnEvent({
+    type: "tool_error",
+    id: "shell-failed-after-write",
+    error: "Bash exited with code 7",
+    output: { exitCode: 7, stdout: "generated", stderr: "failed" },
+    touchedFiles: [touched],
+    durationMs: 1,
+  });
+  await journal.finishTurn("completed");
+
+  const reopened = await CodingJournal.open({ workspace: root, sessionId: "sess_failed_mutation" });
+  assert.deepEqual(reopened.snapshot().touchedFiles, ["src/generated.ts"]);
+  assert.equal(reopened.snapshot().failures.at(-1).tool, "Bash");
+  reopened.beginTurn("continue fixing it");
+  assert.equal(reopened.verificationRequiredForCurrentTurn(), true);
+  assert.equal(reopened.persistedVerificationDebtForCurrentTurn(), true);
+  await rm(root, { recursive: true, force: true });
+});
+
+test("coding journal persists a durable mid-turn steering input as a constraint", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "ares-journal-steer-"));
+  const journal = await CodingJournal.open({ workspace: root, sessionId: "sess_steer" });
+  journal.beginTurn("Refactor the parser without changing its public API");
+  journal.recordTurnEvent({
+    type: "input_admitted",
+    inputId: "steer_keep_types",
+    sessionId: "sess_steer",
+    delivery: "steer",
+    userMessage: {
+      id: "steer_message",
+      role: "user",
+      content: [{ type: "text", text: "Keep the exported types source-compatible." }],
+      createdAt: new Date().toISOString(),
+    },
+  });
+  await journal.finishTurn("completed");
+
+  const reopened = await CodingJournal.open({ workspace: root, sessionId: "sess_steer" });
+  assert.deepEqual(reopened.snapshot().steering, ["Keep the exported types source-compatible."]);
+  await rm(root, { recursive: true, force: true });
+});
+
 test("coding journal promotes the original natural-language request when edits reveal coding intent", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "ares-journal-intent-"));
   const journal = await CodingJournal.open({ workspace: root, sessionId: "sess_intent" });
@@ -720,7 +852,7 @@ test("truncated restart scope cannot be certified by tail-only automatic checks"
     latestRunStrength: "behavioral",
     latestLabels: ["tail-only"],
   });
-  const engine = new QueryEngine({
+  const engine = QueryEngine.forTesting({
     provider: scriptedProvider([{ text: "done" }, { text: "still done" }]),
     model: "scripted",
     systemPrompt: "code",
@@ -736,7 +868,7 @@ test("truncated restart scope cannot be certified by tail-only automatic checks"
   const events = await collect(engine);
   assert.equal(events.findLast((event) => event.type === "turn_end").workStatus, "unverified");
 
-  const broad = new QueryEngine({
+  const broad = QueryEngine.forTesting({
     provider: scriptedProvider([
       { tool: { name: "Bash", input: { command: "pnpm test", description: "Run broad suite" } } },
       { text: "verified" },

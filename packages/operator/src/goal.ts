@@ -97,6 +97,7 @@ export function applyVerdict(goal: Goal, verdict: StepVerdict, now = new Date(),
     moved: verdict.moved,
     goalMet: verdict.goalMet,
     unverified: verdict.unverified || undefined,
+    workStatus: verdict.workStatus,
     evidence: verdict.evidence?.trim() || undefined,
     prediction: verdict.prediction,
   };

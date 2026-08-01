@@ -194,6 +194,10 @@ function forgeFrameUrl(url: string, native: boolean, revision: number): string {
  * packages/agent/src/roster.ts so HELM → Agents is reviewable in `pnpm dev`
  * instead of showing a permanently empty gallery. Same intent as demoSession.
  * The installed app always overwrites this on its first roster_list.
+ *
+ * Keep `autonomy` in step with the real built-ins — they are all "suggest", and
+ * a preview that shows "Steps in" would have a reviewer signing off on exactly
+ * the behaviour that was removed.
  */
 function demoRoster(): PersonaVm[] {
   const make = (
@@ -216,16 +220,16 @@ ${description}`,
   });
   return [
     make("aegis", "Aegis", "Adversarial review. Tries to break the work — security, edge cases, and the last 20% nobody checks.",
-      "Aegis. I'm here to break it, not bless it. What am I attacking?", "shield", "ember", "auto",
+      "Aegis. I'm here to break it, not bless it. What am I attacking?", "shield", "ember", "suggest",
       ["review", "audit", "security", "edge case", "harden"], ["Read", "Glob", "Grep", "Bash"]),
     make("forge", "Forge", "Implementation. Writes and ships code, verifies against the real thing, refuses to claim done without proof.",
-      "Forge here. Point me at it — I build, I run it, and I tell you what I actually saw.", "forge", "ember", "auto",
+      "Forge here. Point me at it — I build, I run it, and I tell you what I actually saw.", "forge", "ember", "suggest",
       ["implement", "build", "refactor", "fix", "wire up"], []),
     make("scribe", "Scribe", "Writing and explanation. Docs, changelogs, commit messages, and turning tangled work into plain language.",
-      "Scribe. Tell me what needs saying and who's reading it.", "scroll", "ivory", "auto",
+      "Scribe. Tell me what needs saying and who's reading it.", "scroll", "ivory", "suggest",
       ["document", "write up", "explain", "changelog", "commit message"], ["Read", "Grep", "Write", "Edit"]),
     make("vitruvius", "Vitruvius", "Research and architecture. Reads widely, cites everything, argues trade-offs before writing code.",
-      "Research hat on. I read before I opine and I cite what I find — what are we digging into?", "search", "mint", "auto",
+      "Research hat on. I read before I opine and I cite what I find — what are we digging into?", "search", "mint", "suggest",
       ["research", "investigate", "look into", "compare", "trade-off", "architecture"], ["Read", "Grep", "WebSearch", "WebFetch"]),
   ];
 }
@@ -424,6 +428,9 @@ function App() {
   const [roster, setRoster] = useState<PersonaVm[]>(() => (native ? [] : demoRoster()));
   const [cognitive, setCognitive] = useState<CognitiveStateVm | null>(() => (native ? null : demoCognitive()));
   const [activePersona, setActivePersona] = useState<PersonaVm | null>(null);
+  // Which HELM tab is showing. Lifted out of HelmView so the status bar's
+  // persona chip can jump straight to the gallery.
+  const [helmTab, setHelmTab] = useState<"overview" | "agents" | "mind">("overview");
   const [personaSuggestion, setPersonaSuggestion] = useState<{ persona: PersonaVm; matched: string[] } | null>(null);
   const [usageStats, setUsageStats] = useState<UsageStats | null>(null);
   const [consciousness, setConsciousness] = useState<ConsciousnessVm>({
@@ -538,7 +545,7 @@ function App() {
   const primarySessionRef = useRef(sessions[0]?.id ?? "");
   const prefsRef = useRef(prefs);
   const restartAttempts = useRef(0);
-  const pendingGoal = useRef<{ goal: string; sessionId: string; voice?: boolean } | null>(null);
+  const pendingGoal = useRef<{ goal: string; sessionId: string; voice?: boolean; inputId: string } | null>(null);
   const stderrTail = useRef<string[]>([]);
   prefsRef.current = prefs;
 
@@ -1077,7 +1084,7 @@ function App() {
     const queued = pendingGoal.current;
     if (queued) {
       pendingGoal.current = null;
-      void invoke("ares_send", { goal: queued.goal, sessionId: queued.sessionId, voice: queued.voice ?? false }).catch((err) => {
+      void invoke("ares_send", { goal: queued.goal, sessionId: queued.sessionId, voice: queued.voice ?? false, inputId: queued.inputId }).catch((err) => {
         applyTo(queued.sessionId, (s) => ({ ...foldEvent(s, { type: "desktop_error", text: String(err) }), busy: false }));
       });
     }
@@ -1298,7 +1305,22 @@ function App() {
             matched: Array.isArray(e.matched) ? (e.matched as string[]) : [],
           });
           return true;
-        case "persona_written":
+        case "persona_written": {
+          // Saving happens from HELM, where transcript notices are invisible —
+          // so both outcomes get a toast, not just the failures.
+          const pw = e as { ok?: boolean; error?: string; persona?: PersonaVm; name?: string };
+          const ok = pw.ok !== false;
+          setSkillToast({
+            name: "Roster",
+            text: ok
+              ? `Saved ${pw.persona?.label ?? pw.name ?? "persona"} — it's on the roster and delegable now.`
+              : `Couldn't save ${pw.name || "that persona"}: ${(pw.error ?? "unknown error").slice(0, 160)}`,
+            ok,
+          });
+          window.setTimeout(() => setSkillToast(null), ok ? 3200 : 6000);
+          daemonCmd({ type: "roster_list", sessionId: activeRef.current });
+          return true;
+        }
         case "persona_deleted":
           daemonCmd({ type: "roster_list", sessionId: activeRef.current });
           return true;
@@ -1367,7 +1389,17 @@ function App() {
         }
         case "bug_report_result": {
           setReportBusy(false);
-          pushGatewayToast(e.ok ? "🐛 Bug report sent — thank you, this helps improve Ares." : `Report failed: ${e.error ? stringify(e.error) : "unknown"}`);
+          // A trimmed upload says so. A partial transcript that reports itself
+          // as complete sends whoever reads it looking for events that were
+          // never sent.
+          const dropped = (e as { droppedEvents?: number }).droppedEvents ?? 0;
+          pushGatewayToast(
+            e.ok
+              ? dropped > 0
+                ? `🐛 Bug report sent — thank you. The session was too big for one upload, so the ${dropped} oldest events were left out; everything recent went through.`
+                : "🐛 Bug report sent — thank you, this helps improve Ares."
+              : `Report failed: ${e.error ? stringify(e.error) : "unknown"}`,
+          );
           if (e.ok) setReportOpen(false);
           return true;
         }
@@ -1733,6 +1765,7 @@ function App() {
     const images = (opts?.images ?? []).filter((u) => u.startsWith("data:image/"));
     const imagePart = images.length ? "\n" + images.join("\n") : "";
     const goal = ultraDirective + trimmed + imagePart;
+    const inputId = `input_${crypto.randomUUID()}`;
     applyTo(sid, (s) => ({
       ...s,
       title: s.title === "New session" ? compact(trimmed || "image", 42) : s.title,
@@ -1741,13 +1774,13 @@ function App() {
     }));
     if (native) {
       if (daemon !== "running") {
-        pendingGoal.current = { goal, sessionId: sid, voice: opts?.voice === true };
+        pendingGoal.current = { goal, sessionId: sid, voice: opts?.voice === true, inputId };
         applyTo(sid, (s) => foldEvent(s, { type: "system_reminder_injected", source: "verifier", text: "Garrison is down — restarting, your message is queued." }));
         restartDaemon();
         return;
       }
-      void invoke("ares_send", { goal, sessionId: sid, voice: opts?.voice === true }).catch((err) => {
-        pendingGoal.current = { goal, sessionId: sid, voice: opts?.voice === true };
+      void invoke("ares_send", { goal, sessionId: sid, voice: opts?.voice === true, inputId }).catch((err) => {
+        pendingGoal.current = { goal, sessionId: sid, voice: opts?.voice === true, inputId };
         applyTo(sid, (s) => ({ ...foldEvent(s, { type: "desktop_error", text: `${String(err)} — restarting the Garrison, message queued.` }), busy: true }));
         restartDaemon();
       });
@@ -1826,7 +1859,8 @@ function App() {
       steerQueued: (s.steerQueued ?? 0) + 1,
     }));
     const steerText = trimmed + (imgs.length ? "\n" + imgs.join("\n") : "");
-    if (native) void invoke("ares_daemon_command", { command: { type: "steer", text: steerText, sessionId: sid } }).catch(() => null);
+    const inputId = `steer_${crypto.randomUUID()}`;
+    if (native) void invoke("ares_daemon_command", { command: { type: "steer", text: steerText, sessionId: sid, inputId } }).catch(() => null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [native, applyTo]);
 
@@ -2879,6 +2913,8 @@ function App() {
             roster={roster}
             activePersona={activePersona}
             cognitive={cognitive}
+            tab={helmTab}
+            onTab={setHelmTab}
             onOpenSession={openSession}
             onToggleAutotick={() => daemonCmd({ type: "operator_autotick", enabled: !(opStatus?.autotick ?? true) })}
             onRefresh={() => { daemonCmd({ type: "operator_status" }); daemonCmd({ type: "usage_stats", days: 14 }); daemonCmd({ type: "roster_list", sessionId: activeId }); }}
@@ -3011,6 +3047,20 @@ function App() {
             <button className="statusSeg" data-seg="garrison" onClick={() => setGarrisonOpen(true)} title="Garrison panel — status, log, restart">
               <i className="dot" data-state={daemon} /><b>garrison</b><span>{daemon}</span>
             </button>
+            {/* WHO is answering. The transcript chip scrolls away with the
+                conversation, so after two replies there was nothing on screen
+                saying a persona was worn at all — the owner could only find out
+                by opening HELM. This never scrolls, and it opens the gallery. */}
+            {activePersona ? (
+              <button
+                className="statusSeg personaSeg"
+                data-seg="persona"
+                onClick={() => { setHelmTab("agents"); setView("helm"); }}
+                title={`Ares is wearing ${activePersona.label} — ${activePersona.description}\n\nClick to open the roster and take it off.`}
+              >
+                <b>persona</b><span>{activePersona.label}</span>
+              </button>
+            ) : null}
             <button
               className="statusSeg"
               data-seg="model"
@@ -4517,6 +4567,8 @@ function HelmModern({
   roster,
   activePersona,
   cognitive,
+  tab,
+  onTab,
   onOpenSession,
   onToggleAutotick,
   onRefresh,
@@ -4532,6 +4584,11 @@ function HelmModern({
   roster: PersonaVm[];
   activePersona: PersonaVm | null;
   cognitive: CognitiveStateVm | null;
+  /** Controlled by the app so the status bar's persona chip can deep-link
+   *  straight to Agents — a "you're wearing Forge" indicator you can't click
+   *  through to is only half an answer. */
+  tab: "overview" | "agents" | "mind";
+  onTab: (tab: "overview" | "agents" | "mind") => void;
   onOpenSession: (id: string) => void;
   onToggleAutotick: () => void;
   onRefresh: () => void;
@@ -4539,7 +4596,7 @@ function HelmModern({
   onDeletePersona: (name: string) => void;
   onWritePersona: (draft: PersonaDraft) => void;
 }) {
-  const [tab, setTab] = useState<"overview" | "agents" | "mind">("overview");
+  const setTab = onTab;
   // Anything the owner would want to notice without going looking. Drives the
   // dot on the Mind tab — a red check or a dead subsystem should not require
   // opening the panel to discover.
@@ -4899,7 +4956,13 @@ function HelmMind({ cognitive }: { cognitive: CognitiveStateVm | null }) {
   );
 }
 
-/** Fields the owner can author from HELM → Agents. Mirrors persona_write. */
+/** Fields the owner can author from HELM → Agents. Mirrors persona_write.
+ *
+ *  `tools`/`model`/`effort`/`maxTurns` are NOT editable in the form, but they
+ *  ride along anyway: persona_write is a whole-file overwrite, so omitting them
+ *  when saving an edit silently widened Aegis's delegated belt from six tools to
+ *  the full set and dropped every model preference. A form that can't show a
+ *  field must still carry it. */
 interface PersonaDraft {
   name: string;
   label: string;
@@ -4910,6 +4973,10 @@ interface PersonaDraft {
   glyph: string;
   tone: "ember" | "mint" | "ivory";
   autonomy: "auto" | "suggest" | "manual";
+  tools?: string[];
+  model?: string;
+  effort?: string;
+  maxTurns?: number;
 }
 
 const AUTONOMY_COPY: Record<PersonaVm["autonomy"], { label: string; hint: string }> = {
@@ -5182,7 +5249,11 @@ function PersonaComposer({
           disabled={!ready}
           onClick={() =>
             onWrite({
-              name: label.trim(),
+              // Editing keeps the ORIGINAL slug: the name is the file path and
+              // the delegation key, so deriving it from a retyped label meant
+              // renaming "Forge" to "Forge v2" quietly forked a second persona
+              // and left the first one untouched.
+              name: editing?.name ?? label.trim(),
               label: label.trim(),
               description: description.trim(),
               greeting: greeting.trim(),
@@ -5191,6 +5262,11 @@ function PersonaComposer({
               glyph,
               tone,
               autonomy,
+              // Carried, not edited — see PersonaDraft.
+              tools: editing?.tools,
+              model: editing?.model,
+              effort: editing?.effort,
+              maxTurns: editing?.maxTurns,
             })
           }
         >
@@ -5211,6 +5287,8 @@ function HelmView({
   roster,
   activePersona,
   cognitive,
+  tab,
+  onTab,
   onOpenSession,
   onToggleAutotick,
   onRefresh,
@@ -5227,6 +5305,8 @@ function HelmView({
   roster: PersonaVm[];
   activePersona: PersonaVm | null;
   cognitive: CognitiveStateVm | null;
+  tab: "overview" | "agents" | "mind";
+  onTab: (tab: "overview" | "agents" | "mind") => void;
   onOpenSession: (id: string) => void;
   onToggleAutotick: () => void;
   onRefresh: () => void;
@@ -5298,6 +5378,8 @@ function HelmView({
         roster={roster}
         activePersona={activePersona}
         cognitive={cognitive}
+        tab={tab}
+        onTab={onTab}
         onOpenSession={onOpenSession}
         onToggleAutotick={onToggleAutotick}
         onRefresh={onRefresh}

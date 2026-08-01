@@ -49,15 +49,18 @@ export async function safeOverwrite(opts: SafeOverwriteOptions): Promise<SafeOve
   });
 
   if (original !== null) {
-    const verdict = assessShrink(original, opts.content);
-    if (verdict.catastrophic && !opts.allowFullReplace) {
-      throw new Error(shrinkRefusal(opts.label, opts.absPath, verdict));
-    }
+    assertSafeReplacement({
+      original,
+      next: opts.content,
+      label: opts.label,
+      absPath: opts.absPath,
+      allowFullReplace: opts.allowFullReplace,
+    });
   }
 
   let backupPath: string | undefined;
   if (original !== null) {
-    backupPath = await backupFile(opts.workspace, opts.absPath, original, opts.label);
+    backupPath = await createOverwriteBackup(opts.workspace, opts.absPath, original, opts.label);
   }
 
   await fs.mkdir(path.dirname(opts.absPath), { recursive: true });
@@ -80,6 +83,25 @@ export async function safeOverwrite(opts: SafeOverwriteOptions): Promise<SafeOve
   }
 
   return { bytesWritten: stat.size, created: original === null, backupPath };
+}
+
+export interface SafeReplacementCheck {
+  original: string;
+  next: string;
+  label: string;
+  absPath: string;
+  allowFullReplace?: boolean;
+}
+
+/** Run safeOverwrite's catastrophic-shrink policy without performing I/O.
+ * Transactional writers use this before handing the validated replacement to
+ * WorkspaceMutationService, keeping one policy while avoiding a second write
+ * path. */
+export function assertSafeReplacement(opts: SafeReplacementCheck): void {
+  const verdict = assessShrink(opts.original, opts.next);
+  if (verdict.catastrophic && !opts.allowFullReplace) {
+    throw new Error(shrinkRefusal(opts.label, opts.absPath, verdict));
+  }
 }
 
 export interface ShrinkVerdict {
@@ -132,7 +154,7 @@ function shrinkRefusal(label: string, absPath: string, v: ShrinkVerdict): string
  * to the backup index. Returns the absolute backup path. Backups are kept for
  * out-of-workspace targets too — that's the case the checkpoint system misses.
  */
-async function backupFile(
+export async function createOverwriteBackup(
   workspace: string,
   absPath: string,
   contents: string,

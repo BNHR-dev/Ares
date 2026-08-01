@@ -9,7 +9,7 @@ import { mkdtempSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { Session, chooseCompactionSplit, loadSessionSnapshot } from "../packages/core/dist/index.js";
+import { QueryEngine, Session, chooseCompactionSplit, loadSessionSnapshot, openWorkspaceSessionKernel } from "../packages/core/dist/index.js";
 
 function bigMsg(role, tag, chars = 20_000) {
   return { id: `m_${tag}`, role, content: [{ type: "text", text: "x".repeat(chars) }], createdAt: new Date().toISOString() };
@@ -133,6 +133,58 @@ test("compaction: persisted replay restores the exact compacted transcript", asy
   assert.deepEqual(snapshot.messages, session.engine.history());
 });
 
+test("compaction epoch persists the host's complete context source manifest", async () => {
+  const workspace = mkdtempSync(path.join(os.tmpdir(), "ares-v14-source-manifest-"));
+  const kernel = await openWorkspaceSessionKernel(workspace);
+  let journalVersion = "journal-sha-before";
+  try {
+    const session = new Session({
+      workspace,
+      sessionId: "sess_context_source_manifest",
+      provider: okProvider(),
+      model: "m",
+      systemPrompt: "s",
+      tools: [],
+      initialMessages: Array.from({ length: 8 }, (_, i) => bigMsg(i % 2 ? "assistant" : "user", `manifest_${i}`)),
+      compactionThresholdTokens: 3_000,
+      summarizeSpan: async () => "GOAL: manifest\nDONE: compacted\nSTATE: exact\nOPEN: none",
+      contextSourceVersions: () => ({
+        compiler: "test-context-v1",
+        systemPromptSha256: "system-sha",
+        toolCatalogSha256: "tools-sha",
+        memorySha256: "memory-sha",
+        codingJournalSha256: journalVersion,
+      }),
+      sessionKernel: kernel,
+    });
+    journalVersion = "journal-sha-at-compaction";
+    for await (const _event of session.send("continue")) void _event;
+
+    const epoch = kernel.getLatestContextEpoch(session.meta.id);
+    assert.ok(epoch, "heavy compaction produced a durable epoch");
+    assert.deepEqual(
+      {
+        compiler: epoch.sourceVersions.compiler,
+        systemPromptSha256: epoch.sourceVersions.systemPromptSha256,
+        toolCatalogSha256: epoch.sourceVersions.toolCatalogSha256,
+        memorySha256: epoch.sourceVersions.memorySha256,
+        codingJournalSha256: epoch.sourceVersions.codingJournalSha256,
+      },
+      {
+        compiler: "test-context-v1",
+        systemPromptSha256: "system-sha",
+        toolCatalogSha256: "tools-sha",
+        memorySha256: "memory-sha",
+        codingJournalSha256: "journal-sha-at-compaction",
+      },
+    );
+    assert.equal(epoch.sourceVersions.protocol, 1);
+    assert.equal(epoch.sourceVersions.projection, "ares-message-v1");
+  } finally {
+    kernel.close();
+  }
+});
+
 test("compaction: falls back to the deterministic ledger when the summarizer fails", async () => {
   const session = mkSession({
     opts: {
@@ -167,4 +219,61 @@ test("compaction: does NOT fire below the threshold", async () => {
   const events = [];
   for await (const e of session.send("continue")) events.push(e);
   assert.equal(events.find((e) => e.type === "compaction"), undefined, "no compaction under threshold");
+});
+
+test("compaction: rechecks inside one long tool loop before the next model call", async () => {
+  let calls = 0;
+  const requests = [];
+  const provider = {
+    name: "mock-loop",
+    async *stream(req) {
+      calls++;
+      requests.push(req.messages);
+      if (calls <= 3) {
+        const id = `blob_${calls}`;
+        yield { type: "tool_use_start", id, name: "Blob" };
+        yield { type: "tool_use_input_done", id, input: {} };
+        yield {
+          type: "message_done",
+          message: { id: `a_${calls}`, role: "assistant", content: [{ type: "tool_use", id, name: "Blob", input: {} }], createdAt: new Date().toISOString() },
+          usage: { inputTokens: 0, outputTokens: 0 },
+          stopReason: "tool_use",
+        };
+        return;
+      }
+      yield {
+        type: "message_done",
+        message: { id: "a_done", role: "assistant", content: [{ type: "text", text: "done" }], createdAt: new Date().toISOString() },
+        usage: { inputTokens: 0, outputTokens: 0 },
+        stopReason: "end_turn",
+      };
+    },
+  };
+  const blobTool = {
+    schema: { name: "Blob", description: "large non-rederivable output", inputJsonSchema: { type: "object" }, safety: "read-only", concurrency: "exclusive" },
+    async call() { return { output: "z".repeat(20_000) }; },
+  };
+  const workspace = mkdtempSync(path.join(os.tmpdir(), "ares-v14-loop-"));
+  const engine = QueryEngine.forTesting({
+    workspace,
+    provider,
+    model: "m",
+    systemPrompt: "s",
+    tools: [blobTool],
+    maxTurns: 6,
+    compactionThresholdTokens: 3_000,
+    summarizeSpan: async () => "GOAL: finish loop\nCONSTRAINTS: retain tool facts\nDONE: gathered blobs\nSTATE: continuing\nOPEN: finish",
+  }, "sess_compaction_loop");
+
+  engine.appendUserMessage("gather until done");
+  const events = [];
+  for await (const event of engine.streamTurn()) events.push(event);
+
+  const compactAt = events.findIndex((event) => event.type === "compaction");
+  assert.ok(compactAt >= 0, "heavy compaction fires during the same turn");
+  assert.equal(calls, 4, "the tool loop continued after compaction");
+  assert.ok(
+    requests[3].some((message) => message.content.some((block) => block.type === "system_reminder" && /Compacted memory/.test(block.text))),
+    "the very next provider request receives the compacted anchor",
+  );
 });

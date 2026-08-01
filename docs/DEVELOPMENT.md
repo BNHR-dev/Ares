@@ -52,6 +52,13 @@ Ignored generated output includes package `dist/`, TypeScript build-info files, 
 
 `pnpm clean` removes generated repository outputs, including repo-local `.ares/` session artifacts created by tests or local runs. It intentionally does not delete the durable Ares home because that can contain user memory, permissions, and identity state.
 
+Markdown memory transactions use an adjacent cross-process lease plus exact-byte
+compare-and-swap. `ARES_MEMORY_LOCK_TIMEOUT_MS` controls the bounded wait for a
+live writer (default `10000`, clamped to `100..300000`), and
+`ARES_MEMORY_LOCK_STALE_MS` controls when a dead writer's lease may be reclaimed
+(default `60000`, clamped to `1000..3600000`). A live local PID is never reclaimed
+solely because its lease is old.
+
 ## Verification Policy
 
 For cleanup and package-boundary changes, run:

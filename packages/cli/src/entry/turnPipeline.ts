@@ -453,12 +453,12 @@ export async function finishTurn(
   }
 }
 
-/** Stop process-backed coding helpers when a live session is discarded. */
+/** Release process-local helpers when a live session is discarded. Durable
+ * background supervisors intentionally survive ordinary host/session teardown;
+ * session deletion and evaluation cleanup call killAll explicitly. */
 export async function disposeLiveSession(live: LiveSession): Promise<void> {
-  await Promise.all([
-    live.verifier.cancel().catch(() => undefined),
-    live.shellRegistry.killAll().catch(() => 0),
-  ]);
+  await live.verifier.cancel().catch(() => undefined);
+  live.shellRegistry.detachAll();
   await live.agentRuntime?.sessionEnded().catch(() => undefined);
   live.agentRuntime?.stop();
 }
@@ -637,7 +637,8 @@ Typical flow for engineering work:
 - **ComputerUse** (Windows): control the REAL desktop — mouse, keyboard, screen. Use it for tasks about the user's MACHINE and native apps, not files/code: clicking through a GUI, managing a Chrome extension, operating an app with no API. Doctrine: **screenshot FIRST**, act on what you SEE, then screenshot again to VERIFY. Key rules: (1) Give click/move coordinates in the pixel space of the LAST image you were shown (top-left origin) — they're mapped to the real screen automatically. (2) To OPEN an app or settings page use the \`launch\` action (e.g. \`launch\` text=\`chrome\` key=\`chrome://extensions\`, or text=\`ms-settings:defaultapps\`) — never hunt for the Win key, though \`key\`=\`WIN+R\`/\`WIN+I\` also work. (3) If a target is small or text is hard to read, \`zoom\` into its region for a native-resolution, precisely-clickable view before clicking. (4) Use \`activate\` (text=window title) to focus the right window before typing. Don't act blind — every move is on the user's actual machine, so be deliberate and confirm anything destructive or outward-facing. If it returns COMPUTER_USE_UNAVAILABLE, it's not this platform — do the task another way, don't retry.
 - **RequestUserAction** — when you hit a wall only a human can clear (a 2FA/OTP code, a captcha, confirming a real payment, a login you can't complete), call this with what you finished + what the owner must do + how to resume, then STOP and deliver that as your reply. NEVER fail silently, guess a code, or loop on the wall. This is the difference between "it gave up" and "it handed off cleanly."
 - **Deploy / Stripe / Email** — real-world reach. **Deploy**: publish a built site (Vercel/Netlify/Cloudflare) and return the live URL — build it first, then deploy its output dir. **Stripe**: create a payment link the owner can sell through (use a test key for test mode). **Email**: send progress reports / waitlist confirmations. All three need their key in the environment and ALL confirm with the owner before acting; if a key is missing, say exactly which env var to set rather than pretending you did it.
-- **Bash run_in_background + BashOutput + KillShell**: use for dev servers, watch tasks, and long-running builds.
+- **Bash run_in_background + BashOutput + KillShell**: use for dev servers, watch tasks, and long-running builds. Background shells are durable: keep the returned shell_id, continue useful work, and poll when the output matters; Ares recovers their status/output after host restart.
+- **Task run_in_background + TaskOutput + KillTask**: detach an independent subagent while you continue foreground work. Use it for real parallelism, not as a substitute for owning the main decision. Its jobId/taskId, child context, proof status, and completion survive restart; terminal output is injected once into this session at a safe boundary.
 - **McpListTools/McpCallTool**: use only when the user configured MCP servers in \`.ares/mcp.json\` or \`~/.ares/mcp.json\`.
 - **SkillsList/SkillRead**: use when a reusable local workflow clearly applies.
 - **CodeMode**: use for read-heavy batch repo analysis that would otherwise require many repetitive file/tool calls.
@@ -694,7 +695,7 @@ The user may configure shell hooks (PreToolUse, PostToolUse, SessionStart) in \`
 
 ## Plan mode
 
-If you're in plan mode (current mode: \`${permissionMode}\`; the prompt shows \`[PLAN]\`), all write tools are blocked. Use this turn to inspect, plan, and present the proposed changes. Call **ExitPlanMode** with a markdown plan when ready — the user can then accept or refine.
+If you're in plan mode (current mode: \`${permissionMode}\`; the prompt shows \`[PLAN]\`), user-workspace writes are blocked. Use this turn to inspect and discuss freely. Keep the complete living plan current with **UpdatePlanDraft** after material discoveries or decisions; it is durably revisioned across compaction and restart. When ready, call **ExitPlanMode** without repeating the body to submit those exact draft bytes (or pass a final replacement body) — only explicit user approval restores build authority.
 
 ## Reach — the machine, not just the workspace
 

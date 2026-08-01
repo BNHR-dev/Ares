@@ -12,6 +12,8 @@ export type GoalStatus =
   | "done" // reality-verified as met
   | "abandoned"; // manually stopped
 
+export type OperatorWorkStatus = "verified" | "unverified" | "blocked" | "not_applicable";
+
 /** A durable record of one dispatched step. The stepLog is the resume ledger. */
 export interface GoalStepRecord {
   index: number;
@@ -24,6 +26,8 @@ export interface GoalStepRecord {
    * UNVERIFIED — surfaced so the caller can flag it rather than trust it blindly.
    */
   unverified?: boolean;
+  /** Proof-bearing completion truth from the worker harness. */
+  workStatus?: OperatorWorkStatus;
   evidence?: string;
   /** The Worker's pre-commit prediction — fuels O7 calibration later. */
   prediction?: { outcome: string; p: number };
@@ -84,6 +88,8 @@ export interface StepVerdict {
    * real-but-unverified instead of silently trusting the Worker's say-so.
    */
   unverified?: boolean;
+  /** Proof-bearing completion truth from the worker harness. */
+  workStatus?: OperatorWorkStatus;
   evidence?: string;
   prediction?: { outcome: string; p: number };
 }

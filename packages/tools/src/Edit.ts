@@ -20,8 +20,15 @@
 import { z } from "zod";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { buildTool, contentHash, pathInputProblem, resolveWorkspacePath, toolError, zPath } from "./_shared.js";
+import {
+  type PostMutationFeedback,
+  WorkspaceMutationError,
+  WorkspaceMutationService,
+  workspaceContentHash,
+} from "@ares/core";
+import { buildTool, contentHash, mutationInstructionBlock, mutationWorkspaceForPaths, pathInputProblem, resolveWorkspacePath, toolError, zPath } from "./_shared.js";
 import type { FileReadStamp } from "./_shared.js";
+import { appendMutationFeedback, collectMutationFeedback } from "./postMutationFeedback.js";
 
 // A post-write stamp carries `writtenNotRead` so Read's re-read guard does a
 // real re-read (the model wrote these bytes but never saw the full file). The
@@ -73,6 +80,8 @@ export interface EditOutput {
    *  context, so the model can verify the change landed without a follow-up Read
    *  (which would only re-read the file it just wrote). */
   diff: string;
+  /** Immediate formatter/type diagnostics, attributed to the committed SHA-256. */
+  feedback?: PostMutationFeedback;
 }
 
 export const EditTool = buildTool({
@@ -130,6 +139,8 @@ export const EditTool = buildTool({
     if (!ctx.fileReadStamps.has(filePath)) {
       return { kind: "deny", reason: `Read ${filePath} before editing it.` };
     }
+    const instructionBlock = await mutationInstructionBlock(ctx, [filePath]);
+    if (instructionBlock) return { kind: "deny", reason: instructionBlock };
     return { kind: "allow" };
   },
 
@@ -198,7 +209,20 @@ export const EditTool = buildTool({
       matchedBys.add(result.matchedBy);
     }
 
-    await fs.writeFile(filePath, working, "utf8");
+    let feedback: PostMutationFeedback | undefined;
+    const mutationWorkspace = await mutationWorkspaceForPaths(ctx.workspace, [filePath]);
+    try {
+      const receipt = await new WorkspaceMutationService(mutationWorkspace).apply(
+        [{ kind: "update", path: filePath, expectedHash: workspaceContentHash(content), content: working }],
+        { label: "Edit", transactionId: ctx.mutationTransactionId },
+      );
+      feedback = await collectMutationFeedback(mutationWorkspace, receipt);
+    } catch (error) {
+      if (error instanceof WorkspaceMutationError) {
+        throw toolError(`${error.message} ${error.actionable}`);
+      }
+      throw error;
+    }
     const newStat = await fs.stat(filePath);
     // Post-write readback (cloud-sync folders can report success yet persist
     // an empty/partial file — see safeOverwrite's identical guard).
@@ -231,9 +255,9 @@ export const EditTool = buildTool({
     // instead of issuing a follow-up Read that would only re-read what it wrote.
     const diff = editedExcerpt(content, working);
     return {
-      output: { path: filePath, replacements: totalReplacements, matchedBy, diff },
+      output: { path: filePath, replacements: totalReplacements, matchedBy, diff, feedback },
       touchedFiles: [filePath],
-      display: `Edited ${filePath} (${totalReplacements} replacement${totalReplacements === 1 ? "" : "s"}${across})${note}${diff ? `\n${diff}` : ""}`,
+      display: appendMutationFeedback(`Edited ${filePath} (${totalReplacements} replacement${totalReplacements === 1 ? "" : "s"}${across})${note}${diff ? `\n${diff}` : ""}`, feedback),
     };
   },
 });

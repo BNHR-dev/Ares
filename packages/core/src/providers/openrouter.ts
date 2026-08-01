@@ -18,6 +18,7 @@ import type {
   ContentBlock,
 } from "@ares/protocol";
 import { openAIReasoningEffort, reasoningEnabled } from "@ares/protocol";
+import { narrowToolSchema } from "./toolSchema.js";
 import type { Provider, ProviderRequest } from "../queryEngine.js";
 import { createStallGuard, stallErrorEvent, type StallGuard } from "./stallGuard.js";
 import { parseRetryAfterMs } from "./retryAfter.js";
@@ -346,7 +347,10 @@ function buildChatBody(model: string, req: ProviderRequest, flavor: OpenAIChatFl
       ? {
           tools: req.tools.map((t) => ({
             type: "function",
-            function: { name: t.name, description: t.description, parameters: t.input_schema },
+            // Narrowed, not passed through: OpenRouter fails a request over to
+            // whichever upstream is available, and some of them 422 the whole
+            // tool array on a single anyOf/oneOf union. See toolSchema.ts.
+            function: { name: t.name, description: t.description, parameters: narrowToolSchema(t.input_schema) },
           })),
           tool_choice: req.toolChoice === "any" ? "required" : "auto",
         }

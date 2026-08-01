@@ -1,6 +1,7 @@
 // Extracted from entry.ts — sessionFactory.
 
-import { Session, ContinuousVerifier, HookManager, CodingJournal, loadStartupReminders, loadSessionSnapshot, type EngineTool, sideQuery, collectTrimmedFilePaths } from "@ares/core";
+import { Session, ContinuousVerifier, HookManager, CodingJournal, loadStartupReminders, loadSessionSnapshot, openWorkspaceSessionKernel, type EngineTool, sideQuery, collectTrimmedFilePaths } from "@ares/core";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { TodoStore, ShellRegistry, type FileReadStamp } from "@ares/tools";
 import type { ContentBlock, Message, PermissionPromptDecision, ReasoningLevel } from "@ares/protocol";
@@ -17,6 +18,10 @@ import { ProviderSelection, daemonModelCatalog, providerFamilyForSelection, sele
 import { AresRuntimeState, CliRuntimeContext, ParsedArgs, cliRuntimeContext } from "./runtime.js";
 import { resumeMessageLimit } from "./terminalLines.js";
 import { buildSystemPrompt, loadGitContext, loadLiveMindContext, recallFailureFixFromMemory } from "./turnPipeline.js";
+
+function contextSourceHash(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
 
 export interface ResumedSessionInfo {
   id: string;
@@ -93,7 +98,7 @@ export interface LiveSession {
  * then hand any red verdicts to the engine, which injects them and keeps the
  * turn alive. The model cannot say "done" while its own edits are broken.
  */
-async function confirmTurnEndWith(
+export async function confirmTurnEndWith(
   verifier: ContinuousVerifier,
 ): Promise<Array<{ text: string; source: "verifier" | "hook" }>> {
   // A verdict that's about to land must not be abandoned: 10s was shorter than
@@ -453,7 +458,13 @@ function renderSpanForSummary(messages: readonly Message[]): string {
           if (b.text.trim()) lines.push(`${m.role.toUpperCase()}: ${clip(b.text.trim(), 4000)}`);
           break;
         case "system_reminder":
-          lines.push(`[reminder] ${clip(b.text.trim(), 1500)}`);
+          // A prior compaction recap is the canonical anchor for everything
+          // before it. Clipping that recap during the next compaction causes
+          // generational amnesia: constraints and settled decisions disappear
+          // a little more on every epoch. Carry the complete anchor forward.
+          lines.push(
+            `[reminder] ${b.text.startsWith("Compacted memory —") ? b.text.trim() : clip(b.text.trim(), 1500)}`,
+          );
           break;
         case "tool_use": {
           const input = clip(JSON.stringify(b.input ?? {}), 1500);
@@ -550,6 +561,14 @@ export async function createSessionWithSelection(
     permissionMode: guarded ? "workspace-write" : "bypass",
     permissions: settings.permissions,
   };
+  const sessionKernel = await openWorkspaceSessionKernel(context.workspace);
+  if (resumeSessionId) {
+    const durableSession = sessionKernel.getSession(resumeSessionId);
+    const durablePlan = durableSession ? sessionKernel.getActivePlan(resumeSessionId) : null;
+    if (durableSession?.workflowMode === "plan" || durablePlan?.status === "draft" || durablePlan?.status === "awaiting_approval") {
+      runtime.permissionMode = "plan";
+    }
+  }
   const shellRegistry = new ShellRegistry();
   const todoStore = new TodoStore();
   let codingJournal: CodingJournal | undefined;
@@ -591,6 +610,7 @@ export async function createSessionWithSelection(
     shellRegistry,
     todoStore,
     fileReadStamps,
+    sessionKernel,
   );
   const onHistoryTrimmed = (dropped: readonly Message[]) =>
     invalidateTrimmedReadStamps(fileReadStamps, context.workspace, dropped);
@@ -601,15 +621,29 @@ export async function createSessionWithSelection(
   // Held so a persona swap can recompose the SAME prompt with one section
   // changed, instead of half-rebuilding it and silently dropping the mind or
   // git context.
-  const promptBase = buildSystemPrompt(runtime.permissionMode, context);
   const promptTail = (await loadLiveMindContext(context)) + (await loadGitContext(context));
-  const systemPrompt = agent.composeSystemPrompt(promptBase) + promptTail;
+  const composeCurrentSystemPrompt = () =>
+    agent.composeSystemPrompt(buildSystemPrompt(runtime.permissionMode, context)) + promptTail;
+  runtime.composeChildSystemPrompt = async () =>
+    agent.composeSystemPrompt(buildSystemPrompt(runtime.permissionMode, context)) +
+    (await loadLiveMindContext(context)) +
+    (await loadGitContext(context));
+  const toolCatalogHash = contextSourceHash(JSON.stringify(tools.map((tool) => tool.schema)));
+  const contextSourceVersions = () => ({
+    compiler: "ares-interactive-context-v1",
+    systemPromptSha256: contextSourceHash(composeCurrentSystemPrompt()),
+    personaSha256: contextSourceHash(JSON.stringify(agent.activePersona() ?? null)),
+    toolCatalogSha256: toolCatalogHash,
+    livingMemoryAndGitSha256: contextSourceHash(promptTail),
+    codingJournalSha256: contextSourceHash(JSON.stringify(codingJournal?.snapshot() ?? null)),
+  });
+  const systemPrompt = composeCurrentSystemPrompt();
   // agent.setPersona mutates the slot composeSystemPrompt reads, so this is the
   // whole implementation: set, recompose, swap. Every channel that goes through
   // composeSystemPrompt gets the persona for free.
   const makePersonaSwap = (session: Session) => (persona: PersonaDef | null) => {
     agent.setPersona(persona);
-    session.setSystemPrompt(agent.composeSystemPrompt(promptBase) + promptTail);
+    session.setSystemPrompt(composeCurrentSystemPrompt());
   };
   let sessionRef: Session | undefined;
   const summarizeSpan = makeSpanSummarizer(selection, (usage) =>
@@ -647,10 +681,25 @@ export async function createSessionWithSelection(
       maxOutputTokens: chatMaxOutputTokens(selection),
       contextBudgetTokens: chatContextBudget(selection),
       maxTurns: settings.engine?.maxTurns,
+      fileReadStamps,
       onHistoryTrimmed,
       summarizeSpan,
+      contextSourceVersions,
+      sessionKernel,
     });
     sessionRef = session;
+    shellRegistry.configureDurability({ kernel: sessionKernel, workspace: context.workspace });
+    shellRegistry.registerSession(session.meta.id);
+    runtime.onPermissionModeChanged = async (mode) => {
+      if (mode !== "plan") await session.approvePendingPlan();
+      session.setWorkflowMode(mode === "plan" ? "plan" : "build");
+      session.setSystemPrompt(composeCurrentSystemPrompt());
+    };
+    runtime.onPlanStarted = (reason) => session.beginPlanDraft(reason);
+    runtime.onPlanDraftUpdated = (plan) => session.recordPlanDraft(plan);
+    runtime.currentPlan = () => session.activePlanBody();
+    runtime.onPlanProposed = (plan) => session.recordPlanProposal(plan);
+    runtime.onPlanApproved = (plan) => session.approvePlan(plan);
     codingJournal = await CodingJournal.open({ workspace: context.workspace, sessionId: session.meta.id });
     session.observeEvents((event) => codingJournal?.recordTurnEvent(event));
     const live: LiveSession = {
@@ -709,10 +758,25 @@ export async function createSessionWithSelection(
     maxOutputTokens: chatMaxOutputTokens(selection),
     contextBudgetTokens: chatContextBudget(selection),
     maxTurns: settings.engine?.maxTurns,
+    fileReadStamps,
     onHistoryTrimmed,
     summarizeSpan,
+    contextSourceVersions,
+    sessionKernel,
   });
   sessionRef = session;
+  shellRegistry.configureDurability({ kernel: sessionKernel, workspace: context.workspace });
+  shellRegistry.registerSession(session.meta.id);
+  runtime.onPermissionModeChanged = async (mode) => {
+    if (mode !== "plan") await session.approvePendingPlan();
+    session.setWorkflowMode(mode === "plan" ? "plan" : "build");
+    session.setSystemPrompt(composeCurrentSystemPrompt());
+  };
+  runtime.onPlanStarted = (reason) => session.beginPlanDraft(reason);
+  runtime.onPlanDraftUpdated = (plan) => session.recordPlanDraft(plan);
+  runtime.currentPlan = () => session.activePlanBody();
+  runtime.onPlanProposed = (plan) => session.recordPlanProposal(plan);
+  runtime.onPlanApproved = (plan) => session.approvePlan(plan);
   codingJournal = await CodingJournal.open({ workspace: context.workspace, sessionId: session.meta.id });
   session.observeEvents((event) => codingJournal?.recordTurnEvent(event));
   const live: LiveSession = { session, selection, context, runtime, verifier, hooks, shellRegistry, todoStore, tools, queueSystemReminder, reasoningLevel: resolveReasoningLevel(settings), codingJournal, adoptPersona: makePersonaSwap(session), activePersona: () => agent.activePersona() };

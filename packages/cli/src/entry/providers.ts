@@ -2,8 +2,8 @@
 
 import { MockEchoProvider, OpenAIResponsesProvider, OpenRouterProvider, DeepSeekProvider, AnthropicProvider, DEFAULT_ANTHROPIC_MODEL, OllamaCloudPool, DEFAULT_OLLAMA_SLOTS, OLLAMA_CLOUD_MODELS, fetchOllamaLibraryModels, fetchDeepSeekModels, fetchOpenRouterModels, fetchAnthropicModels, fetchCodexModels, loadAuthToken, MoaProvider, fetchKimiModels, resolveKimiAccessToken, type MoaMember, type Provider } from "@ares/core";
 import path from "node:path";
-import { gzipSync } from "node:zlib";
 import { type SubModelPool } from "@ares/tools";
+import { buildReportBody } from "./daemon/report.js";
 import { loadUiSettings, type UiSettings } from "../uiSettings.js";
 
 // Ares talks to the LOCAL Ollama daemon (native /api/chat) by default — it
@@ -244,12 +244,15 @@ export async function postAresGatewayReport(
   token: string | undefined,
   payload: Record<string, unknown>,
   fetchImpl: typeof fetch = fetch,
-): Promise<{ ok: true; id: string } | { ok: false; error: string }> {
+): Promise<{ ok: true; id: string; droppedEvents: number } | { ok: false; error: string }> {
   if (!token) return { ok: false, error: "connect your Ares account first (doingteam.com → Account)" };
   // Coding transcripts run to tens of MB — far past the platform's ~4.5MB
-  // request-body limit ("Request Entity Too Large"). gzip shrinks text ~10x so
-  // it fits; the gateway inflates it (x-ares-encoding: gzip).
-  const gz = gzipSync(Buffer.from(JSON.stringify(payload), "utf8"));
+  // request-body limit ("Request Entity Too Large"). gzip usually gets them
+  // under it, and the gateway inflates them (x-ares-encoding: gzip) — but
+  // "usually" was the bug. buildReportBody measures the COMPRESSED body and
+  // sheds old events until it genuinely fits, so a session big enough to be
+  // worth reporting can still be reported.
+  const { body, droppedEvents } = buildReportBody(payload);
   const res = await fetchImpl(`${base}/api/gateway/v1/report`, {
     method: "POST",
     headers: {
@@ -258,7 +261,9 @@ export async function postAresGatewayReport(
       Authorization: `Bearer ${token}`,
       Accept: "application/json",
     },
-    body: gz,
+    // Copied into a plain Uint8Array: fetch's BodyInit does not accept the
+    // ArrayBufferLike-generic view that zlib hands back.
+    body: new Uint8Array(body),
   }).catch(() => null);
   if (!res) return { ok: false, error: "couldn't reach the Ares gateway" };
   const data = (await res.json().catch(() => ({}))) as { id?: string; error?: unknown };
@@ -267,9 +272,12 @@ export async function postAresGatewayReport(
     // {error:{message}} — unwrap either into a readable line for the toast.
     const e = data.error;
     const msg = typeof e === "string" ? e : (e as { message?: string } | undefined)?.message;
+    if (res.status === 413) {
+      return { ok: false, error: "the gateway rejected this transcript as too large even after trimming — please tell the owner, this shouldn't happen" };
+    }
     return { ok: false, error: msg || `gateway returned ${res.status}` };
   }
-  return { ok: true, id: String(data.id ?? "") };
+  return { ok: true, id: String(data.id ?? ""), droppedEvents };
 }
 
 export function defaultTerminalModel(provider: string, settings: UiSettings): string {

@@ -32,6 +32,7 @@ import { parseRetryAfterMs } from "./retryAfter.js";
 import { buildPromptCacheKey } from "../promptCache.js";
 import { createStallGuard, stallErrorEvent, type StallGuard } from "./stallGuard.js";
 import { coerceToolArgs, sanitizeToolPairs, TOOL_ARGS_ERROR_KEY } from "./_toolPairs.js";
+import { narrowToolSchema } from "./toolSchema.js";
 
 const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
 
@@ -406,7 +407,8 @@ function buildRequestBody(req: ProviderRequest): Record<string, unknown> {
       type: "function",
       name: t.name,
       description: t.description,
-      parameters: t.input_schema,
+      // Narrowed for the OpenAI-shaped wire — see toolSchema.ts.
+      parameters: narrowToolSchema(t.input_schema),
     })),
     ...(req.tools.length > 0 ? { tool_choice: req.toolChoice === "any" ? "required" : "auto" } : {}),
     stream: true,

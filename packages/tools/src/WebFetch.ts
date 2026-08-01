@@ -173,6 +173,10 @@ export function makeWebFetchTool(summarizer?: Summarizer, jsRenderer: JsRenderer
     description:
       "Fetch a URL and return its text content. Pass a `prompt` to have the page summarized via the cheap SUMMARIZE slot first (recommended — keeps your context lean). Use for: looking up current docs, reading specific pages the user pointed at, fact-checking framework APIs. HTTPS is enforced; HTTP is upgraded.",
     safety: "external-state",
+    // HTTP GET only. Static safety remains conservative for catalogs compiled
+    // without input classification; the shared engine classifier admits this
+    // inspection call during plan mode and records it as read-only.
+    dynamicSafety: () => "read-only",
     concurrency: "parallel-safe",
     inputZod: inputSchema,
     activityDescription: (i) => `Fetching ${shortUrl(i.url)}`,

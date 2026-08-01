@@ -32,6 +32,7 @@ export {
   type SessionFactoryRequest,
   type SessionFactoryResult,
   type SessionSubscriber,
+  type SessionSendOptions,
   type RehydratedSession,
 } from "./sessions.js";
 

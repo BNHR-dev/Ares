@@ -463,7 +463,12 @@ export function LivingSurface({ sessionId }: { sessionId: string }) {
     setBusy(true);
     setActivity(origin === "surface" ? "answering inside the surface" : "opening a new possibility");
     try {
-      await invoke("ares_send", { goal, sessionId, voice: false });
+      await invoke("ares_send", {
+        goal,
+        sessionId,
+        voice: false,
+        inputId: `input_${crypto.randomUUID()}`,
+      });
     } catch (error) {
       busyRef.current = false;
       setBusy(false);

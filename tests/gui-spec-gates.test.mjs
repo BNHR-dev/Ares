@@ -60,7 +60,7 @@ async function collect(engine) {
 }
 
 function makeEngine(provider, tools, extraCfg = {}) {
-  const engine = new QueryEngine(
+  const engine = QueryEngine.forTesting(
     { provider, model: "test", systemPrompt: "t", tools, workspace: "D:\\Ares", requireVerificationEvidence: true, ...extraCfg },
     "sess_gui",
   );

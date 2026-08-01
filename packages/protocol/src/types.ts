@@ -124,11 +124,33 @@ export type StopReason =
 
 export type TurnEvent =
   | StreamEvent
+  | {
+      /**
+       * Durable admission record written before provider, recall, or tool work.
+       * `inputId` is an idempotency key: reconnecting clients may safely submit
+       * the same input again without creating a second logical request.
+       */
+      type: "input_admitted";
+      inputId: string;
+      sessionId: string;
+      delivery: "queue" | "steer";
+      userMessage: Message;
+    }
   | { type: "turn_start"; turnId: string; sessionId: string; userMessage: Message }
   | { type: "tool_start"; id: string; name: string; input: unknown; providerHint?: ProviderHint; activityDescription: string }
   | { type: "tool_progress"; id: string; data: unknown }
   | { type: "tool_end"; id: string; output: unknown; touchedFiles?: string[]; durationMs: number; display?: string }
-  | { type: "tool_error"; id: string; error: string; durationMs: number }
+  | {
+      type: "tool_error";
+      id: string;
+      error: string;
+      durationMs: number;
+      /** Completed failure diagnostics. Present for declared failures such as
+       * non-zero/timeout shell results; absent when the tool threw. */
+      output?: unknown;
+      /** Files touched before the completed failure was reported. */
+      touchedFiles?: string[];
+    }
   | { type: "permission_request"; id: string; toolName: string; input: unknown; reason: string; suggestion?: PermissionPromptSuggestion }
   | { type: "permission_response"; id: string; decision: PermissionPromptDecision }
   | { type: "verify_scheduled"; files: string[] }
@@ -154,7 +176,11 @@ export type TurnEvent =
       summarizedMessages: number;
       tokensBefore: number;
       tokensAfter: number;
-      method: "summary" | "ledger";
+      /** `micro` preserves every message while replacing only old,
+       * re-derivable tool-result bodies. It is still a durable projection
+       * boundary: restart must hydrate these exact bytes instead of rebuilding
+       * a different context window from the unpruned source messages. */
+      method: "summary" | "ledger" | "micro";
       /** Exact post-compaction history so restart/resume preserves the same memory. */
       messages?: Message[];
     }

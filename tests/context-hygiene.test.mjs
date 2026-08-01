@@ -61,7 +61,9 @@ test("desktop transport keeps voice instructions out of the user goal", async ()
   const daemon = await readFile(new URL("../packages/cli/src/entry/daemon.ts", import.meta.url), "utf8");
   assert.doesNotMatch(app, /const voiceDirective/);
   assert.match(app, /invoke\("ares_send", \{ goal, sessionId: sid, voice:/);
-  assert.match(daemon, /voiceMode\) turnContent\.unshift\(\{ type: "system_reminder", text: "<voice-mode\/>" \}\)/);
+  // Retries re-use the already-canonical payload. Re-injecting the reminder on
+  // those retries would change its byte/shape identity and defeat idempotency.
+  assert.match(daemon, /voiceMode && !canonicalTurnContent\) turnContent\.unshift\(\{ type: "system_reminder", text: "<voice-mode\/>" \}\)/);
 });
 
 test("desktop transcript hides internal reminders and labels fresh input", async () => {

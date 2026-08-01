@@ -28,10 +28,16 @@ import {
   type WorkStatus,
   isToolUseBlock,
 } from "@ares/protocol";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import * as path from "node:path";
 import { promises as fs } from "node:fs";
-import type { HookManager } from "./hooks.js";
+import type { HookInvocation, HookManager } from "./hooks.js";
+import {
+  RepositoryInstructionResolver,
+  renderRepositoryInstructions,
+  type RepositoryInstructionContext,
+  type RepositoryInstructionClaim,
+} from "./repositoryInstructions.js";
 
 // ─── Provider interface (what core asks of providers) ──────────────────
 
@@ -76,7 +82,72 @@ export interface Provider {
 
 export interface EngineTool {
   readonly schema: ToolSchema;
+  /** True when a tool whose static schema is read-only can resolve to an
+   * effectful class for some valid input. Durable hosts use this declaration
+   * without guessing from the mere presence of an input classifier. */
+  readonly mayHaveEffects?: boolean;
+  /** Per-input effective class. Static schema safety is the conservative
+   * fallback for malformed inputs and external tool adapters. */
+  classifyInput?(input: unknown): { safety?: SafetyClass; concurrency?: ToolSchema["concurrency"] };
+  /**
+   * Crash-recovery contract for effects that do not use Ares' workspace
+   * mutation journal (remote APIs, deploys, queues, device control, etc.).
+   *
+   * Reconciliation MUST be observational and idempotent. The engine may call
+   * it after a process restart, but it never calls `call()` automatically in
+   * response to an ambiguous result. `retry` is durable guidance for the
+   * owner/model after reconciliation, not permission for blind replay.
+   */
+  readonly effectPolicy?: EngineToolEffectPolicy;
   call(input: unknown, ctx: ToolCallContext): Promise<EngineToolResult>;
+}
+
+export type ToolEffectRetryPolicy =
+  | "never"
+  | "after-reconciled-not-applied"
+  | "idempotent-with-key";
+
+export type ToolEffectReconciliationResult =
+  | {
+      disposition: "applied";
+      evidence: unknown;
+      /** Recovered canonical result, when the remote service can return it. */
+      output?: unknown;
+      touchedFiles?: string[];
+    }
+  | {
+      disposition: "not-applied";
+      evidence: unknown;
+      reason?: string;
+    }
+  | {
+      disposition: "indeterminate";
+      evidence: unknown;
+      reason: string;
+    };
+
+export interface ToolEffectReconciliationRequest {
+  sessionId: string;
+  toolRunId: string;
+  toolUseId: string;
+  toolName: string;
+  input: unknown;
+  workspace: string;
+  mutationTransactionId?: string;
+  previousError?: unknown;
+  /** Stable service-level key derived from persisted arguments, when the tool
+   * declares `idempotent-with-key`. */
+  idempotencyKey?: string;
+  signal: AbortSignal;
+}
+
+export interface EngineToolEffectPolicy {
+  /** What an owner may do only AFTER an observational reconciliation. */
+  retry: ToolEffectRetryPolicy;
+  /** Stable semantic version/key for audit events and policy migrations. */
+  reconcilerKey?: string;
+  idempotencyKey?(input: unknown): string | null | undefined;
+  reconcile?(request: ToolEffectReconciliationRequest): Promise<ToolEffectReconciliationResult>;
 }
 
 /** Per-file read bookkeeping. Structural type (the concrete one lives in
@@ -92,6 +163,13 @@ export interface FileReadStampLike {
 
 export interface ToolCallContext {
   workspace: string;
+  /** Durable owner of this tool call. Child agents use this to create an
+   * addressable parent/child session edge instead of an orphan transcript. */
+  sessionId: string;
+  /** Provider-issued identity of this logical tool invocation. Hosts use it as
+   * an idempotency key when a crashed turn is replayed, so Task/Conductor
+   * reconnect to the original durable children instead of duplicating work. */
+  toolUseId?: string;
   signal: AbortSignal;
   /** Yield progress events from inside a long-running tool call. */
   emitProgress?(data: unknown): void;
@@ -99,6 +177,12 @@ export interface ToolCallContext {
   /** Engine-owned read-stamp map. When present, file tools MUST prefer it over
    *  any captured map so each engine (parent / subagent) stays isolated. */
   fileReadStamps?: Map<string, FileReadStampLike>;
+  /** Deterministic journal identity for workspace mutations made by this
+   * logical tool call. Transactional mutators must pass it through. */
+  mutationTransactionId?: string;
+  /** Path-sensitive AGENTS/ARES/CLAUDE-style rules. The context and its claim
+   * cache belong to this engine's Session; tools use it before file effects. */
+  repositoryInstructions?: RepositoryInstructionContext;
 }
 
 export interface ToolPermissionRequest {
@@ -111,6 +195,11 @@ export interface ToolPermissionRequest {
 
 export interface EngineToolResult {
   output: unknown;
+  /** A completed tool call whose structured output represents a failure.
+   * Unlike throwing, this preserves diagnostics (for example shell stdout,
+   * stderr, exit code, and timeout state) while still producing an is_error
+   * model result and a failed durable execution record. */
+  failure?: string;
   touchedFiles?: string[];
   display?: string;
   /**
@@ -120,6 +209,20 @@ export interface EngineToolResult {
    * model literally sees the pixels. Requires a vision model.
    */
   images?: Array<{ mediaType: string; data: string }>;
+}
+
+export interface ToolSettlementReceipt {
+  /** Host-observed files not already declared by the implementation (for
+   * example, files changed by a PostToolUse formatter hook). */
+  touchedFiles?: string[];
+}
+
+/** A mid-turn user correction claimed by the host's durable inbox. The engine
+ * appends the stable message at a settled model/tool boundary, then asks the
+ * host to consume the corresponding input before another provider call. */
+export interface ClaimedSteeringMessage {
+  inputId: string;
+  message: Message;
 }
 
 // ─── Engine config ─────────────────────────────────────────────────────
@@ -140,6 +243,13 @@ export interface QueryEngineConfig {
   /** Engine-owned read-stamp map, forwarded into every tool ctx. Subagent runs
    *  pass a fresh Map so they never share read state with the parent. */
   fileReadStamps?: Map<string, FileReadStampLike>;
+  /** Session-owned repository instruction resolver. Direct QueryEngine callers
+   * get a fresh resolver automatically; durable Session hosts inject one that
+   * also restores/persists claims. */
+  repositoryInstructions?: RepositoryInstructionContext;
+  /** Canonical workflow posture used to pin plan-transition tools and suppress
+   * write protocols during long planning conversations. */
+  workflowMode?: () => "plan" | "build";
   /** If > 0, the engine trims the OLDEST conversation history to keep the
    *  estimated input (system + tools + messages) under this many tokens, so a
    *  long thread can never hard-fail with context_length_exceeded. The pending
@@ -148,6 +258,7 @@ export interface QueryEngineConfig {
   /** Optional pending system-reminders to inject at next turn_start. */
   drainSystemReminders?(): Array<{
     text: string;
+    instructionClaims?: RepositoryInstructionClaim[];
     source:
       | "verifier"
       | "compaction"
@@ -161,6 +272,14 @@ export interface QueryEngineConfig {
       | "recall"
       | "self-revise";
   }>;
+  /** Claim steering inputs under the active durable generation and persist
+   * their stable user-message projections. Must not consume them yet: the
+   * engine first installs every message into history at a safe boundary. */
+  claimSteeringMessages?(): Promise<readonly ClaimedSteeringMessage[]>;
+  /** Consume steering inputs after their messages are present in engine
+   * history. A failure aborts the turn; lease release requeues unconsumed
+   * claims, while stable message ids make the next attempt an exact-once upsert. */
+  consumeSteeringInputs?(inputIds: readonly string[]): Promise<void>;
   hookManager?: HookManager;
   /**
    * C1 — the end-of-turn gate. Called when the model wants to finish the turn
@@ -232,6 +351,27 @@ export interface QueryEngineConfig {
      *  the host take an INCREMENTAL snapshot instead of a full workspace walk. */
     targetFiles?: string[];
   }): Promise<{ checkpointId: string; label?: string } | null>;
+  /** Write-ahead barrier immediately before a tool implementation is entered.
+   * If this rejects, the tool receives no authority and cannot gain effects. */
+  beforeToolExecution?(request: {
+    toolUseId: string;
+    toolName: string;
+    input: unknown;
+    safety: SafetyClass;
+    checkpointId?: string;
+    mutationTransactionId: string;
+  }): Promise<void>;
+  /** Durable settlement barrier. Called before tool_end/tool_error is exposed. */
+  afterToolExecution?(result: {
+    toolUseId: string;
+    toolName: string;
+    input: unknown;
+    safety: SafetyClass;
+    status: "succeeded" | "failed" | "effect_unknown";
+    output?: unknown;
+    error?: string;
+    touchedFiles?: string[];
+  }): Promise<void | ToolSettlementReceipt>;
   /**
    * Absolute paths the engine considers "self-territory" — writes targeting
    * files inside these roots bypass the write-intent gate entirely. The agent
@@ -265,6 +405,16 @@ export interface QueryEngineConfig {
   compactionThresholdTokens?: number;
 }
 
+const DURABLE_EFFECT_HOST = Symbol("ares.query-engine.durable-effect-host");
+const TEST_ONLY_EFFECT_HOST = Symbol("ares.query-engine.test-only-effect-host");
+type QueryEngineEffectAuthority =
+  | typeof DURABLE_EFFECT_HOST
+  | typeof TEST_ONLY_EFFECT_HOST
+  | undefined;
+
+export type DurableQueryEngineConfig = QueryEngineConfig &
+  Required<Pick<QueryEngineConfig, "beforeToolExecution" | "afterToolExecution">>;
+
 /**
  * Keep the provider's tool prefix proportional to the current job. A fresh
  * desktop session owns dozens of tools; serializing every schema on every
@@ -272,8 +422,20 @@ export interface QueryEngineConfig {
  * Execution still resolves against the full set, and tools used in the recent
  * transcript remain advertised so multi-step work never loses its handles.
  */
-export function selectToolsForTurn(tools: readonly EngineTool[], messages: readonly Message[]): readonly EngineTool[] {
-  if (process.env.ARES_DYNAMIC_TOOLS === "0" || tools.length <= 12) return tools;
+export interface ToolSelectionContext {
+  providerName?: string;
+  model?: string;
+  workflowMode?: "plan" | "build";
+}
+
+export function selectToolsForTurn(
+  tools: readonly EngineTool[],
+  messages: readonly Message[],
+  context: ToolSelectionContext = {},
+): readonly EngineTool[] {
+  const intentPruning = process.env.ARES_DYNAMIC_TOOLS !== "0" && tools.length > 12;
+  const hasContractFilter = context.workflowMode !== undefined || !!context.providerName || !!context.model;
+  if (!intentPruning && !hasContractFilter) return tools;
 
   let userText = "";
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -294,11 +456,18 @@ export function selectToolsForTurn(tools: readonly EngineTool[], messages: reado
   // or Edit cannot do the work, and the model surfaces that as a malformed or
   // unknown tool call rather than a clean failure — which is indistinguishable
   // from the model being bad at coding. Intent only ever ADDS to this floor.
+  const providerModel = `${context.providerName ?? ""} ${context.model ?? ""}`.toLowerCase();
+  const patchProtocol = /(?:openai|codex|\bgpt[-_ ]|\bo[1-9](?:\b|-))/.test(providerModel);
+  const primaryEditors = patchProtocol ? ["applypatch"] : ["write", "edit"];
   const wanted = new Set([
-    "read", "write", "edit", "glob", "grep", "bash", "powershell",
+    "read", ...primaryEditors, "glob", "grep", "bash", "powershell",
     "todowrite", "requestuseraction", "memory", "browser", "websearch",
     "webfetch", "imagesearch", "skillhub", "skillslist", "skillread",
   ]);
+  if (!intentPruning) {
+    wanted.clear();
+    for (const tool of tools) wanted.add(tool.schema.name.toLowerCase());
+  }
   const add = (...names: string[]) => names.forEach((name) => wanted.add(name.toLowerCase()));
 
   const coding = /\b(?:build|code|coding|implement|fix|debug|refactor|test|compile|html|css|javascript|typescript|python|repo|repository|file|folder|component|website|app|api|database|git|terminal|powershell|bash|install|package)\b/.test(userText)
@@ -307,12 +476,24 @@ export function selectToolsForTurn(tools: readonly EngineTool[], messages: reado
   const desktop = /\b(?:desktop|screen|window|mouse|keyboard|native app|computer use)\b/.test(userText);
   if (coding) {
     add(
-      "read", "write", "edit", "applyintent", "glob", "grep", "codebasesearch",
-      "lsp", "powershell", "bash", "findandedit", "codemode", "bashoutput",
-      "killshell", "enterplanmode", "exitplanmode", "task", "conductor",
+      "read", ...primaryEditors, "glob", "grep", "codebasesearch",
+      "lsp", "powershell", "bash", "bashoutput",
+      "killshell", "enterplanmode", "updateplandraft", "exitplanmode",
+      "task", "taskoutput", "killtask", "conductor",
       "codingbackend", "deploy",
     );
   }
+  if (/\b(?:background|detached)\s+(?:job|task|agent|shell|process)\b|\b(?:poll|stop|kill|cancel)\s+(?:the\s+)?(?:job|task|agent|shell|process)\b/.test(userText)) {
+    add("task", "taskoutput", "killtask", "bashoutput", "killshell");
+  }
+  // Alternate editing protocols remain installed but are advertised only when
+  // explicitly requested or already active in the transcript. This keeps each
+  // model on one low-entropy edit contract instead of asking it to choose among
+  // six overlapping schemas on every coding round.
+  if (/\bapply[ _-]?patch\b/.test(userText)) add("applypatch");
+  if (/\bapply[ _-]?intent\b/.test(userText)) add("applyintent");
+  if (/\bfind[ _-]?and[ _-]?edit\b/.test(userText)) add("findandedit");
+  if (/\bcode[ _-]?mode\b/.test(userText)) add("codemode");
   if (browser) add("browser", "websearch", "webfetch", "imagesearch", "computeruse");
   if (desktop) add("computeruse", "powershell");
   if (/\b(?:email|mail|gmail)\b/.test(userText)) add("email", "gmail", "connect", "mcplisttools", "mcpcalltool");
@@ -329,9 +510,14 @@ export function selectToolsForTurn(tools: readonly EngineTool[], messages: reado
 
   // Preserve schemas for recently used tools even if the newest user message is
   // a terse follow-up such as "do that again" or "now fix the second one".
+  const recentlyUsed = new Set<string>();
   for (const message of messages.slice(-8)) {
     for (const block of message.content) {
-      if (block.type === "tool_use" && typeof block.name === "string") wanted.add(block.name.toLowerCase());
+      if (block.type === "tool_use" && typeof block.name === "string") {
+        const name = block.name.toLowerCase();
+        recentlyUsed.add(name);
+        wanted.add(name);
+      }
       // The GUI ground-truth gate just demanded a screenshot: the screenshot
       // tools MUST be advertised or the model is ordered to use a tool it
       // cannot see (unknown-tool loop instead of compliance).
@@ -340,8 +526,47 @@ export function selectToolsForTurn(tools: readonly EngineTool[], messages: reado
       }
     }
   }
-  const selected = tools.filter((tool) => wanted.has(tool.schema.name.toLowerCase()));
-  return selected.length > 0 ? selected : tools;
+  const explicitlyRequested = new Set<string>();
+  if (/\bapply[ _-]?patch\b/.test(userText)) explicitlyRequested.add("applypatch");
+  if (/\bapply[ _-]?intent\b/.test(userText)) explicitlyRequested.add("applyintent");
+  if (/\bfind[ _-]?and[ _-]?edit\b/.test(userText)) explicitlyRequested.add("findandedit");
+  if (/\bcode[ _-]?mode\b/.test(userText)) explicitlyRequested.add("codemode");
+  const primaryEditorSet = new Set(primaryEditors);
+  for (const name of ["write", "edit", "applypatch", "applyintent", "findandedit", "codemode"]) {
+    if (!primaryEditorSet.has(name) && !explicitlyRequested.has(name) && !recentlyUsed.has(name)) wanted.delete(name);
+  }
+  // Workflow transitions are a contract, not a lexical guess. A user can say
+  // "let's think this through first" without any coding keyword and must still
+  // receive EnterPlanMode; a planning turn always receives its living draft and
+  // exact approval handoff tools.
+  if (context.workflowMode === "build") {
+    wanted.delete("updateplandraft");
+    wanted.delete("exitplanmode");
+    add("enterplanmode");
+  }
+  if (context.workflowMode === "plan") {
+    wanted.delete("enterplanmode");
+    for (const name of ["write", "edit", "applypatch", "applyintent", "findandedit", "codemode"]) {
+      wanted.delete(name);
+    }
+    add("read", "glob", "grep", "codebasesearch", "lsp", "websearch", "webfetch", "imagesearch", "browser", "task", "updateplandraft", "exitplanmode");
+  }
+  const planMixedTools = new Set(["webfetch", "browser", "task", "updateplandraft", "exitplanmode"]);
+  const selected = tools.filter((tool) => {
+    const name = tool.schema.name.toLowerCase();
+    if (!wanted.has(name)) return false;
+    if (context.workflowMode !== "plan") return true;
+    return tool.schema.safety === "read-only" || planMixedTools.has(name);
+  });
+  if (selected.length > 0) return selected;
+  if (context.workflowMode === "plan") {
+    // Never fail open to the complete write belt merely because a host supplied
+    // a sparse or synthetic catalog.
+    return tools.filter((tool) =>
+      tool.schema.safety === "read-only" || planMixedTools.has(tool.schema.name.toLowerCase())
+    );
+  }
+  return tools;
 }
 
 // ─── Context budgeting ─────────────────────────────────────────────────
@@ -694,9 +919,9 @@ export function chooseCompactionSplit(
     split = i;
   }
   // Don't leave the kept window opening on an orphan tool_result — pull the
-  // boundary forward (keep more) until it leads cleanly.
-  while (split < messages.length && leadsWithToolResult(messages[split])) {
-    split++;
+  // boundary backward (keep more) so the matching assistant tool_use stays.
+  while (split > 0 && split < messages.length && leadsWithToolResult(messages[split])) {
+    split--;
   }
   // Compacting fewer than 2 messages isn't worth a model call.
   if (split < 2) return 0;
@@ -736,10 +961,63 @@ export class QueryEngine {
   /** Did the previous tool round contain a failure? Failure recovery earns the
    *  full effort ceiling back (see tacticalReasoningLevel). */
   private lastRoundHadFailure = false;
+  /** Effectful engines are constructed only by a durable Session host. The
+   * explicit test factory exists so unit harnesses cannot accidentally become
+   * production examples of an unledgered writer. */
+  private readonly effectAuthority: QueryEngineEffectAuthority;
 
-  constructor(cfg: QueryEngineConfig, sessionId: string) {
-    this.cfg = cfg;
+  constructor(
+    cfg: QueryEngineConfig,
+    sessionId: string,
+    effectAuthority?: QueryEngineEffectAuthority,
+  ) {
+    const declaresEffects = cfg.tools.some((tool) =>
+      tool.schema.safety !== "read-only" || tool.mayHaveEffects === true
+    );
+    const executableHooks = cfg.hookManager !== undefined;
+    if ((declaresEffects || executableHooks) && effectAuthority === undefined) {
+      throw new Error(
+        "Effectful QueryEngine construction requires a durable Session host. " +
+        "Use QueryEngine.hosted(...) with write-ahead/settlement callbacks; " +
+        "unit tests must opt in explicitly with QueryEngine.forTesting(...).",
+      );
+    }
+    if (
+      effectAuthority === DURABLE_EFFECT_HOST &&
+      (typeof cfg.beforeToolExecution !== "function" || typeof cfg.afterToolExecution !== "function")
+    ) {
+      throw new Error(
+        "A durable QueryEngine host must provide both beforeToolExecution and afterToolExecution barriers.",
+      );
+    }
+    this.cfg = {
+      ...cfg,
+      repositoryInstructions:
+        cfg.repositoryInstructions ?? new RepositoryInstructionResolver(cfg.workspace),
+    };
     this.sessionId = sessionId;
+    this.effectAuthority = effectAuthority;
+  }
+
+  /** Construct an engine whose non-read-only tools are fenced by a durable
+   * host. This is the production entry point used by Session. */
+  static hosted(cfg: DurableQueryEngineConfig, sessionId: string): QueryEngine {
+    return new QueryEngine(cfg, sessionId, DURABLE_EFFECT_HOST);
+  }
+
+  /** Explicit escape hatch for deterministic unit/evaluation harnesses. It is
+   * deliberately noisy in the API and must never be used by a user-facing
+   * session surface. */
+  static forTesting(cfg: QueryEngineConfig, sessionId: string): QueryEngine {
+    return new QueryEngine(cfg, sessionId, TEST_ONLY_EFFECT_HOST);
+  }
+
+  private assertEffectAuthority(toolName: string, safety: SafetyClass): void {
+    if (safety === "read-only") return;
+    if (this.effectAuthority === DURABLE_EFFECT_HOST || this.effectAuthority === TEST_ONLY_EFFECT_HOST) return;
+    throw new Error(
+      `${toolName} resolved to ${safety}, but this QueryEngine has no durable effect host; execution was blocked before the tool implementation.`,
+    );
   }
 
   /**
@@ -932,15 +1210,67 @@ export class QueryEngine {
     return this.appendUserMessageContent([{ type: "text", text }]);
   }
 
-  appendUserMessageContent(content: ContentBlock[]): Message {
+  appendUserMessageContent(
+    content: ContentBlock[],
+    identity: { id?: string; createdAt?: string; metadata?: Message["metadata"] } = {},
+  ): Message {
     const message: Message = {
-      id: cryptoId(),
+      id: identity.id ?? cryptoId(),
       role: "user",
       content,
-      createdAt: new Date().toISOString(),
+      createdAt: identity.createdAt ?? new Date().toISOString(),
+      ...(identity.metadata ? { metadata: identity.metadata } : {}),
     };
     this.messages.push(message);
     return message;
+  }
+
+  /** Apply every currently admitted steer at a point where no model stream or
+   * tool effect is active. Durable claim/message projection happens in the host;
+   * history installation precedes acknowledgement so any failure is replayable
+   * without losing or duplicating the correction. */
+  private async applySteeringAtBoundary(): Promise<number> {
+    if (!this.cfg.claimSteeringMessages) return 0;
+    const claimed = await this.cfg.claimSteeringMessages();
+    if (claimed.length === 0) return 0;
+    if (!this.cfg.consumeSteeringInputs) {
+      throw new Error("claimSteeringMessages requires consumeSteeringInputs");
+    }
+
+    const inputIds = new Set<string>();
+    const messages = new Map<string, Message>();
+    for (const item of claimed) {
+      if (!item.inputId || inputIds.has(item.inputId)) {
+        throw new Error(`invalid or duplicate steering input id: ${item.inputId || "<empty>"}`);
+      }
+      if (!item.message.id || item.message.role !== "user") {
+        throw new Error(`steering input ${item.inputId} must provide a stable user message`);
+      }
+      const duplicateMessage = messages.get(item.message.id);
+      if (duplicateMessage && JSON.stringify(duplicateMessage) !== JSON.stringify(item.message)) {
+        throw new Error(`steering message id conflict: ${item.message.id}`);
+      }
+      inputIds.add(item.inputId);
+      messages.set(item.message.id, item.message);
+    }
+
+    for (const message of messages.values()) {
+      const existing = this.messages.find((candidate) => candidate.id === message.id);
+      if (existing) {
+        if (JSON.stringify(existing) !== JSON.stringify(message)) {
+          throw new Error(`steering message history conflict: ${message.id}`);
+        }
+        continue;
+      }
+      this.messages.push({
+        ...message,
+        content: message.content.map((block) => ({ ...block })),
+        ...(message.metadata ? { metadata: { ...message.metadata } } : {}),
+      });
+    }
+
+    await this.cfg.consumeSteeringInputs([...inputIds]);
+    return inputIds.size;
   }
 
   /**
@@ -981,13 +1311,16 @@ export class QueryEngine {
    * and, unlike a blunt trim, it preserves every assistant reasoning step and
    * user message. Returns a UI event, or null when nothing was cleared.
    */
-  private microcompactIfNeeded(): Extract<TurnEvent, { type: "system_reminder_injected" }> | null {
+  private microcompactIfNeeded(): {
+    projection: Extract<TurnEvent, { type: "compaction" }>;
+    reminder: Extract<TurnEvent, { type: "system_reminder_injected" }>;
+  } | null {
     const threshold =
       this.cfg.compactionThresholdTokens ??
       (this.cfg.contextBudgetTokens ? Math.floor(this.cfg.contextBudgetTokens * 0.8) : 0);
     if (threshold <= 0) return null;
-    const est = this.messages.reduce((s, m) => s + estimateMessageTokens(m), 0);
-    if (est * this.tokenScale <= threshold * 0.6) return null;
+    const estBefore = this.messages.reduce((s, m) => s + estimateMessageTokens(m), 0);
+    if (estBefore * this.tokenScale <= threshold * 0.6) return null;
 
     // tool_result blocks only carry a tool_use_id — map ids to names via the
     // assistant's tool_use blocks to know which results are compactable.
@@ -1037,23 +1370,35 @@ export class QueryEngine {
     // edits blind. Heavy compaction avoids this via onHistoryTrimmed; microcompact
     // is a newer rung that bypassed it. Hand the host the tool_use blocks whose
     // output we cleared so it invalidates exactly those files' stamps.
-    if (this.cfg.onHistoryTrimmed) {
+    if (this.cfg.fileReadStamps || this.cfg.onHistoryTrimmed) {
       const clearedToolUses: Message[] = this.messages
         .filter((m) => m.role === "assistant")
         .map((m) => ({ ...m, content: m.content.filter((b) => b.type === "tool_use" && clearedIds.has(b.id)) }))
         .filter((m) => m.content.length > 0);
       if (clearedToolUses.length > 0) {
-        try {
-          this.cfg.onHistoryTrimmed(clearedToolUses);
-        } catch {
-          // host bookkeeping never kills a turn
-        }
+        this.invalidateReadEvidence(clearedToolUses);
       }
     }
+    const estAfter = this.messages.reduce((sum, message) => sum + estimateMessageTokens(message), 0);
     return {
-      type: "system_reminder_injected",
-      text: `microcompacted ${cleared} old tool output(s) (~${Math.round(savedChars / CHARS_PER_TOKEN)} tokens freed) to defer heavy compaction`,
-      source: "compaction",
+      projection: {
+        type: "compaction",
+        summarizedMessages: 0,
+        tokensBefore: Math.round(estBefore * this.tokenScale),
+        tokensAfter: Math.round(estAfter * this.tokenScale),
+        method: "micro",
+        // Clone the array so later engine mutations cannot change the durable
+        // projection object while Session is committing it to SQLite/JSONL.
+        messages: this.messages.map((message) => ({
+          ...message,
+          content: message.content.map((block) => ({ ...block })),
+        })),
+      },
+      reminder: {
+        type: "system_reminder_injected",
+        text: `microcompacted ${cleared} old tool output(s) (~${Math.round(savedChars / CHARS_PER_TOKEN)} tokens freed) to defer heavy compaction`,
+        source: "compaction",
+      },
     };
   }
 
@@ -1111,6 +1456,18 @@ export class QueryEngine {
       }
     }
 
+    // Repository constraints are typed, pinned context—not lossy summary
+    // material. Re-read every claimed rule and attach its current hash/body so
+    // compaction cannot erase it and an on-disk rule change takes effect.
+    let instructionPins = "";
+    try {
+      instructionPins = renderRepositoryInstructions(
+        await this.cfg.repositoryInstructions?.active() ?? [],
+      );
+    } catch {
+      instructionPins = "";
+    }
+
     const recap: Message = {
       id: cryptoId("compact"),
       role: "user",
@@ -1122,6 +1479,9 @@ export class QueryEngine {
             `Everything below really happened; treat it as established fact, do not redo it, and stay on the mission.\n\n${summary}` +
             (filePins
               ? `\n\nThe files you were working in, re-read AFTER compaction (this is their live current state — trust it over the summary):${filePins}`
+              : "") +
+            (instructionPins
+              ? `\n\nRepository instructions re-pinned after compaction:\n\n${instructionPins}`
               : ""),
         },
       ],
@@ -1133,11 +1493,7 @@ export class QueryEngine {
     // (including the untouched pending user message) intact. Read stamps for
     // files in the summarized span are invalidated so recovery re-reads pass.
     this.messages.splice(0, split, recap);
-    try {
-      this.cfg.onHistoryTrimmed?.(older);
-    } catch {
-      // host bookkeeping never kills a turn
-    }
+    this.invalidateReadEvidence(older);
 
     const estAfter = this.messages.reduce((s, m) => s + estimateMessageTokens(m), 0);
     const tokensBefore = Math.round(estBefore * this.tokenScale);
@@ -1153,6 +1509,18 @@ export class QueryEngine {
         content: message.content.map((block) => ({ ...block })),
       })),
     };
+  }
+
+  /** Compaction removed the model-visible bytes that justified every edit CAS.
+   * Clear engine-owned evidence centrally so child surfaces remain safe even
+   * when their host did not install a path-specific trim callback. */
+  private invalidateReadEvidence(dropped: readonly Message[]): void {
+    this.cfg.fileReadStamps?.clear();
+    try {
+      this.cfg.onHistoryTrimmed?.(dropped);
+    } catch {
+      // host bookkeeping never kills a turn
+    }
   }
 
   // (compaction helper lives at module scope below: recentFilePathsFromSpan)
@@ -1177,6 +1545,11 @@ export class QueryEngine {
     // turn_start. The turn_start event remains first for stable rollout/daemon
     // consumers, and reminder telemetry follows immediately after.
     const reminders = this.cfg.drainSystemReminders?.() ?? [];
+    for (const reminder of reminders) {
+      if (reminder.instructionClaims?.length) {
+        this.cfg.repositoryInstructions?.claim(reminder.instructionClaims);
+      }
+    }
     // Reminders ride the FRONT of the pending user message — except when that
     // message carries tool_result blocks (resuming after an interrupted tool
     // batch, e.g. a mid-turn steer). Anthropic requires tool_result blocks to
@@ -1202,7 +1575,13 @@ export class QueryEngine {
     // first. This often keeps the conversation under the heavy-compaction
     // threshold so the expensive summarizer below never has to run.
     const micro = this.microcompactIfNeeded();
-    if (micro) yield micro;
+    if (micro) {
+      // Commit the exact reduced projection before exposing the informational
+      // reminder or making another provider call. A crash now resumes with the
+      // same token footprint instead of re-inflating every old tool result.
+      yield micro.projection;
+      yield micro.reminder;
+    }
 
     // Smart compaction BEFORE the first model call: if the conversation has
     // grown past the threshold, summarize the old span into a recap and keep
@@ -1362,6 +1741,28 @@ export class QueryEngine {
         yield { type: "turn_end", status: "interrupted", workStatus: resolvedWorkStatus(), usage: totalUsage, durationMs: Date.now() - startedAt };
         return;
       }
+      // The iteration edge is a safe steering boundary: the prior assistant
+      // response and every requested tool result are settled, and the next
+      // provider stream has not started. A steer admitted before the first call
+      // is also folded in here without creating overlapping execution.
+      await this.applySteeringAtBoundary();
+      // Context is a loop invariant, not a turn-start chore. Tool results can
+      // add far more tokens than the user's opening message, so re-evaluate at
+      // every settled model boundary. We are between tool batches here: every
+      // tool_use has a paired tool_result and no side effect is in flight.
+      if (iter > 0) {
+        const boundaryMicro = this.microcompactIfNeeded();
+        if (boundaryMicro) {
+          yield boundaryMicro.projection;
+          yield boundaryMicro.reminder;
+        }
+        const boundaryCompaction = await this.compactIfNeeded();
+        if (boundaryCompaction) yield boundaryCompaction;
+        if (this.liveSignal().aborted) {
+          yield { type: "turn_end", status: "interrupted", workStatus: resolvedWorkStatus(), usage: totalUsage, durationMs: Date.now() - startedAt };
+          return;
+        }
+      }
       // ─── Stream one assistant turn from the provider ─────────────────
       const pendingToolUses: Array<{ id: string; name: string; input: unknown }> = [];
       const toolNameById = new Map<string, string>();
@@ -1369,7 +1770,11 @@ export class QueryEngine {
       let streamError: { code: string; message: string; retriable: boolean; retryAfterMs?: number } | null = null;
 
       try {
-        const activeTools = selectToolsForTurn(this.cfg.tools, this.messages);
+        const activeTools = selectToolsForTurn(this.cfg.tools, this.messages, {
+          providerName: this.cfg.provider.name,
+          model: this.cfg.model,
+          workflowMode: this.cfg.workflowMode?.(),
+        });
         const toolDescriptors = activeTools.map((t) => ({
           name: t.schema.name,
           description: t.schema.description,
@@ -1406,11 +1811,7 @@ export class QueryEngine {
             if (budgeted.trimmed > 0) {
               // File contents in the dropped span are no longer visible to the
               // model — let the host invalidate read stamps so re-reads pass.
-              try {
-                this.cfg.onHistoryTrimmed?.(budgeted.dropped);
-              } catch {
-                // never let host bookkeeping kill a turn
-              }
+              this.invalidateReadEvidence(budgeted.dropped);
               // History was cut to fit — hand the model a deterministic ledger of
               // the dropped span so the mission survives the amnesia.
               const ledger = buildContextLedger(budgeted.dropped);
@@ -1683,6 +2084,10 @@ export class QueryEngine {
 
       // ─── Tool execution phase ────────────────────────────────────────
       if (pendingToolUses.length === 0) {
+        // A correction that arrived during this provider call preempts the
+        // model's attempted finish. Install and acknowledge it, then give the
+        // same active generation another model round to respond.
+        if (await this.applySteeringAtBoundary() > 0) continue;
         // C3 — the model was cut off at its output-token ceiling mid-message
         // (no tool calls). Don't end the turn on a truncated answer: tell it to
         // continue exactly where it stopped, and loop. Capped so it can't spin.
@@ -1935,7 +2340,7 @@ export class QueryEngine {
       }
 
       const resultByToolUseId = new Map<string, ToolResultBlock>();
-      const runnable: Array<{ id: string; name: string; input: unknown; tool: EngineTool }> = [];
+      const runnable: ResolvedToolUse[] = [];
       for (const use of pendingToolUses) {
         // A tool_use that reached history but never finished streaming its
         // arguments (see reconciliation above): its args are partial, so do NOT
@@ -1967,11 +2372,20 @@ export class QueryEngine {
           continue;
         }
 
+        const normalizedInput = normalizeToolInput(tool.schema.name, use.input);
+        let effectiveSafety = tool.schema.safety;
+        try {
+          effectiveSafety = tool.classifyInput?.(normalizedInput).safety ?? effectiveSafety;
+        } catch {
+          // malformed inputs retain the conservative static class
+        }
+        this.assertEffectAuthority(tool.schema.name, effectiveSafety);
         runnable.push({
           ...use,
           name: tool.schema.name,
-          input: normalizeToolInput(tool.schema.name, use.input),
+          input: normalizedInput,
           tool,
+          safety: effectiveSafety,
         });
       }
 
@@ -2054,6 +2468,12 @@ export class QueryEngine {
         content: orderedToolResults(pendingToolUses, resultByToolUseId),
         createdAt: new Date().toISOString(),
       });
+
+      // Tools are fully settled and their results are paired in history. This
+      // is the earliest safe point to apply steering admitted while a tool was
+      // running; continue immediately so no convergence/end guard can consume
+      // the correction without the model seeing it.
+      if (await this.applySteeringAtBoundary() > 0) continue;
 
       // ── shell-regex file-edit hint (one-shot) ───────────────────────────
       // Editing files via shell regex replace (`-replace` + Set-Content, or
@@ -2277,6 +2697,9 @@ export class QueryEngine {
       if (midTurn.length > 0) {
         const last = this.messages[this.messages.length - 1];
         for (const r of midTurn) {
+          if (r.instructionClaims?.length) {
+            this.cfg.repositoryInstructions?.claim(r.instructionClaims);
+          }
           last.content.push({ type: "system_reminder", text: r.text });
           yield { type: "system_reminder_injected", text: r.text, source: r.source };
         }
@@ -2435,28 +2858,135 @@ export class QueryEngine {
     return outcomes.filter((outcome): outcome is ToolExecutionOutcome => outcome !== undefined);
   }
 
+  /**
+   * PostToolUse hooks are executable host code, not harmless notifications.
+   * Admit, checkpoint, execute, and settle each one as its own synthetic tool
+   * run before the primary tool's terminal result becomes visible. A hook that
+   * cannot be durably admitted is not executed. A non-zero exit is reported to
+   * the model, but does not pretend the already-completed primary effect rolled
+   * back or invite the model to repeat it.
+   */
+  private async settlePostToolHooks(
+    use: ResolvedToolUse,
+    primaryOutput: unknown,
+    emit: (event: TurnEvent) => void,
+  ): Promise<PostToolHookSettlement> {
+    const manager = this.cfg.hookManager;
+    if (!manager) return EMPTY_POST_TOOL_HOOK_SETTLEMENT;
+    const hookInput = {
+      event: "PostToolUse" as const,
+      toolName: use.name,
+      input: use.input,
+      output: primaryOutput,
+      workspace: this.cfg.workspace,
+    };
+    const invocations = manager.matching(hookInput);
+    if (invocations.length === 0) return EMPTY_POST_TOOL_HOOK_SETTLEMENT;
+    if (!this.cfg.beforeToolExecution || !this.cfg.afterToolExecution) {
+      return {
+        failures: invocations.map((invocation) =>
+          `PostToolUse hook ${invocation.id} was not executed because this QueryEngine has no durable tool admission/settlement host.`
+        ),
+        touchedFiles: [],
+      };
+    }
+
+    const failures: string[] = [];
+    const touchedFiles = new Set<string>();
+    for (const invocation of invocations) {
+      const hookUseId = postToolHookUseId(this.sessionId, use.id, invocation);
+      let checkpointId: string | undefined;
+      if (this.cfg.beforeToolUseCheckpoint) {
+        try {
+          const checkpoint = await this.cfg.beforeToolUseCheckpoint({
+            toolUseId: hookUseId,
+            toolName: "PostToolUseHook",
+            input: postToolHookArguments(use, invocation),
+            safety: "external-state",
+            // Hooks are arbitrary shell commands. Never narrow their snapshot
+            // to the primary tool's declared target.
+          });
+          checkpointId = checkpoint?.checkpointId;
+        } catch (error) {
+          emit({
+            type: "system_reminder_injected",
+            text: `PostToolUse hook checkpoint failed (${errorMessage(error)}); the hook remains durable but workspace diff coverage may be incomplete.`,
+            source: "hook",
+          });
+        }
+      }
+
+      const argumentsValue = postToolHookArguments(use, invocation);
+      try {
+        await this.cfg.beforeToolExecution?.({
+          toolUseId: hookUseId,
+          toolName: "PostToolUseHook",
+          input: argumentsValue,
+          safety: "external-state",
+          checkpointId,
+          mutationTransactionId: workspaceMutationTransactionId(this.sessionId, hookUseId),
+        });
+      } catch (error) {
+        // Admission failed before host code was entered. The hook is skipped;
+        // preserving primary progress is truthful and safer than executing an
+        // unledgered command.
+        failures.push(
+          `PostToolUse hook ${invocation.id} was not executed because durable admission failed: ${errorMessage(error)}`,
+        );
+        continue;
+      }
+
+      let hookResult: Awaited<ReturnType<HookManager["runInvocation"]>>;
+      try {
+        hookResult = await manager.runInvocation(invocation, hookInput);
+      } catch (error) {
+        const message = `PostToolUse hook ${invocation.id} failed during execution/settlement: ${errorMessage(error)}`;
+        // An exception escaped the command runner after durable admission. We
+        // cannot prove whether host code entered, so ambiguity is terminal.
+        await this.cfg.afterToolExecution?.({
+          toolUseId: hookUseId,
+          toolName: "PostToolUseHook",
+          input: argumentsValue,
+          safety: "external-state",
+          status: "effect_unknown",
+          error: `${message}\n\nThe hook may already have taken effect. Do not rerun the primary tool or hook blindly.`,
+        });
+        failures.push(message);
+        continue;
+      }
+
+      const failed = hookResult.exitCode !== 0;
+      const error = hookResult.reminders[0];
+      // Keep this settlement outside the command-runner catch. If the durable
+      // barrier itself fails, the primary terminal result must not be exposed;
+      // recovery will see executing/effect_unknown rather than a second settle.
+      const receipt = await this.cfg.afterToolExecution?.({
+        toolUseId: hookUseId,
+        toolName: "PostToolUseHook",
+        input: argumentsValue,
+        safety: "external-state",
+        status: failed ? "failed" : "succeeded",
+        output: {
+          hookId: invocation.id,
+          primaryToolUseId: use.id,
+          entered: hookResult.entered,
+          exitCode: hookResult.exitCode,
+          output: hookResult.output,
+        },
+        ...(error ? { error } : {}),
+      });
+      for (const file of receipt?.touchedFiles ?? []) touchedFiles.add(file);
+      if (error) failures.push(error);
+    }
+    return { failures, touchedFiles: [...touchedFiles] };
+  }
+
   private async executeToolUse(
     use: ResolvedToolUse,
     emit: (event: TurnEvent) => void,
   ): Promise<ToolExecutionOutcome> {
-    const preHook = this.cfg.hookManager
-      ? await this.cfg.hookManager.run({
-          event: "PreToolUse",
-          toolName: use.name,
-          input: use.input,
-          workspace: this.cfg.workspace,
-        })
-      : null;
-    if (preHook?.blocked) {
-      const msg = preHook.reminders[0] ?? `PreToolUse hook blocked ${use.name}`;
-      emit({ type: "tool_error", id: use.id, error: msg, durationMs: 0 });
-      return {
-        toolUseId: use.id,
-        result: { type: "tool_result", tool_use_id: use.id, content: msg, is_error: true },
-      };
-    }
-
-    if (shouldCheckpointBeforeTool(use.tool) && this.cfg.beforeToolUseCheckpoint) {
+    let checkpointId: string | undefined;
+    if (shouldCheckpointBeforeTool(use.safety) && this.cfg.beforeToolUseCheckpoint) {
       // Declared single-file target (Edit/Write) → the host can snapshot
       // incrementally instead of walking the whole workspace before EVERY edit.
       const deps = analyzeToolDeps(use, this.cfg.workspace);
@@ -2470,7 +3000,7 @@ export class QueryEngine {
           toolUseId: use.id,
           toolName: use.name,
           input: use.input,
-          safety: use.tool.schema.safety,
+          safety: use.safety,
           targetFiles: deps.target && !deps.solo ? [deps.target] : undefined,
         });
       } catch (err) {
@@ -2481,6 +3011,7 @@ export class QueryEngine {
         });
       }
       if (checkpoint) {
+        checkpointId = checkpoint.checkpointId;
         emit({
           type: "checkpoint_created",
           checkpointId: checkpoint.checkpointId,
@@ -2491,22 +3022,29 @@ export class QueryEngine {
       }
     }
 
-    emit({
-      type: "tool_start",
-      id: use.id,
-      name: use.name,
-      input: use.input,
-      providerHint: use.tool.schema.providerHint,
-      activityDescription: describeActivity(use.name, use.input),
-    });
-
     const t0 = Date.now();
+    let executionAdmitted = false;
+    let executionSettled = false;
+    let executionSettlementAttempted = false;
+    let toolImplementationEntered = false;
+    let toolImplementationCompleted = false;
+    let preHookMayHaveEffects = false;
+    let postHooksAttempted = false;
+    const runPostHooksOnce = async (output: unknown): Promise<PostToolHookSettlement> => {
+      if (postHooksAttempted) {
+        throw new Error(`PostToolUse hooks for ${use.id} were already attempted; refusing duplicate execution`);
+      }
+      postHooksAttempted = true;
+      return this.settlePostToolHooks(use, output, emit);
+    };
     try {
       // Holds the live watchdog control for THIS call so the permission prompt
       // can pause the clock (set below once withWatchdog invokes run()).
       let watchdog: WatchdogControl = NOOP_WATCHDOG;
       const ctx: ToolCallContext = {
         workspace: this.cfg.workspace,
+        sessionId: this.sessionId,
+        toolUseId: use.id,
         signal: this.liveSignal(),
         requestPermission: this.cfg.requestPermission
           ? async (request) => {
@@ -2549,7 +3087,69 @@ export class QueryEngine {
           : undefined,
         emitProgress: (data) => emit({ type: "tool_progress", id: use.id, data }),
         fileReadStamps: this.cfg.fileReadStamps,
+        mutationTransactionId: workspaceMutationTransactionId(this.sessionId, use.id),
+        repositoryInstructions: this.cfg.repositoryInstructions,
       };
+      // This await is the side-effect write-ahead boundary. SessionKernel records
+      // the call (and checkpoint identity) before an adapted/native/MCP tool can
+      // enter its implementation. A database failure therefore fails closed.
+      await this.cfg.beforeToolExecution?.({
+        toolUseId: use.id,
+        toolName: use.name,
+        input: use.input,
+        safety: use.safety,
+        checkpointId,
+        mutationTransactionId: workspaceMutationTransactionId(this.sessionId, use.id),
+      });
+      executionAdmitted = true;
+      // Hooks are executable host code and may themselves touch the workspace.
+      // They therefore run *inside* the durable tool boundary and after the
+      // pre-tool checkpoint. A blocking hook settles the canonical call as a
+      // failure before any model-visible error is exposed.
+      const preHook = this.cfg.hookManager
+        ? await this.cfg.hookManager.run({
+            event: "PreToolUse",
+            toolName: use.name,
+            input: use.input,
+            workspace: this.cfg.workspace,
+          })
+        : null;
+      preHookMayHaveEffects = (preHook?.executed ?? 0) > 0;
+      if (preHook?.blocked) {
+        const baseMessage = preHook.reminders[0] ?? `PreToolUse hook blocked ${use.name}`;
+        const message = preHookMayHaveEffects
+          ? `${baseMessage}\n\nA PreToolUse hook ran before blocking, so its effect status is unknown. Inspect and reconcile the workspace before retrying.`
+          : baseMessage;
+        executionSettlementAttempted = true;
+        await this.cfg.afterToolExecution?.({
+          toolUseId: use.id,
+          toolName: use.name,
+          input: use.input,
+          safety: use.safety,
+          status: preHookMayHaveEffects ? "effect_unknown" : "failed",
+          error: message,
+        });
+        executionSettled = true;
+        emit({ type: "tool_error", id: use.id, error: message, durationMs: Date.now() - t0 });
+        return {
+          toolUseId: use.id,
+          interrupted: false,
+          finishedAt: Date.now(),
+          result: { type: "tool_result", tool_use_id: use.id, content: message, is_error: true },
+        };
+      }
+      // Never expose tool_start until the host's write-ahead admission is
+      // durable. Consumers can now treat tool_start as proof that a canonical
+      // tool record exists, even though adapted-tool validation/permission may
+      // still reject before the implementation gains effects.
+      emit({
+        type: "tool_start",
+        id: use.id,
+        name: use.name,
+        input: use.input,
+        providerHint: use.tool.schema.providerHint,
+        activityDescription: describeActivity(use.name, use.input),
+      });
       // Watchdog: bound this single tool call. The MERGED child signal replaces
       // ctx.signal so the tool's own fetch/child aborts on timeout — turning the
       // 5-minute hang into a fast, correctable is_error the model can adapt to.
@@ -2558,75 +3158,106 @@ export class QueryEngine {
         this.liveSignal(),
         (signal, control) => {
           watchdog = control;
+          toolImplementationEntered = true;
           return use.tool.call(use.input, { ...ctx, signal });
         },
       );
+      toolImplementationCompleted = true;
       const durationMs = Date.now() - t0;
-      emit({
-        type: "tool_end",
-        id: use.id,
-        output: result.output,
-        touchedFiles: result.touchedFiles,
-        durationMs,
-        display: result.display,
+      const declaredFailure = typeof result.failure === "string" ? result.failure.trim() || undefined : undefined;
+      const postHooks = await runPostHooksOnce(
+        declaredFailure ? { error: declaredFailure, output: result.output } : result.output,
+      );
+      const touchedFiles = mergeTouchedFiles(result.touchedFiles, postHooks.touchedFiles);
+      for (const failure of postHooks.failures) {
+        emit({
+          type: "system_reminder_injected",
+          text: `${failure}\n\nThe primary ${use.name} call already completed. Address the hook failure or inspect its effects; do not repeat the primary call solely because this hook failed.`,
+          source: "hook",
+        });
+      }
+      const durableOutput = postHooks.failures.length > 0
+        ? { toolOutput: result.output, postToolHookFailures: postHooks.failures }
+        : result.output;
+      executionSettlementAttempted = true;
+      await this.cfg.afterToolExecution?.({
+        toolUseId: use.id,
+        toolName: use.name,
+        input: use.input,
+        safety: use.safety,
+        status: declaredFailure ? "failed" : "succeeded",
+        output: durableOutput,
+        ...(declaredFailure ? { error: declaredFailure } : {}),
+        touchedFiles,
       });
-      if (use.name === "TodoWrite" && isTodoOutput(result.output)) {
+      executionSettled = true;
+      if (declaredFailure) {
+        emit({
+          type: "tool_error",
+          id: use.id,
+          error: declaredFailure,
+          output: result.output,
+          touchedFiles,
+          durationMs,
+        });
+      } else {
+        emit({
+          type: "tool_end",
+          id: use.id,
+          output: result.output,
+          touchedFiles,
+          durationMs,
+          display: result.display,
+        });
+      }
+      if (!declaredFailure && use.name === "TodoWrite" && isTodoOutput(result.output)) {
         this.latestTodos = result.output.todos;
         emit({ type: "todo_updated", todos: result.output.todos });
-      }
-      if (this.cfg.hookManager) {
-        // Guard the success-path hook the same way the catch-path one is: a
-        // throwing PostToolUse hook must NOT fall through to the catch and
-        // overwrite a tool that already SUCCEEDED (tool_end was emitted above)
-        // with an is_error — that would lie to the model and risk re-running a
-        // committed Write/Edit/Bash.
-        try {
-          await this.cfg.hookManager.run({
-            event: "PostToolUse",
-            toolName: use.name,
-            input: use.input,
-            output: result.output,
-            workspace: this.cfg.workspace,
-          });
-        } catch {
-          // a hook failure can never invalidate a successful tool result
-        }
       }
       const modelText = await this.capToolResultText(result.output, use.id, use.tool.schema, (warning) =>
         emit({ type: "system_reminder_injected", text: `${use.name}: ${warning}`, source: "instructions" }),
       );
+      const hookFailureText = postHooks.failures.length > 0
+        ? `\n\n<PostToolUse hook failures>\n${postHooks.failures.join("\n\n")}\n</PostToolUse hook failures>\nThe primary tool call already completed; do not blindly replay it.`
+        : "";
+      const modelResultText = (declaredFailure ? `${declaredFailure}\n\n${modelText}` : modelText) + hookFailureText;
       const resultContent: ToolResultBlock["content"] =
         result.images && result.images.length > 0
           ? [
-              { type: "text", text: modelText },
+              { type: "text", text: modelResultText },
               ...result.images.map((img) => ({
                 type: "image" as const,
                 source: { kind: "base64" as const, mediaType: img.mediaType, data: img.data },
               })),
             ]
-          : modelText;
+          : modelResultText;
       return {
         toolUseId: use.id,
-        touchedFiles: result.touchedFiles,
+        touchedFiles,
         finishedAt: Date.now(),
         verificationAttempted: isManualVerificationCall(use.name, use.input),
         verificationCommand: manualVerificationCommand(use.name, use.input) ?? undefined,
-        verificationPassed: isSuccessfulVerificationCall(use.name, use.input, result.output),
+        verificationPassed: !declaredFailure && isSuccessfulVerificationCall(use.name, use.input, result.output),
         potentialMutation: isPotentialCodeMutationCall(use.name, use.input),
         result: {
           type: "tool_result",
           tool_use_id: use.id,
           content: resultContent,
+          ...(declaredFailure ? { is_error: true } : {}),
         },
       };
     } catch (err) {
+      // A failed durable settlement barrier is not an ordinary tool failure.
+      // Retrying that barrier here can conflict with a commit whose response
+      // was lost. Leave the generation for canonical recovery instead.
+      if (executionSettlementAttempted && !executionSettled) throw err;
       const durationMs = Date.now() - t0;
       // A watchdog abort gets an actionable message so the model changes course
       // instead of re-trying the same hang. Stays is_error so the circuit-breaker
       // accounting (failStreak) still counts it as a failure signal.
-      const message =
+      const baseMessage =
         err instanceof ToolWatchdogError
-          ? use.tool.schema.safety === "external-state"
+          ? use.safety === "external-state"
             ? // An aborted fetch only stops the CLIENT — a POST that reached the
               // server may have COMMITTED. Never invite a blind retry (double
               // charge / double send); tell the model to verify first.
@@ -2635,26 +3266,50 @@ export class QueryEngine {
           : err instanceof Error
             ? err.message
             : String(err);
-      emit({ type: "tool_error", id: use.id, error: message, durationMs });
-      if (this.cfg.hookManager) {
-        // The PostToolUse hook runs in the catch path: a throw here would mask
-        // the ORIGINAL tool error (the thing the model actually needs to see)
-        // with an unrelated hook failure. Isolate it — the tool's own error is
-        // already captured and returned below regardless.
-        try {
-          await this.cfg.hookManager.run({
-            event: "PostToolUse",
-            toolName: use.name,
-            input: use.input,
-            output: { error: message },
-            workspace: this.cfg.workspace,
-          });
-        } catch {
-          // hook bookkeeping never overrides the real tool error
-        }
+      const effectUnknown =
+        executionAdmitted &&
+        !executionSettled &&
+        (preHookMayHaveEffects ||
+          (use.safety !== "read-only" &&
+            !isPreEffectToolError(err) &&
+            (toolImplementationEntered || toolImplementationCompleted || err instanceof ToolWatchdogError || this.liveSignal().aborted)));
+      const message = effectUnknown
+        ? `${baseMessage}\n\nThe tool's effect status is unknown. Inspect and reconcile the target state before retrying; do not repeat this call blindly.`
+        : baseMessage;
+      const postHooks = executionAdmitted && !postHooksAttempted
+        ? await runPostHooksOnce({ error: message })
+        : EMPTY_POST_TOOL_HOOK_SETTLEMENT;
+      const touchedFiles = mergeTouchedFiles(undefined, postHooks.touchedFiles);
+      const hookFailureText = postHooks.failures.length > 0
+        ? `\n\n<PostToolUse hook failures>\n${postHooks.failures.join("\n\n")}\n</PostToolUse hook failures>\nThe primary call was already attempted; do not replay it solely because a hook failed.`
+        : "";
+      for (const failure of postHooks.failures) {
+        emit({
+          type: "system_reminder_injected",
+          text: `${failure}\n\nDo not blindly replay ${use.name}; inspect the primary and hook effects independently.`,
+          source: "hook",
+        });
       }
+      if (executionAdmitted && !executionSettled) {
+        executionSettlementAttempted = true;
+        await this.cfg.afterToolExecution?.({
+          toolUseId: use.id,
+          toolName: use.name,
+          input: use.input,
+          safety: use.safety,
+          status: effectUnknown ? "effect_unknown" : "failed",
+          error: message + hookFailureText,
+          ...(postHooks.failures.length > 0
+            ? { output: { postToolHookFailures: postHooks.failures } }
+            : {}),
+          touchedFiles,
+        });
+        executionSettled = true;
+      }
+      emit({ type: "tool_error", id: use.id, error: message + hookFailureText, touchedFiles, durationMs });
       return {
         toolUseId: use.id,
+        touchedFiles,
         interrupted: this.cfg.permissionDenialInterrupts !== false && isPermissionDeniedError(err),
         finishedAt: Date.now(),
         verificationAttempted: isManualVerificationCall(use.name, use.input),
@@ -2662,7 +3317,7 @@ export class QueryEngine {
         result: {
           type: "tool_result",
           tool_use_id: use.id,
-          content: message,
+          content: message + hookFailureText,
           is_error: true,
         },
       };
@@ -2677,6 +3332,18 @@ interface ResolvedToolUse {
   name: string;
   input: unknown;
   tool: EngineTool;
+  safety: SafetyClass;
+}
+
+function isPreEffectToolError(error: unknown): boolean {
+  return !!error &&
+    typeof error === "object" &&
+    (error as { aresToolEffectPhase?: unknown }).aresToolEffectPhase === "pre-effect";
+}
+
+/** Stable across crash replay of the same provider tool-use identity. */
+export function workspaceMutationTransactionId(sessionId: string, toolUseId: string): string {
+  return `tool_${createHash("sha256").update(`${sessionId}\0${toolUseId}`).digest("hex").slice(0, 48)}`;
 }
 
 interface ToolExecutionOutcome {
@@ -2689,6 +3356,46 @@ interface ToolExecutionOutcome {
   verificationCommand?: string;
   verificationPassed?: boolean;
   potentialMutation?: boolean;
+}
+
+interface PostToolHookSettlement {
+  failures: string[];
+  touchedFiles: string[];
+}
+
+const EMPTY_POST_TOOL_HOOK_SETTLEMENT: PostToolHookSettlement = Object.freeze({
+  failures: [],
+  touchedFiles: [],
+});
+
+function postToolHookUseId(sessionId: string, primaryToolUseId: string, hook: HookInvocation): string {
+  return `posthook_${createHash("sha256")
+    .update(`${sessionId}\0${primaryToolUseId}\0${hook.id}`)
+    .digest("hex")
+    .slice(0, 40)}`;
+}
+
+function postToolHookArguments(use: ResolvedToolUse, hook: HookInvocation): Record<string, unknown> {
+  return {
+    event: "PostToolUse",
+    hookId: hook.id,
+    command: hook.command,
+    matcher: hook.matcher ?? null,
+    primaryToolUseId: use.id,
+    primaryToolName: use.name,
+  };
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function mergeTouchedFiles(
+  primary: readonly string[] | undefined,
+  additional: readonly string[] | undefined,
+): string[] | undefined {
+  const merged = [...new Set([...(primary ?? []), ...(additional ?? [])])];
+  return merged.length > 0 ? merged : undefined;
 }
 
 class AsyncEventQueue<T> {
@@ -2827,10 +3534,12 @@ const SOLO_TOOL_NAMES = new Set([
   "PowerShell",
   "CodeMode",
   "KillShell",
+  "KillTask",
   "ApplyIntent",
   "FindAndEdit",
   "Memory",
   "EnterPlanMode",
+  "UpdatePlanDraft",
   "ExitPlanMode",
 ]);
 
@@ -2845,9 +3554,21 @@ interface ToolDeps {
 
 function analyzeToolDeps(use: ResolvedToolUse, workspace: string): ToolDeps {
   const name = use.tool.schema.name;
-  const safety = use.tool.schema.safety;
+  // Runtime-resolved calls carry the per-input safety classification, but
+  // callers that construct a ResolvedToolUse directly (and older persisted
+  // call shapes) only have the schema declaration. Never let a missing
+  // override silently turn a workspace writer into a read-only dependency.
+  const safety = use.safety ?? use.tool.schema.safety;
   const taskType = String(((use.input ?? {}) as Record<string, unknown>).subagent_type ?? "");
-  const readOnlyTask = name === "Task" && taskType !== "general-purpose";
+  // Unknown/custom personas are writers until proven otherwise. The previous
+  // `!== general-purpose` shortcut classified every roster persona (including
+  // full-belt forge agents) read-only and ran overlapping writers concurrently.
+  const readOnlyTask = name === "Task" && new Set([
+    "explorer",
+    "researcher",
+    "code-reviewer",
+    "verifier",
+  ]).has(taskType);
   const isWriteSafety = !readOnlyTask && (safety === "workspace-write" || safety === "destructive");
 
   if (SOLO_TOOL_NAMES.has(name)) {
@@ -2965,7 +3686,7 @@ function normalizeToolInput(toolName: string, input: unknown): unknown {
       // leave as-is; schema validation reports the real error
     }
   };
-  for (const key of ["todos", "edits"]) {
+  for (const key of ["todos", "edits", "target_paths"]) {
     if (key in next) parseStructured(key);
   }
 
@@ -3014,6 +3735,7 @@ function normalizeToolInput(toolName: string, input: unknown): unknown {
     case "Bash":
     case "PowerShell":
       copy("command", "cmd", "script");
+      copy("target_paths", "targets", "paths");
       break;
     default:
       break;
@@ -3106,8 +3828,8 @@ function fillMissingToolResults(
   }
 }
 
-function shouldCheckpointBeforeTool(tool: EngineTool): boolean {
-  return tool.schema.safety === "workspace-write" || tool.schema.safety === "destructive";
+function shouldCheckpointBeforeTool(safety: SafetyClass): boolean {
+  return safety === "workspace-write" || safety === "destructive";
 }
 
 function cryptoId(prefix = "id"): string {
@@ -3421,6 +4143,8 @@ const PROGRESS_TOOLS = new Set([
   "PowerShell",
   "BashOutput",
   "KillShell",
+  "TaskOutput",
+  "KillTask",
   "TodoWrite",
   "Task",
   "Memory",
@@ -3749,6 +4473,10 @@ function describeActivity(toolName: string, input: unknown): string {
       return "Reading shell output";
     case "KillShell":
       return "Stopping a background shell";
+    case "TaskOutput":
+      return "Reading background task status";
+    case "KillTask":
+      return "Stopping a background task";
     case "WebFetch": {
       const u = str(i.url);
       return u ? `Fetching ${hostOf(u)}` : "Fetching a page";
@@ -3840,6 +4568,8 @@ function describeActivity(toolName: string, input: unknown): string {
       return "Entering plan mode";
     case "ExitPlanMode":
       return "Leaving plan mode";
+    case "UpdatePlanDraft":
+      return "Saving the living plan draft";
     case "LivingMind": {
       const action = str(i.action);
       return action ? `Living memory: ${action}` : "Tending living memory";

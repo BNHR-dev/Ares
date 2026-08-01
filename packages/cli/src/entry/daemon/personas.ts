@@ -65,28 +65,54 @@ type Emit = (payload: Record<string, unknown>) => void;
  * did their work inside the tool. Emits `persona_changed` so the desktop can
  * swap its chip without polling.
  */
-export function applyPersonaToolResult(live: LiveSession, output: unknown, emit: Emit): void {
+export function applyPersonaToolResult(live: LiveSession, output: unknown, emit: Emit, gate?: PersonaGate): void {
   if (!output || typeof output !== "object") return;
   const result = output as { action?: string; ok?: boolean; persona?: PersonaDef };
   if (result.ok === false) return;
 
   if (result.action === "adopt" && result.persona) {
     live.adoptPersona(result.persona);
+    // Deliberate opt-in: whatever the owner said earlier, they just asked for a
+    // persona, so the session is open to them again.
+    if (gate) gate.off = false;
     emit({ type: "persona_changed", active: personaToWire(result.persona), origin: "agent" });
     return;
   }
   if (result.action === "release") {
     live.adoptPersona(null);
+    // The model only releases because the owner asked it to. Same standing
+    // order as the desktop's "Back to Ares" button.
+    if (gate) gate.off = true;
     emit({ type: "persona_changed", active: null, origin: "agent" });
   }
 }
 
 /**
+ * Per-session memory of what the owner has already decided about personas.
+ *
+ * Without this, matching is stateless and "Back to Ares" is a lie: the owner
+ * takes the persona off, types their next message, it contains "fix", and the
+ * same persona is back before they finish reading the reply. Both fields exist
+ * to make an owner decision STICK.
+ */
+export interface PersonaGate {
+  /** The owner explicitly went back to plain Ares. No auto-adopt, no more
+   *  suggestions, until they wear something on purpose again. */
+  off: boolean;
+  /** Personas already offered this session. A suggestion the owner ignored or
+   *  dismissed is an answer; re-asking every turn is nagging, not disclosure. */
+  offered: Set<string>;
+}
+
+export function newPersonaGate(): PersonaGate {
+  return { off: false, offered: new Set() };
+}
+
+/**
  * Offer a persona for the message the owner just sent.
  *
- * Deliberately does NOT adopt on its own: it emits a `persona_suggested` event
- * and lets the surface decide. `auto` personas are announced-and-adopted by the
- * caller; `suggest` ones become a chip the owner taps. Nothing here ever
+ * Deliberately does NOT adopt on its own unless the persona is `auto`: it emits
+ * a `persona_suggested` event and lets the surface decide. Nothing here ever
  * changes behaviour silently — a keyword-triggered switch the owner can't see
  * is the kind of bug that hides for months.
  *
@@ -96,14 +122,19 @@ export async function personaForMessage(
   live: LiveSession,
   message: string,
   emit: Emit,
+  gate?: PersonaGate,
 ): Promise<PersonaDef | null> {
   // Already wearing one? Leave it alone. Re-matching every turn would make a
   // persona flip mid-conversation on an incidental keyword.
   if (live.activePersona()) return null;
+  // The owner said "back to Ares". That holds for the rest of the session.
+  if (gate?.off) return null;
   const roster = await listPersonas(live.context.home).catch(() => []);
   if (roster.length === 0) return null;
   const match = bestPersonaFor(message, roster);
   if (!match) return null;
+  if (gate?.offered.has(match.persona.name)) return null;
+  gate?.offered.add(match.persona.name);
 
   if (match.persona.autonomy === "auto") {
     live.adoptPersona(match.persona);

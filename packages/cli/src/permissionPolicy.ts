@@ -50,6 +50,7 @@ export const SENSITIVE_PERMISSION = new RegExp(
     "computer ?use", "control (the )?(mouse|keyboard|screen|desktop)",
     "\\bdeploy\\b", "\\bstripe\\b", "payment link", "\\bemail\\b",
     "request[_ ]?user[_ ]?action", "hand off", "needs you",
+    "exit ?plan ?mode", "approve this plan", "leave plan mode",
   ].join("|"),
   "i",
 );

@@ -27,7 +27,7 @@ await build({
   platform: "node",
   target: "node22",
   format: "esm",
-  external: ["better-sqlite3", "playwright", "react-devtools-core", "sqlite-vec"],
+  external: ["better-sqlite3", "playwright", "react-devtools-core", "sqlite-vec", "pdfjs-dist/*"],
   banner: {
     js: [
       'import { createRequire as __aresCreateRequire } from "node:module";',
@@ -69,9 +69,14 @@ await cp(process.execPath, path.join(binOut, nodeName));
 const connectorRequire = createRequire(path.join(root, "packages", "connectors", "package.json"));
 const playwrightDir = path.dirname(connectorRequire.resolve("playwright/package.json"));
 const playwrightRequire = createRequire(path.join(playwrightDir, "package.json"));
+const toolsRequire = createRequire(path.join(root, "packages", "tools", "package.json"));
+const pdfjsDir = path.dirname(toolsRequire.resolve("pdfjs-dist/package.json"));
 const runtimePackages = [
   ["playwright", playwrightDir],
   ["playwright-core", path.dirname(playwrightRequire.resolve("playwright-core/package.json"))],
+  // Read imports pdf.js lazily. Keep its worker/assets and Apache license
+  // intact instead of flattening the package into the single-file CLI bundle.
+  ["pdfjs-dist", pdfjsDir],
 ];
 for (const [packageName, packageDir] of runtimePackages) {
   await cp(packageDir, path.join(modulesOut, packageName), {
@@ -86,6 +91,7 @@ const outputs = [
   path.join(voiceServiceOut, "server.py"),
   path.join(modulesOut, "playwright", "package.json"),
   path.join(modulesOut, "playwright-core", "package.json"),
+  path.join(modulesOut, "pdfjs-dist", "LICENSE"),
 ];
 for (const file of outputs) {
   const info = await stat(file);

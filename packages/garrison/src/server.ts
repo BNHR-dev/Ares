@@ -299,9 +299,23 @@ export class GarrisonServer {
           this.enqueueError(client, "session.send requires sessionId and text");
           return;
         }
+        if (
+          frame.inputId !== undefined &&
+          (typeof frame.inputId !== "string" || !frame.inputId.trim() || frame.inputId.length > 1_024)
+        ) {
+          this.enqueueError(client, "session.send inputId must be a non-empty string of at most 1024 characters");
+          return;
+        }
+        if (frame.delivery !== undefined && frame.delivery !== "queue" && frame.delivery !== "steer") {
+          this.enqueueError(client, "session.send delivery must be queue or steer");
+          return;
+        }
         // Fire-and-forget: the turn streams to subscribers; failures (busy,
         // unknown session, engine throw) come back as one error frame.
-        sessions.send(frame.sessionId, frame.text).catch((err) => this.enqueueError(client, errorMessage(err)));
+        sessions.send(frame.sessionId, frame.text, {
+          inputId: frame.inputId,
+          delivery: frame.delivery,
+        }).catch((err) => this.enqueueError(client, errorMessage(err)));
         return;
       }
       case "session.interrupt": {

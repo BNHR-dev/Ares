@@ -49,7 +49,7 @@ function flakyProvider(failures, code = "overloaded_error", message = "Overloade
 }
 
 async function run(provider) {
-  const engine = new QueryEngine(
+  const engine = QueryEngine.forTesting(
     { provider, model: "claude-opus-5", systemPrompt: "t", tools: [], workspace: "D:\\Ares", maxTurns: 4 },
     "sess_cap",
   );

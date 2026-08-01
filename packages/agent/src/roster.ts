@@ -80,6 +80,13 @@ export interface PersonaDef {
 // a broken/emptied roster directory can't leave Ares with nothing to delegate
 // to. They are overridable: an AGENT.md with the same name shadows the builtin
 // entirely, which is how the owner (or Ares) edits one — write it to disk.
+//
+// Every builtin is `suggest`, never `auto`, and that is not a stylistic choice.
+// Forge's triggers ("fix", "build", "add a", "implement") match nearly every
+// message anyone sends a coding agent, so as `auto` it seized the wheel on turn
+// one of almost every conversation and the owner spent their time fighting the
+// roster instead of using it. Ships-in-code personas OFFER; only a persona the
+// owner deliberately authored may set itself to step in unasked.
 
 const BUILTIN_PERSONAS: ReadonlyArray<Omit<PersonaDef, "source" | "file">> = [
   {
@@ -95,7 +102,7 @@ const BUILTIN_PERSONAS: ReadonlyArray<Omit<PersonaDef, "source" | "file">> = [
     tools: ["Read", "Glob", "Grep", "CodebaseSearch", "LSP", "WebSearch", "WebFetch"],
     glyph: "search",
     tone: "mint",
-    autonomy: "auto",
+    autonomy: "suggest",
     maxTurns: 30,
     body: `You are working as VITRUVIUS — the research and architecture specialist.
 
@@ -119,7 +126,7 @@ You prefer reading and reasoning to editing. When a change is clearly warranted,
     tools: [],
     glyph: "forge",
     tone: "ember",
-    autonomy: "auto",
+    autonomy: "suggest",
     maxTurns: 60,
     body: `You are working as FORGE — the implementation specialist.
 
@@ -143,7 +150,7 @@ You are allowed the full belt. Use it — but read before you edit, and never cl
     tools: ["Read", "Glob", "Grep", "CodebaseSearch", "LSP", "Bash", "PowerShell"],
     glyph: "shield",
     tone: "ember",
-    autonomy: "auto",
+    autonomy: "suggest",
     maxTurns: 30,
     body: `You are working as AEGIS — adversarial review.
 
@@ -169,7 +176,7 @@ Report findings with file_path:line, a concrete failure scenario, and severity. 
     tools: ["Read", "Glob", "Grep", "CodebaseSearch", "Write", "Edit"],
     glyph: "scroll",
     tone: "ivory",
-    autonomy: "auto",
+    autonomy: "suggest",
     maxTurns: 25,
     body: `You are working as SCRIBE — writing and explanation.
 

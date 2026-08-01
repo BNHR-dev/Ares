@@ -53,6 +53,9 @@ export interface DaemonInputCommand {
   error?: string;
   /** Which UI chat/session this command targets (multi-session daemon). */
   sessionId?: string;
+  /** Stable identity for one logical send/steer. Retrying the command must
+   * reuse this value so canonical admission remains exactly once. */
+  inputId?: string;
   /** operator_control payload: "halt" engages the kill switch, "resume" releases it. */
   action?: string;
   /** operator_control halt reason (freeform, logged with the kill-switch flag file). */

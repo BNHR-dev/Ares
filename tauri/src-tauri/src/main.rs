@@ -474,7 +474,13 @@ fn start_daemon(
 }
 
 #[tauri::command]
-fn ares_send(goal: String, session_id: Option<String>, voice: Option<bool>, state: State<DaemonState>) -> Result<(), String> {
+fn ares_send(
+    goal: String,
+    session_id: Option<String>,
+    voice: Option<bool>,
+    input_id: Option<String>,
+    state: State<DaemonState>,
+) -> Result<(), String> {
     let trimmed = goal.trim();
     if trimmed.is_empty() {
         return Err("message is empty".to_string());
@@ -482,7 +488,13 @@ fn ares_send(goal: String, session_id: Option<String>, voice: Option<bool>, stat
 
     write_daemon_command(
         state.inner(),
-        json!({ "type": "send", "goal": trimmed, "sessionId": session_id, "voice": voice.unwrap_or(false) }),
+        json!({
+            "type": "send",
+            "goal": trimmed,
+            "sessionId": session_id,
+            "voice": voice.unwrap_or(false),
+            "inputId": input_id,
+        }),
     )
 }
 

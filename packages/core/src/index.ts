@@ -17,11 +17,17 @@ export {
   adaptiveReasoningLevel,
   guardStreamStalls,
   type QueryEngineConfig,
+  type DurableQueryEngineConfig,
   type Provider,
   type ProviderRequest,
   type ProviderToolDescriptor,
   type EngineTool,
+  type EngineToolEffectPolicy,
   type EngineToolResult,
+  type ToolEffectReconciliationRequest,
+  type ToolEffectReconciliationResult,
+  type ToolEffectRetryPolicy,
+  type ToolSettlementReceipt,
   type ToolCallContext,
   type ToolPermissionRequest,
   type ToolUseBlock,
@@ -119,11 +125,15 @@ export {
   SubagentRegistry,
   AresSubagentRunner,
   BUILT_IN_SUBAGENT_TYPES,
+  SUBAGENT_SESSION_TRANSITION_TOOLS,
+  scopeSubagentTools,
   type SubagentRunner,
   type SubagentRunnerOptions,
   type SubagentTypeDef,
   type SubagentRunRequest,
   type SubagentRunResult,
+  type BackgroundSubagentStart,
+  type BackgroundSubagentSnapshot,
 } from "./subagents.js";
 
 export {
@@ -160,6 +170,27 @@ export {
   type VerifyCacheStats,
   type VerificationEvidenceSnapshot,
 } from "./verifier.js";
+
+export {
+  createVerifiedChildSession,
+  confirmChildTurnEnd,
+  loadChildVerificationDebt,
+  type ChildVerificationDebt,
+  type VerifiedChildSession,
+  type VerifiedChildSessionOptions,
+} from "./childSessionVerifier.js";
+
+export {
+  CHILD_SESSION_COMPOSITION_PROFILES,
+  composeVerifiedChildSession,
+  composeVerifiedChildSessionSync,
+  withComposedVerifiedChildSession,
+  type ChildSessionSurface,
+  type ChildSessionCleanupPolicy,
+  type ChildSessionCompositionOptions,
+  type ChildSessionCompositionReceipt,
+  type ComposedVerifiedChildSession,
+} from "./childSessionComposition.js";
 
 export {
   buildRepositoryMap,
@@ -221,6 +252,8 @@ export {
   HookManager,
   type HookConfigEntry,
   type HookEvent,
+  type HookInvocation,
+  type HookInvocationResult,
   type HookRunInput,
   type HookRunResult,
 } from "./hooks.js";
@@ -251,17 +284,34 @@ export {
 
 export {
   Session,
+  SessionNotFoundError,
+  DEFAULT_SESSION_LEASE_TTL_MS,
+  MIN_SESSION_LEASE_TTL_MS,
+  MAX_SESSION_LEASE_TTL_MS,
+  MIN_SESSION_LEASE_HEARTBEAT_MS,
+  MAX_SESSION_LEASE_HEARTBEAT_MS,
+  resolveSessionLeaseTiming,
   listSessions,
   loadSessionSnapshot,
+  projectMessagesFromKernel,
   loadSessionRollout,
   deleteSession,
   renameSession,
   type SessionOptions,
+  type SessionLeaseTiming,
   type SessionSummary,
   type SessionSnapshot,
   type SessionRollout,
   type LoadSessionSnapshotOptions,
 } from "./session.js";
+
+export {
+  planArtifactPath,
+  planArtifactRelativePath,
+  renderApprovedPlanBuildHandoff,
+  renderPlanArtifact,
+  writePlanArtifact,
+} from "./planArtifact.js";
 
 export {
   createWorkspaceCheckpoint,
@@ -323,6 +373,8 @@ export {
   type OpenRouterProviderOptions,
   type OpenRouterModel,
 } from "./providers/openrouter.js";
+
+export { narrowToolSchema } from "./providers/toolSchema.js";
 
 export { buildPromptCacheKey, type PromptCacheKey } from "./promptCache.js";
 
@@ -414,6 +466,18 @@ export {
 } from "./startupContext.js";
 
 export {
+  RepositoryInstructionResolver,
+  REPOSITORY_INSTRUCTION_FILES,
+  MAX_REPOSITORY_INSTRUCTION_CHARS,
+  renderRepositoryInstructions,
+  repositoryInstructionClaimsFromMessages,
+  isRepositoryInstructionClaim,
+  type RepositoryInstructionContext,
+  type RepositoryInstructionClaim,
+  type ResolvedRepositoryInstruction,
+} from "./repositoryInstructions.js";
+
+export {
   crashDir,
   writeCrashLogSync,
   installGlobalCrashHandlers,
@@ -441,3 +505,35 @@ export {
   CHANGE_CONTEXT_MARKER,
   EMPTY_CHANGE_CONTEXT_MARKER,
 } from "./applyPatch/parser.js";
+
+export {
+  WorkspaceMutationService,
+  WorkspaceMutationError,
+  applyWorkspaceMutation,
+  rollbackWorkspaceMutation,
+  reconcileWorkspaceMutation,
+  workspaceContentHash,
+  type WorkspaceMutationOperation,
+  type WorkspaceMutationOptions,
+  type WorkspaceMutationReceiptOperation,
+  type WorkspaceMutationReceipt,
+  type WorkspaceMutationReconciliation,
+  type WorkspaceMutationErrorCode,
+  type ReconciledPathState,
+} from "./workspaceMutation.js";
+
+export {
+  PostMutationFeedbackService,
+  committedFilesFromReceipt,
+  inspectPostMutationFeedback,
+  renderPostMutationFeedback,
+  type PostMutationCommittedFile,
+  type PostMutationFeedback,
+  type PostMutationFeedbackFile,
+  type PostMutationFeedbackCheck,
+  type PostMutationFeedbackKind,
+  type PostMutationFeedbackCheckStatus,
+  type PostMutationFeedbackOptions,
+} from "./postMutationFeedback.js";
+
+export * from "./sessionKernel/index.js";

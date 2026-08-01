@@ -1,12 +1,13 @@
 // Extracted from entry.ts — daemon.
 
-import { authStatus, listSessions, loadSessionSnapshot, loadSessionRollout, deleteSession, renameSession, type Provider, classifyLane, runAnthropicLoginFlow, loadAnthropicTokens, sideQuery, sideQueryJson, QueryEngine, installGlobalCrashHandlers, EventRing, probeCredentialEncryption, connectMcpServer, disconnectMcpServer, setMcpServerEnabled, connectorNameFromUrl, runOpenAILoginFlow, runKimiLoginFlow, kimiAuthStatus } from "@ares/core";
+import { authStatus, listSessions, loadSessionSnapshot, loadSessionRollout, deleteSession, renameSession, SessionNotFoundError, type Provider, classifyLane, runAnthropicLoginFlow, loadAnthropicTokens, sideQuery, sideQueryJson, QueryEngine, installGlobalCrashHandlers, EventRing, openWorkspaceSessionKernel, probeCredentialEncryption, connectMcpServer, disconnectMcpServer, setMcpServerEnabled, connectorNameFromUrl, runOpenAILoginFlow, runKimiLoginFlow, kimiAuthStatus } from "@ares/core";
 import { appendFile, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout, stderr } from "node:process";
-import type { PermissionMode, PermissionPromptDecision, TurnEvent } from "@ares/protocol";
+import type { ContentBlock, PermissionMode, PermissionPromptDecision, TurnEvent } from "@ares/protocol";
 import { isReasoningLevel, REASONING_LEVELS, messageText, redactSecrets } from "@ares/protocol";
 import type { ToolPermissionRequest } from "@ares/core";
 import { notice } from "../terminalUi.js";
@@ -19,7 +20,7 @@ import { captureScreen } from "../screenCapture.js";
 import { ConsciousnessWatch, WATCHER_VOICE_PROMPT } from "../watch.js";
 import { recordConsciousnessObservation } from "../consciousnessContext.js";
 import { aresAgentHome, deletePersona, listPersonas, onLifecycle, runSkill, skillHubProbe, skillHubList, skillHubGet, skillHubPublish, installHubSkill, readLocalSkillFiles, writePersona } from "@ares/agent";
-import { adoptPersonaByName, applyPersonaToolResult, personaForMessage, personaToWire } from "./daemon/personas.js";
+import { adoptPersonaByName, applyPersonaToolResult, newPersonaGate, personaForMessage, personaToWire, type PersonaGate } from "./daemon/personas.js";
 import { assembleCognitiveState } from "./daemon/cognitiveState.js";
 import { QueryEngineDispatcher, OperatorBackgroundLoop, deriveLeash, domainOf, isOperatorPaused, listGoals, loadStandingOrders, materializeDueStandingOrders, type StandingOrder } from "@ares/operator";
 import { MemoryStore, reflectOnRun, detectWorkspaceProjectId, loadProjectState, buildConversationDigest, mergeDurableFacts, CONVERSATION_REFLECT_SYSTEM, DURABLE_FACTS_SCHEMA_HINT, type DurableFact } from "@ares/mind";
@@ -32,7 +33,7 @@ import { garrisonCommand } from "./garrisonCmd.js";
 import { fileURLToPath } from "node:url";
 import { cleanCommandId } from "./permissions.js";
 import { aresGatewayBase, daemonModelCatalog, fetchAresGatewayMe, fetchCustomOpenAiModels, postAresGatewayReport, preflightProviderSelection, providerFamilyForSelection, selectProvider, type ProviderSelection } from "./providers.js";
-import { ParsedArgs, cliVersion } from "./runtime.js";
+import { ParsedArgs, cliVersion, transitionPermissionMode } from "./runtime.js";
 import { LiveSession, chatContextBudget, createSession, createSessionWithSelection, handleReasoningCommand, isProviderFatalError, makeSpanSummarizer, modelLikelyHasVision, pickCapacitySibling, pickHealthyFallback, pickVisionFallback, resolveReasoningLevel } from "./sessionFactory.js";
 import { startGatewayMirror } from "./telegramWiring.js";
 import { contentFromUserInput, undoLines } from "./terminalLines.js";
@@ -214,15 +215,17 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
   interface DaemonEntry {
     live: LiveSession;
     turnActive: boolean;
-    pendingSteers: string[];
-    landingSteers: Array<{ text: string; reminder: string }>;
     /** The lane (task domain) this session is currently on, for sticky auto
      *  routing — the model only switches when the lane actually changes. */
     lane?: string;
+    /** What the owner has already decided about personas in this session, so
+     *  "Back to Ares" survives the next message instead of being undone by the
+     *  first keyword that matches. */
+    personaGate: PersonaGate;
   }
   const DEFAULT_SID = "__primary__";
   const sessions = new Map<string, DaemonEntry>();
-  const primaryEntry: DaemonEntry = { live, turnActive: false, pendingSteers: [], landingSteers: [] };
+  const primaryEntry: DaemonEntry = { live, turnActive: false, personaGate: newPersonaGate() };
   let mainSelection = live.selection;
   let mainProviderFamily = providerFamilyForSelection(live.selection);
   let activeTurns = 0;
@@ -489,9 +492,13 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
         ["model", mainSelection.model],
       ]),
     );
-    const saved = await loadSessionSnapshot(live.context.workspace, sid, { maxMessages: 1 })
-      .then(() => true)
-      .catch(() => false);
+    let saved = false;
+    try {
+      await loadSessionSnapshot(live.context.workspace, sid, { maxMessages: 1 });
+      saved = true;
+    } catch (error) {
+      if (!(error instanceof SessionNotFoundError)) throw error;
+    }
     const fresh = await createSessionWithSelection(
       args,
       selection,
@@ -499,10 +506,35 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
       requestPermission,
       { startAgentRuntime: false, sessionId: saved ? undefined : sid },
     );
-    const entry: DaemonEntry = { live: fresh, turnActive: false, pendingSteers: [], landingSteers: [] };
+    const entry: DaemonEntry = { live: fresh, turnActive: false, personaGate: newPersonaGate() };
     sessions.set(sid, entry);
     tagEmit(sid, { type: "session_opened", model: fresh.selection.model, provider: fresh.selection.provider.name });
     return entry;
+  };
+
+  const admitSteer = (
+    entry: DaemonEntry,
+    sessionId: string | undefined,
+    text: string,
+    inputId: string,
+  ): void => {
+    tagEmit(sessionId, { type: "steer_queued", text, inputId });
+    void (async () => {
+      for await (const _event of entry.live.session.sendContent(
+        [{ type: "text", text }],
+        { inputId, delivery: "steer" },
+      )) {
+        // The active turn owns the visible event stream. This generator crosses
+        // the durable admission/ack path and normally yields nothing itself.
+      }
+      tagEmit(sessionId, { type: "steer_applied", text, inputId });
+    })().catch((error) => {
+      tagEmit(sessionId, {
+        type: "daemon_error",
+        error: `steer admission failed: ${error instanceof Error ? error.message : String(error)}`,
+        inputId,
+      });
+    });
   };
 
   commands.onInterrupt = (command) => {
@@ -522,21 +554,9 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
     }
     entry.live.session.interrupt();
     tagEmit(command.sessionId, { type: "interrupted_by_user" });
-    // Watchdog: the abort above should make the turn tear down promptly (the
-    // engine now checks the signal every loop iteration). But if the turn is
-    // genuinely wedged (a tool ignoring its signal, a stalled provider stream),
-    // force the session free so it can accept new messages instead of rejecting
-    // every send with "a turn is already running".
-    if (entry.turnActive) {
-      const wedged = entry;
-      const t = setTimeout(() => {
-        if (wedged.turnActive) {
-          wedged.turnActive = false;
-          tagEmit(command.sessionId, { type: "turn_end", status: "interrupted", usage: {}, durationMs: 0 });
-        }
-      }, 5000);
-      t.unref?.();
-    }
+    // Do not synthesize completion on a timer. The Session owns a FIFO run lease
+    // and remains busy until the provider/tool generator actually unwinds; a UI
+    // timeout must never permit a second turn to overlap an unknown side effect.
   };
 
   // Apply any persisted Advanced-tab engine knobs (env-backed ones) on boot.
@@ -574,6 +594,9 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
               workspace: live.context.workspace,
               tools: live.tools,
               systemPrompt: buildSystemPrompt("workspace-write", live.context),
+              sessionKernel: await openWorkspaceSessionKernel(live.context.workspace),
+              telemetryDir: path.join(live.context.home, "telemetry"),
+              sessionRegistryHome: live.context.home,
               // UNATTENDED gate: the owner isn't watching a background mission tick,
               // so anything that needs a human (payment, credential, send-mail,
               // destructive shell, computer-use) is hard-denied; only safe local
@@ -722,11 +745,18 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
           fleetsInherit: incoming.fleetsInherit !== false,
         };
         const mode: PermissionMode = permissions.mode === "free" ? "bypass" : "workspace-write";
-        live.runtime.permissionMode = mode;
         live.runtime.permissions = permissions;
+        // Global permission posture must not cancel a session's explicit plan
+        // workflow. Plan/build is per-session state; only non-plan sessions
+        // inherit the new guarded/bypass execution posture.
+        if (live.runtime.permissionMode !== "plan") {
+          await transitionPermissionMode(live.runtime, mode);
+        }
         for (const e of sessions.values()) {
-          e.live.runtime.permissionMode = mode;
           e.live.runtime.permissions = permissions;
+          if (e.live.runtime.permissionMode !== "plan") {
+            await transitionPermissionMode(e.live.runtime, mode);
+          }
         }
         await updateUiSettings({ permissions, dangerousBypass: permissions.mode === "free" });
         process.stdout.write(JSON.stringify({ type: "permissions_set", permissions }) + "\n");
@@ -959,9 +989,17 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
         continue;
       }
       if (command.type === "sessions_list") {
-        // The rail's source of truth — every session persisted to disk.
-        const sessions = await listSessions(live.context.workspace, 100).catch(() => []);
-        process.stdout.write(JSON.stringify({ type: "sessions_list", sessions }) + "\n");
+        // SQLite is authoritative for canonical sessions. A projection/open
+        // failure must surface, never masquerade as an empty session rail.
+        try {
+          const sessions = await listSessions(live.context.workspace, 100);
+          process.stdout.write(JSON.stringify({ type: "sessions_list", sessions }) + "\n");
+        } catch (error) {
+          process.stdout.write(JSON.stringify({
+            type: "daemon_error",
+            error: `sessions_list: ${error instanceof Error ? error.message : String(error)}`,
+          }) + "\n");
+        }
         continue;
       }
       if (command.type === "model_catalog") {
@@ -1175,9 +1213,11 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
           const rollout = await loadSessionRollout(live.context.workspace, id);
           const brSettings = await loadUiSettings();
           // Trim pathological bulk (base64 images, giant tool dumps) so even an
-          // extreme transcript gzips under the platform limit. Truncates any
-          // single oversized string; the diagnosis value is in the code + errors,
-          // not a multi-MB embedded screenshot.
+          // extreme transcript stays serializable. Truncates any single
+          // oversized string; the diagnosis value is in the code + errors, not
+          // a multi-MB embedded screenshot. The COMPRESSED body is fitted to the
+          // gateway's limit separately, inside postAresGatewayReport — that is
+          // the number that decides whether the upload succeeds.
           const events = trimRolloutForReport(rollout.entries);
           const payload = {
             session_id: id,
@@ -1308,6 +1348,11 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
         }
         const name = typeof command.name === "string" && command.name.trim() ? command.name.trim() : undefined;
         const result = await adoptPersonaByName(entry.live, name);
+        // An owner decision is a standing order, not a one-turn preference.
+        // "Back to Ares" holds until they wear something on purpose again —
+        // otherwise the next message containing "fix" put the persona straight
+        // back on and the button looked broken.
+        if (result.ok) entry.personaGate.off = !name;
         process.stdout.write(
           JSON.stringify({
             type: "persona_changed",
@@ -1322,8 +1367,14 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
       if (command.type === "persona_write") {
         const name = typeof command.name === "string" ? command.name.trim() : "";
         const body = typeof command.body === "string" ? command.body : "";
+        // Failures come back as persona_written{ok:false}, NOT daemon_error:
+        // daemon_error folds into the active session's transcript, and the
+        // owner is looking at HELM when they hit Save, so a failed write was
+        // completely silent — the composer just closed and nothing appeared.
         if (!name || !body.trim()) {
-          process.stdout.write(JSON.stringify({ type: "daemon_error", error: "persona_write requires name and body" }) + "\n");
+          process.stdout.write(
+            JSON.stringify({ type: "persona_written", ok: false, name, error: "a persona needs a name and a method — the method IS the persona" }) + "\n",
+          );
           continue;
         }
         try {
@@ -1348,10 +1399,10 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
             },
             live.context.home,
           );
-          process.stdout.write(JSON.stringify({ type: "persona_written", persona: personaToWire(persona) }) + "\n");
+          process.stdout.write(JSON.stringify({ type: "persona_written", ok: true, persona: personaToWire(persona) }) + "\n");
         } catch (err) {
           process.stdout.write(
-            JSON.stringify({ type: "daemon_error", error: `persona_write failed: ${err instanceof Error ? err.message : String(err)}` }) + "\n",
+            JSON.stringify({ type: "persona_written", ok: false, name, error: err instanceof Error ? err.message : String(err) }) + "\n",
           );
         }
         continue;
@@ -1755,28 +1806,33 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
         process.stdout.write(JSON.stringify({ type: "oauth_disconnected", provider }) + "\n");
         continue;
       }
+      let idleSteer = false;
       if (command.type === "steer") {
-        // Steer: queue the user's mid-turn nudge into THAT session as a
-        // high-priority reminder. The engine's mid-turn drain folds it in AFTER
-        // the current tool batch, before the next model call — the model adapts
-        // without losing context.
+        // A steer is a canonical user input. It is admitted immediately and the
+        // active engine claims it only at a settled model/tool boundary; no
+        // provider or possibly-effectful tool is aborted to make it land.
         const text = typeof command.goal === "string" ? command.goal : typeof command.text === "string" ? command.text : "";
         if (!text.trim()) {
           tagEmit(command.sessionId, { type: "daemon_error", error: "steer requires text" });
           continue;
         }
-        const entry = sessions.get(command.sessionId || DEFAULT_SID);
-        if (!entry?.turnActive) {
-          tagEmit(command.sessionId, { type: "daemon_error", error: "there is no active turn to steer" });
+        const requestedInputId = typeof command.inputId === "string" ? command.inputId.trim() : "";
+        if (command.inputId !== undefined && (!requestedInputId || requestedInputId.length > 1_024)) {
+          tagEmit(command.sessionId, { type: "daemon_error", error: "steer inputId must be 1-1024 characters" });
           continue;
         }
-        // Preempt a provider or tool that may never reach the old "safe"
-        // reminder boundary. The turn runner resumes the same pending turn with
-        // this steering text injected after the interrupt unwinds.
-        entry.pendingSteers.push(text.trim());
-        tagEmit(command.sessionId, { type: "steer_queued", text: text.trim() });
-        entry.live.session.interrupt();
-        continue;
+        const entry = sessions.get(command.sessionId || DEFAULT_SID);
+        if (entry?.turnActive) {
+          admitSteer(entry, command.sessionId, text.trim(), requestedInputId || `steer_${randomUUID()}`);
+          continue;
+        }
+        // The process may have restarted between the UI submitting a steer and
+        // receiving its acknowledgement. With no active generation, a steer is
+        // defined to become the next ordinary turn; fall through to the normal
+        // turn pipeline while retaining its durable delivery kind and input ID.
+        idleSteer = true;
+        command.type = "send";
+        command.goal = text.trim();
       }
       if (command.type !== "send" || !command.goal) {
         tagEmit(command.sessionId, { type: "daemon_error", error: "expected {type:\"send\", goal:string}" });
@@ -1788,15 +1844,44 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
       const sid = command.sessionId || DEFAULT_SID;
       const goal = command.goal;
       const voiceMode = command.voice === true;
-      const entry = await resolveEntry(command.sessionId);
-      if (entry.turnActive) {
-        // A send mid-turn IS steering — the owner talking over Ares ("hey
-        // Ares, no—") must never bounce with an error. Same drain as steer.
-        entry.pendingSteers.push(goal.trim());
-        tagEmit(command.sessionId, { type: "steer_queued", text: goal.trim() });
-        entry.live.session.interrupt();
+      const requestedInputId = typeof command.inputId === "string" ? command.inputId.trim() : "";
+      if (command.inputId !== undefined && (!requestedInputId || requestedInputId.length > 1_024)) {
+        tagEmit(command.sessionId, { type: "daemon_error", error: "send inputId must be 1-1024 characters" });
         continue;
       }
+      const inputId = requestedInputId || `input_${randomUUID()}`;
+      const entry = await resolveEntry(command.sessionId);
+      const canonicalInput = (await openWorkspaceSessionKernel(entry.live.context.workspace)).getInput(inputId);
+      if (canonicalInput && canonicalInput.sessionId !== entry.live.session.meta.id) {
+        tagEmit(command.sessionId, {
+          type: "daemon_error",
+          error: `inputId ${inputId} already belongs to another session`,
+        });
+        continue;
+      }
+      const canonicalPayload = canonicalInput?.payload;
+      const canonicalTurnContent = canonicalPayload && typeof canonicalPayload === "object" && !Array.isArray(canonicalPayload)
+        && Array.isArray((canonicalPayload as { content?: unknown }).content)
+        ? (canonicalPayload as unknown as { content: ContentBlock[] }).content.map((block) => ({ ...block }))
+        : null;
+      if (entry.turnActive) {
+        if (canonicalInput) {
+          // This is a transport retry of an input the active Session already
+          // owns. Changing queue<->steer would violate its idempotency contract;
+          // the original generator/steering poll will settle it.
+          tagEmit(command.sessionId, {
+            type: "input_replayed",
+            inputId,
+            settled: canonicalInput.state === "consumed" || canonicalInput.state === "cancelled",
+            delivery: canonicalInput.delivery,
+          });
+          continue;
+        }
+        // A send mid-turn is the same durable steering path.
+        admitSteer(entry, command.sessionId, goal.trim(), inputId);
+        continue;
+      }
+      const inputDelivery = canonicalInput?.delivery ?? (idleSteer ? "steer" : "queue");
       entry.turnActive = true;
       activeTurns++;
       void (async () => {
@@ -1876,7 +1961,7 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
           // overrides a persona already in play, and it always emits an event —
           // the owner sees the switch (and can revert) rather than wondering why
           // the tone changed.
-          const autoPersona = await personaForMessage(entry.live, goal, (payload) => tagEmit(sid, payload)).catch(() => null);
+          const autoPersona = await personaForMessage(entry.live, goal, (payload) => tagEmit(sid, payload), entry.personaGate).catch(() => null);
           if (autoPersona) {
             entry.live.queueSystemReminder(
               `You are now wearing the ${autoPersona.label} persona (matched from the owner's message). Open your reply by greeting them briefly in that persona's voice — one or two sentences — so they know who they're talking to, then get to work. If they ask you to drop it, call Persona with action:"release".`,
@@ -1889,8 +1974,12 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
           // (sess_e4c6022d). If this turn carries images and the active model
           // lacks vision, escalate JUST this turn to a vision-capable provider
           // (never off the Ares Gateway), or tell the model to be honest.
-          const turnContent = await contentFromUserInput(goal, entry.live.context.workspace);
-          if (voiceMode) turnContent.unshift({ type: "system_reminder", text: "<voice-mode/>" });
+          // An idempotent retry must submit byte/shape-equivalent content. In
+          // particular, an image-bearing steer was originally admitted as one
+          // text block; reparsing it as a fresh desktop message would conflict
+          // with the canonical payload even though the input ID was identical.
+          const turnContent = canonicalTurnContent ?? await contentFromUserInput(goal, entry.live.context.workspace);
+          if (voiceMode && !canonicalTurnContent) turnContent.unshift({ type: "system_reminder", text: "<voice-mode/>" });
           const hasImages = turnContent.some((block) => block.type === "image");
           if (hasImages && !modelLikelyHasVision(entry.live.selection.model)) {
             const pinned = entry.live.selection;
@@ -1923,7 +2012,9 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
           // interrupt between the two halves of one tool call.
           const toolNamesById = new Map<string, string>();
           const streamOnce = async (gen: AsyncGenerator<unknown>) => {
+            let eventCount = 0;
             for await (const event of gen) {
+              eventCount++;
               const ev = event as { type: string; status?: "completed" | "interrupted" | "failed"; error?: { code?: string; message?: string }; touchedFiles?: string[]; text?: string; id?: string; name?: string; output?: unknown };
               if (ev.type === "tool_start" && ev.id && ev.name) toolNamesById.set(ev.id, ev.name);
               // Persona adopt/release: the tool itself only validates and echoes
@@ -1933,7 +2024,7 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
               // this one keeps running with the belt it started with.
               if (ev.type === "tool_end" && ev.id && toolNamesById.get(ev.id) === "Persona") {
                 toolNamesById.delete(ev.id);
-                applyPersonaToolResult(entry.live, ev.output, (payload) => tagEmit(sid, payload));
+                applyPersonaToolResult(entry.live, ev.output, (payload) => tagEmit(sid, payload), entry.personaGate);
               }
               // Continuous verification, daemon path: every edited file feeds the
               // verifier (same as the chat paths); the engine's end-of-turn gate
@@ -1943,34 +2034,26 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
               if (ev.type === "error" && isProviderFatalError(ev.error)) {
                 turnState.fatalProvider = `${ev.error?.code ?? "provider_error"}: ${ev.error?.message ?? ""}`.slice(0, 200);
               }
-              if (ev.type === "system_reminder_injected" && typeof ev.text === "string") {
-                const landed = entry.landingSteers.findIndex((steer) => steer.reminder === ev.text);
-                if (landed >= 0) {
-                  const [steer] = entry.landingSteers.splice(landed, 1);
-                  tagEmit(sid, { type: "steer_applied", text: steer.text });
-                }
-              }
-              // Steering preemption is internal. Keep the composer busy until
-              // the automatically resumed attempt reaches its real turn_end.
-              if (ev.type === "turn_end" && ev.status === "interrupted" && entry.pendingSteers.length > 0) continue;
               tagEmit(sid, event as Record<string, unknown>);
             }
+            return eventCount;
           };
-          await streamOnce(entry.live.session.sendContent(turnContent));
-
-          // Queue steering only after the interrupted attempt unwinds. That
-          // guarantees the resumed provider call receives it instead of draining
-          // it immediately before an abort boundary.
-          while (entry.pendingSteers.length > 0) {
-            const steers = entry.pendingSteers.splice(0);
-            for (const text of steers) {
-              const reminder = `The user STEERED mid-task: "${text}". Adjust course to honor this, but keep your current objective and everything you've already done — do not restart.`;
-              entry.landingSteers.push({ text, reminder });
-              entry.live.queueSystemReminder(reminder, "instructions");
-            }
-            turnState.status = "completed";
-            turnState.fatalProvider = null;
-            await streamOnce(entry.live.session.resumeTurn());
+          const initialEventCount = await streamOnce(
+            entry.live.session.sendContent(turnContent, { inputId, delivery: inputDelivery }),
+          );
+          if (initialEventCount === 0) {
+            // The stable input already completed before a desktop/daemon retry.
+            // Acknowledge it without calling the provider, re-running post-turn
+            // learning, or leaving the restarted UI spinner busy forever.
+            tagEmit(sid, { type: "input_replayed", inputId, settled: true });
+            tagEmit(sid, {
+              type: "turn_end",
+              status: "completed",
+              workStatus: entry.live.session.lastWorkStatus,
+              usage: { inputTokens: 0, outputTokens: 0 },
+              durationMs: 0,
+            });
+            return;
           }
 
           // Self-healing fallback: if the turn died because the current provider

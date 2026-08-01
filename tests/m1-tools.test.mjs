@@ -29,6 +29,7 @@ async function makeTmp() {
 function ctx(workspace) {
   return {
     workspace,
+    sessionId: "sess_m1_tools",
     signal: new AbortController().signal,
     permissionMode: "workspace-write",
     fileReadStamps: new Map(),
@@ -401,6 +402,81 @@ test("Bash: runs echo and returns stdout", async () => {
   );
   assert.equal(r.output.exitCode, 0, r.output.stderr || r.output.stdout);
   assert.match(r.output.stdout, /hello/);
+  assert.equal(r.failure, undefined);
+});
+
+test("Bash: non-zero exit preserves diagnostics and declares failure", async () => {
+  const tmp = await makeTmp();
+  const adapted = adaptToolForEngine(BashTool, (base) => ({ ...ctx(tmp), ...base }));
+  const r = await adapted.call(
+    {
+      command: "printf 'stdout-marker'; printf 'stderr-marker' >&2; exit 7",
+      description: "test failed command diagnostics",
+      timeout: 30000,
+    },
+    {
+      workspace: tmp,
+      sessionId: "sess_shell_failure",
+      signal: new AbortController().signal,
+    },
+  );
+
+  assert.equal(r.failure, "Bash exited with code 7");
+  assert.equal(r.output.exitCode, 7);
+  assert.equal(r.output.timedOut, false);
+  assert.match(r.output.stdout, /stdout-marker/);
+  assert.match(r.output.stderr, /stderr-marker/);
+});
+
+test("Bash: timeout preserves partial diagnostics and declares failure", async () => {
+  const tmp = await makeTmp();
+  const r = await BashTool.call(
+    {
+      command: "printf 'timeout-stdout'; printf 'timeout-stderr' >&2; sleep 5",
+      description: "test timeout diagnostics",
+      timeout: 1000,
+    },
+    ctx(tmp),
+  );
+
+  assert.equal(r.failure, "Bash timed out after 1000ms");
+  assert.equal(r.output.timedOut, true);
+  assert.ok(Object.hasOwn(r.output, "exitCode"));
+  assert.match(r.output.stdout, /timeout-stdout/);
+  assert.match(r.output.stderr, /timeout-stderr/);
+});
+
+test("Bash: successful background launch is not declared failed", async () => {
+  const tmp = await makeTmp();
+  const r = await BashTool.call(
+    {
+      command: "sleep 30",
+      description: "test background launch",
+      timeout: 30000,
+      run_in_background: true,
+    },
+    {
+      ...ctx(tmp),
+      shellRegistry: {
+        async spawn(options) {
+          return {
+            id: "sh_contract",
+            description: options.description,
+            command: `${options.program} ${options.args.join(" ")}`,
+            cwd: options.cwd,
+            status: "running",
+            exitCode: null,
+            startedAt: new Date().toISOString(),
+            totalChars: 0,
+          };
+        },
+      },
+    },
+  );
+
+  assert.equal(r.failure, undefined);
+  assert.equal(r.output.status, "running");
+  assert.equal(r.output.shell_id, "sh_contract");
 });
 
 test("PowerShell: rejects cwd outside workspace before spawning", async () => {
@@ -425,6 +501,45 @@ test("PowerShell: runs Write-Output", async () => {
   );
   assert.equal(r.output.exitCode, 0);
   assert.match(r.output.stdout, /ok/);
+  assert.equal(r.failure, undefined);
+});
+
+test("PowerShell: non-zero exit preserves diagnostics and declares failure", async () => {
+  if (process.platform !== "win32") return;
+  const tmp = await makeTmp();
+  const r = await PowerShellTool.call(
+    {
+      command: "Write-Output 'stdout-marker'; [Console]::Error.WriteLine('stderr-marker'); exit 9",
+      description: "test failed command diagnostics",
+      timeout: 30000,
+    },
+    ctx(tmp),
+  );
+
+  assert.equal(r.failure, "PowerShell exited with code 9");
+  assert.equal(r.output.exitCode, 9);
+  assert.equal(r.output.timedOut, false);
+  assert.match(r.output.stdout, /stdout-marker/);
+  assert.match(r.output.stderr, /stderr-marker/);
+});
+
+test("PowerShell: timeout preserves partial diagnostics and declares failure", async () => {
+  if (process.platform !== "win32") return;
+  const tmp = await makeTmp();
+  const r = await PowerShellTool.call(
+    {
+      command: "Write-Output 'timeout-stdout'; [Console]::Error.WriteLine('timeout-stderr'); Start-Sleep -Seconds 5",
+      description: "test timeout diagnostics",
+      timeout: 1000,
+    },
+    ctx(tmp),
+  );
+
+  assert.equal(r.failure, "PowerShell timed out after 1000ms");
+  assert.equal(r.output.timedOut, true);
+  assert.ok(Object.hasOwn(r.output, "exitCode"));
+  assert.match(r.output.stdout, /timeout-stdout/);
+  assert.match(r.output.stderr, /timeout-stderr/);
 });
 
 test("PowerShell: abort tears down a spawned process tree promptly", async () => {

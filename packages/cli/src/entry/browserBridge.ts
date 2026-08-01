@@ -111,6 +111,19 @@ const browserInput = z
   })
   .strict();
 
+const READ_ONLY_BROWSER_ACTIONS = new Set([
+  "open",
+  "handshake",
+  "tabs",
+  "attach",
+  "preview",
+  "tree",
+  "screenshot",
+  "console",
+  "state",
+  "filmstrip",
+]);
+
 interface BrowserToolOutput {
   action: string;
   status: string;
@@ -207,6 +220,7 @@ export function makeBrowserTool(
     description:
       "Ares's DOM-first eyes and hands for the web — the ONLY tool for anything inside a web page. It drives CDP/Playwright input without touching the owner's OS mouse. Before opening a duplicate page it reuses a matching attached tab; use tabs/attach when the owner names an already-open tab. For multi-field or multi-click work use one act call with ordered steps, then inspect its final screenshot; do not spend one model call per click. Use APIs/MCP/CLI first when better. ComputerUse is forbidden for browser content. Run headless by default, visible only when the owner asks to watch or an authenticated Ares browser is needed. For visual verification use real screenshots; accessibility text alone cannot verify canvas/WebGL. Self-contained HTML must inline JS/CSS because offline webviews block CDN scripts.",
     safety: "workspace-write",
+    dynamicSafety: (i) => READ_ONLY_BROWSER_ACTIONS.has(i.action) ? "read-only" : "external-state",
     concurrency: "exclusive",
     inputZod: browserInput,
     activityDescription: (i) => {

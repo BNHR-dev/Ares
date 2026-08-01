@@ -18,15 +18,21 @@ import { selectToolsForTurn } from "../packages/core/dist/queryEngine.js";
 
 /** A stand-in belt big enough to trip the >12 pruning branch. */
 const NAMES = [
-  "Read", "Write", "Edit", "ApplyIntent", "FindAndEdit", "CodeMode", "Glob", "Grep",
+  "Read", "Write", "Edit", "ApplyPatch", "ApplyIntent", "FindAndEdit", "CodeMode", "Glob", "Grep",
   "CodebaseSearch", "LSP", "Bash", "PowerShell", "BashOutput", "KillShell",
-  "TodoWrite", "Task", "Conductor", "EnterPlanMode", "ExitPlanMode",
+  "TodoWrite", "Task", "TaskOutput", "KillTask", "Conductor", "EnterPlanMode", "UpdatePlanDraft", "ExitPlanMode",
   "WebSearch", "WebFetch", "ImageSearch", "ComputerUse", "Browser",
   "McpListTools", "McpCallTool", "SkillsList", "SkillRead", "Memory", "Connect",
   "RequestUserAction", "Deploy", "Stripe", "Email", "Gmail", "GoogleCalendar",
   "Spotify", "Weather", "Remind", "Mission", "Self", "SkillHub", "Operator",
 ];
-const TOOLS = NAMES.map((name) => ({ schema: { name } }));
+const WRITE_TOOLS = new Set([
+  "Write", "Edit", "ApplyPatch", "ApplyIntent", "FindAndEdit", "CodeMode",
+  "TodoWrite", "Task", "Conductor", "UpdatePlanDraft",
+]);
+const TOOLS = NAMES.map((name) => ({
+  schema: { name, safety: WRITE_TOOLS.has(name) ? "workspace-write" : "read-only" },
+}));
 
 const CORE = ["Read", "Write", "Edit", "Glob", "Grep"];
 const turn = (text) => [{ role: "user", content: [{ type: "text", text }] }];
@@ -58,9 +64,59 @@ test("coding core survives pruning for asks that miss the intent regex", () => {
 
 test("explicit coding intent still expands past the floor", () => {
   const offered = pick("refactor the auth module and fix the failing test");
-  for (const tool of [...CORE, "ApplyIntent", "LSP", "CodebaseSearch"]) {
+  for (const tool of [...CORE, "LSP", "CodebaseSearch"]) {
     assert.ok(offered.includes(tool), `${tool} expected on an explicit coding turn`);
   }
+  assert.ok(!offered.includes("ApplyIntent"), "overlapping edit protocols stay off the default belt");
+  assert.ok(offered.includes("TaskOutput"), "detached Task status remains addressable on coding turns");
+  assert.ok(offered.includes("KillTask"), "detached Task cancellation remains addressable on coding turns");
+});
+
+test("background-job language exposes both shell and Task control planes", () => {
+  const offered = pick("poll the detached background task and stop it if it failed");
+  for (const tool of ["Task", "TaskOutput", "KillTask", "BashOutput", "KillShell"]) {
+    assert.ok(offered.includes(tool), `${tool} expected for explicit background-job control`);
+  }
+});
+
+test("OpenAI/Codex models receive ApplyPatch as the single primary edit protocol", () => {
+  const offered = selectToolsForTurn(
+    TOOLS,
+    turn("implement the feature"),
+    { providerName: "openai-responses", model: "gpt-5-codex" },
+  ).map((tool) => tool.schema.name);
+  assert.ok(offered.includes("ApplyPatch"));
+  assert.ok(!offered.includes("Write"));
+  assert.ok(!offered.includes("Edit"));
+  assert.ok(!offered.includes("ApplyIntent"));
+  assert.ok(!offered.includes("FindAndEdit"));
+  assert.ok(!offered.includes("CodeMode"));
+});
+
+test("plan workflow pins ExitPlanMode and suppresses every editing protocol", () => {
+  const offered = selectToolsForTurn(
+    TOOLS,
+    turn("yes that still sounds right"),
+    { workflowMode: "plan" },
+  ).map((tool) => tool.schema.name);
+  assert.ok(offered.includes("ExitPlanMode"));
+  assert.ok(offered.includes("UpdatePlanDraft"));
+  assert.ok(offered.includes("Read"));
+  assert.ok(offered.includes("Task"));
+  for (const name of ["Write", "Edit", "ApplyPatch", "ApplyIntent", "FindAndEdit", "CodeMode"]) {
+    assert.ok(!offered.includes(name), `${name} must stay hidden during plan mode`);
+  }
+});
+
+test("build workflow always pins EnterPlanMode without relying on coding keywords", () => {
+  const offered = selectToolsForTurn(
+    TOOLS,
+    turn("let's think through the architecture first"),
+    { workflowMode: "build" },
+  ).map((tool) => tool.schema.name);
+  assert.ok(offered.includes("EnterPlanMode"));
+  assert.ok(!offered.includes("ExitPlanMode"));
+  assert.ok(!offered.includes("UpdatePlanDraft"));
 });
 
 test("pruning still prunes — the floor is not a bypass", () => {

@@ -12,6 +12,7 @@
 
 import { z } from "zod";
 import type { ToolCallContext } from "@ares/core";
+import type { WorkStatus } from "@ares/protocol";
 import { buildTool } from "./_shared.js";
 
 export interface SubagentRunner {
@@ -20,6 +21,10 @@ export interface SubagentRunner {
     description: string;
     prompt: string;
     parentSessionId?: string;
+    /** Stable identity of the parent Task tool call. A replay after a crash
+     * must resume the same child and input, not spawn duplicate work. */
+    invocationId?: string;
+    taskId?: string;
     workspace: string;
     signal?: AbortSignal;
     /** Forward child activity (tool_start/tool_end) so the UI isn't a silent
@@ -35,25 +40,58 @@ export interface SubagentRunner {
     id: string;
     type: string;
     status: "completed" | "failed" | "cancelled";
+    workStatus: WorkStatus;
     summary: string;
     toolCallCount: number;
     durationMs: number;
     transcriptPath: string;
     usage: { inputTokens: number; outputTokens: number };
   }>;
+  startBackground?(req: {
+    subagent_type: string;
+    description: string;
+    prompt: string;
+    parentSessionId?: string;
+    invocationId?: string;
+    taskId?: string;
+    workspace: string;
+    requestPermission?: ToolCallContext["requestPermission"];
+  }): Promise<{ jobId: string; taskId: string; status: BackgroundTaskStatus }>;
+  getBackground?(jobId: string, parentSessionId: string): BackgroundTaskSnapshot | null;
+  cancelBackground?(jobId: string, parentSessionId: string): Promise<BackgroundTaskSnapshot | null>;
   listTypes(): Array<{ name: string; description: string }>;
   has(name: string): boolean;
 }
 
 export interface TaskOutput {
   agentId: string;
+  taskId: string;
   type: string;
   status: "completed" | "failed" | "cancelled";
+  workStatus: WorkStatus;
   summary: string;
   toolCallCount: number;
   durationMs: number;
   transcriptPath: string;
   usage: { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number; reasoningTokens?: number; modelCalls?: number };
+}
+
+export type BackgroundTaskStatus = "queued" | "running" | "completed" | "failed" | "cancelled" | "orphaned";
+
+export interface TaskBackgroundOutput {
+  jobId: string;
+  taskId: string;
+  status: BackgroundTaskStatus;
+  description: string;
+}
+
+export interface BackgroundTaskSnapshot extends TaskBackgroundOutput {
+  result: unknown;
+  error: unknown;
+  cancelRequested: boolean;
+  createdAtMs: number;
+  startedAtMs: number | null;
+  finishedAtMs: number | null;
 }
 
 const inputSchema = z
@@ -74,6 +112,15 @@ const inputSchema = z
       .describe(
         "Which subagent type to spawn. Common: 'general-purpose' (full tools, can edit), 'researcher' (read-only investigation), 'code-reviewer' (review pending diff).",
       ),
+    task_id: z
+      .string()
+      .min(1)
+      .optional()
+      .describe("Durable task id returned by an earlier Task call. Set it to continue that exact child with its prior context."),
+    run_in_background: z
+      .boolean()
+      .default(false)
+      .describe("Detach this subagent from the foreground turn. Returns durable job_id/task_id immediately; poll with TaskOutput or cancel with KillTask. The child resumes after an Ares restart."),
   })
   .strict();
 
@@ -96,6 +143,9 @@ export function makeTaskTool(runner: SubagentRunner) {
     // parent's (now deadline-bearing) signal, so a truly hung child is bounded
     // by the parent's own watchdog rather than an arbitrary subagent cap.
     watchdogTimeoutMs: 0,
+    dynamicSafety: (i) => new Set(["explorer", "researcher", "code-reviewer", "verifier"]).has(i.subagent_type)
+      ? "read-only"
+      : "workspace-write",
     inputZod: inputSchema,
     activityDescription: (i) => `Task[${i.subagent_type}] ${i.description}`,
     async checkPermissions(i, ctx) {
@@ -116,11 +166,36 @@ export function makeTaskTool(runner: SubagentRunner) {
       }
       return { kind: "allow" };
     },
-    async call(i, ctx): Promise<{ output: TaskOutput; display: string }> {
+    async call(i, ctx): Promise<{ output: TaskOutput | TaskBackgroundOutput; display: string }> {
+      if (i.run_in_background) {
+        if (!runner.startBackground) throw new Error("background Task requires a durable subagent runner");
+        const started = await runner.startBackground({
+          subagent_type: i.subagent_type,
+          description: i.description,
+          prompt: i.prompt,
+          parentSessionId: ctx.sessionId,
+          invocationId: ctx.toolUseId,
+          taskId: i.task_id,
+          workspace: ctx.workspace,
+          requestPermission: ctx.requestPermission,
+        });
+        return {
+          output: {
+            jobId: started.jobId,
+            taskId: started.taskId,
+            status: started.status,
+            description: i.description,
+          },
+          display: `background ${i.subagent_type} → ${started.status} (${started.jobId})`,
+        };
+      }
       const result = await runner.run({
         subagent_type: i.subagent_type,
         description: i.description,
         prompt: i.prompt,
+        parentSessionId: ctx.sessionId,
+        invocationId: ctx.toolUseId,
+        taskId: i.task_id,
         workspace: ctx.workspace,
         signal: ctx.signal,
         onProgress: ctx.emitProgress,
@@ -141,15 +216,67 @@ export function makeTaskTool(runner: SubagentRunner) {
       return {
         output: {
           agentId: result.id,
+          taskId: result.id,
           type: result.type,
           status: result.status,
+          workStatus: result.workStatus,
           summary: result.summary,
           toolCallCount: result.toolCallCount,
           durationMs: result.durationMs,
           transcriptPath: result.transcriptPath,
           usage: result.usage,
         },
-        display: `${result.type} → ${result.status} (${result.toolCallCount} tool calls, ${(result.durationMs / 1000).toFixed(1)}s)`,
+        display: `${result.type} → ${result.status}/${result.workStatus} (${result.toolCallCount} tool calls, ${(result.durationMs / 1000).toFixed(1)}s)`,
+      };
+    },
+  });
+}
+
+const taskOutputInputSchema = z.object({
+  job_id: z.string().min(1).describe("Durable jobId returned by Task run_in_background=true."),
+}).strict();
+
+export function makeTaskOutputTool(runner: SubagentRunner) {
+  return buildTool({
+    name: "TaskOutput",
+    description:
+      "Poll a detached Task by durable job_id. Returns running/terminal truth and the complete structured result. A completed job is also injected exactly once into the parent session at its next safe boundary.",
+    safety: "read-only",
+    concurrency: "parallel-safe",
+    inputZod: taskOutputInputSchema,
+    activityDescription: (i) => `TaskOutput ${i.job_id}`,
+    async call(i, ctx): Promise<{ output: BackgroundTaskSnapshot; display: string }> {
+      if (!runner.getBackground) throw new Error("TaskOutput requires a durable subagent runner");
+      const job = runner.getBackground(i.job_id, ctx.sessionId);
+      if (!job) throw new Error(`unknown background task: ${i.job_id}`);
+      return {
+        output: job,
+        display: `${job.jobId} · ${job.status}${job.cancelRequested ? " · cancellation requested" : ""}`,
+      };
+    },
+  });
+}
+
+const killTaskInputSchema = z.object({
+  job_id: z.string().min(1).describe("Durable jobId returned by Task run_in_background=true."),
+}).strict();
+
+export function makeKillTaskTool(runner: SubagentRunner) {
+  return buildTool({
+    name: "KillTask",
+    description:
+      "Request cancellation of a detached Task. Cancellation is durable: a remote/current worker observes it through the job lease heartbeat, and a queued job cannot start afterward.",
+    safety: "destructive",
+    concurrency: "exclusive",
+    inputZod: killTaskInputSchema,
+    activityDescription: (i) => `KillTask ${i.job_id}`,
+    async call(i, ctx): Promise<{ output: BackgroundTaskSnapshot; display: string }> {
+      if (!runner.cancelBackground) throw new Error("KillTask requires a durable subagent runner");
+      const job = await runner.cancelBackground(i.job_id, ctx.sessionId);
+      if (!job) throw new Error(`unknown background task: ${i.job_id}`);
+      return {
+        output: job,
+        display: `${job.jobId} · ${job.status}${job.cancelRequested ? " · cancellation requested" : ""}`,
       };
     },
   });
@@ -172,7 +299,7 @@ WHEN NOT TO USE:
 - Simple edits in the current conversation
 - Work whose conclusion or file ownership you have not defined yet — investigate/decide at the parent first
 
-Each subagent invocation is STATELESS. Make the prompt SELF-CONTAINED — the subagent cannot see your conversation. Brief it like a capable colleague with ZERO context on this task: state WHAT to do and WHY, hand over anything you already ruled out or discovered so it doesn't repeat your work, and say exactly what format to return in.
+New subagents start with isolated context, so make the first prompt SELF-CONTAINED. Every result returns a durable taskId. For a follow-up, pass that value as task_id: the SAME child session resumes with its prior reads, decisions, tool outcomes, and compacted context instead of rediscovering the repository.
 
 Two more rules that decide whether delegation actually helps:
 - NEVER delegate the understanding. The subagent gathers evidence; YOU draw the conclusion. Don't write "investigate X and do what your findings suggest" — decide the direction yourself and give it a concrete objective. For a known lookup, hand it the exact command/pattern; for an open investigation, hand it the precise question.
@@ -181,5 +308,7 @@ Two more rules that decide whether delegation actually helps:
 Available subagent types:
 ${typeList}
 
-Subagent results come back as one summary message; YOUR context never sees the intermediate tool calls. This is the cheapest way to keep your context window healthy on large repos.`;
+Subagent results come back as one summary message; YOUR context never sees the intermediate tool calls. The result also reports workStatus (verified/unverified/blocked) separately from whether the child loop merely completed. This is the cheapest way to keep your context window healthy on large repos.
+
+For a genuinely independent, long-running unit, set run_in_background=true. The call returns a durable jobId/taskId immediately; continue foreground work, poll with TaskOutput only when you need status, and use KillTask to cancel. Detached work survives an Ares host restart and its terminal handoff is injected once at the parent's next safe boundary.`;
 }

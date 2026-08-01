@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { Todo, TurnEndStatus, TurnEvent, WorkStatus } from "@ares/protocol";
+import { messageText, type Todo, type TurnEndStatus, type TurnEvent, type WorkStatus } from "@ares/protocol";
 import type { VerifyEvent, VerifyResult } from "./verifier.js";
 
 export type CodingPhase = "discover" | "implement" | "verify" | "verified" | "paused" | "failed";
@@ -226,6 +226,18 @@ export class CodingJournal {
   }
 
   recordTurnEvent(event: TurnEvent): void {
+    if (event.type === "input_admitted" && event.delivery === "steer") {
+      const correction = messageText(event.userMessage).trim();
+      if (
+        correction &&
+        this.state.objective &&
+        this.state.steering.at(-1) !== correction
+      ) {
+        this.state.steering = [...this.state.steering, correction].slice(-12);
+        this.touch();
+      }
+      return;
+    }
     if (event.type === "tool_start") {
       this.tools.set(event.id, { name: event.name, input: event.input });
       this.maybeRecordSpecDoc(event.name, event.input);
@@ -233,19 +245,8 @@ export class CodingJournal {
     }
     if (event.type === "tool_end") {
       const tool = this.tools.get(event.id);
-      if (event.touchedFiles?.length) {
-        this.activateFromObservedWork();
-        this.active = true;
-        this.currentTurnHasOutstandingVerification = true;
-        this.currentTurnHadMutation = true;
-        this.currentTurnLatestMutationAt = Date.now();
-        this.state.phase = "implement";
-        const touched = event.touchedFiles.map((file) => relativeDisplay(this.state.workspace, file));
-        const combined = [...new Set([...this.state.touchedFiles, ...touched])];
-        if (combined.length > 240) this.state.touchedFilesTruncated = true;
-        this.state.touchedFiles = combined.slice(-240);
-        this.touch();
-      } else if (tool && isManualVerification(tool.name, tool.input)) {
+      if (event.touchedFiles?.length) this.recordTouchedFiles(event.touchedFiles);
+      else if (tool && isManualVerification(tool.name, tool.input)) {
         // The result text is not a reliable exit status across every tool, so
         // record only that verification was attempted. Real pass/fail evidence
         // comes from ContinuousVerifier.recordVerifyEvent below.
@@ -256,6 +257,10 @@ export class CodingJournal {
       return;
     }
     if (event.type === "tool_error") {
+      // A completed shell failure may have mutated files before exiting
+      // non-zero. Persist that verification debt before recording the failure;
+      // otherwise restart remembers the error but forgets what must be checked.
+      if (event.touchedFiles?.length) this.recordTouchedFiles(event.touchedFiles);
       const tool = this.tools.get(event.id)?.name ?? "unknown";
       this.recordFailure(tool, event.error);
       this.tools.delete(event.id);
@@ -388,6 +393,20 @@ export class CodingJournal {
       this.state.turns++;
       this.pendingRequest = null;
     }
+  }
+
+  private recordTouchedFiles(files: readonly string[]): void {
+    this.activateFromObservedWork();
+    this.active = true;
+    this.currentTurnHasOutstandingVerification = true;
+    this.currentTurnHadMutation = true;
+    this.currentTurnLatestMutationAt = Date.now();
+    this.state.phase = "implement";
+    const touched = files.map((file) => relativeDisplay(this.state.workspace, file));
+    const combined = [...new Set([...this.state.touchedFiles, ...touched])];
+    if (combined.length > 240) this.state.touchedFilesTruncated = true;
+    this.state.touchedFiles = combined.slice(-240);
+    this.touch();
   }
 
   private recordFailure(tool: string, raw: string): void {
