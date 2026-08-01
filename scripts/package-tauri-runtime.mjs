@@ -71,17 +71,38 @@ const playwrightDir = path.dirname(connectorRequire.resolve("playwright/package.
 const playwrightRequire = createRequire(path.join(playwrightDir, "package.json"));
 const toolsRequire = createRequire(path.join(root, "packages", "tools", "package.json"));
 const pdfjsDir = path.dirname(toolsRequire.resolve("pdfjs-dist/package.json"));
+const coreRequire = createRequire(path.join(root, "packages", "core", "package.json"));
+const betterSqliteDir = path.dirname(coreRequire.resolve("better-sqlite3/package.json"));
+const betterSqliteRequire = createRequire(path.join(betterSqliteDir, "package.json"));
+const bindingsDir = path.dirname(betterSqliteRequire.resolve("bindings/package.json"));
+const bindingsRequire = createRequire(path.join(bindingsDir, "package.json"));
 const runtimePackages = [
   ["playwright", playwrightDir],
   ["playwright-core", path.dirname(playwrightRequire.resolve("playwright-core/package.json"))],
   // Read imports pdf.js lazily. Keep its worker/assets and Apache license
   // intact instead of flattening the package into the single-file CLI bundle.
   ["pdfjs-dist", pdfjsDir],
+  // The durable session kernel HARD-requires better-sqlite3, and esbuild leaves
+  // native addons external. Without these three the packaged daemon dies at
+  // startup with ERR_MODULE_NOT_FOUND before the first turn. better-sqlite3
+  // loads its addon through `bindings`, which loads `file-uri-to-path`.
+  // The prebuilt .node is what loads; the SQLite amalgamation and the C++ addon
+  // sources are 11 MB of installer weight nothing reads at runtime.
+  ["better-sqlite3", betterSqliteDir, ["deps", "src", "binding.gyp"]],
+  ["bindings", bindingsDir],
+  ["file-uri-to-path", path.dirname(bindingsRequire.resolve("file-uri-to-path/package.json"))],
 ];
-for (const [packageName, packageDir] of runtimePackages) {
+for (const [packageName, packageDir, excluded = []] of runtimePackages) {
+  const excludedTop = new Set(excluded);
   await cp(packageDir, path.join(modulesOut, packageName), {
     recursive: true,
     dereference: true,
+    filter: excludedTop.size
+      ? (source) => {
+          const relative = path.relative(packageDir, source);
+          return !relative || !excludedTop.has(relative.split(path.sep)[0]);
+        }
+      : undefined,
   });
 }
 
@@ -92,6 +113,11 @@ const outputs = [
   path.join(modulesOut, "playwright", "package.json"),
   path.join(modulesOut, "playwright-core", "package.json"),
   path.join(modulesOut, "pdfjs-dist", "LICENSE"),
+  // A missing addon here is a dead daemon, not a degraded feature. Fail the
+  // package step rather than discovering it on the user's first message.
+  path.join(modulesOut, "better-sqlite3", "build", "Release", "better_sqlite3.node"),
+  path.join(modulesOut, "bindings", "package.json"),
+  path.join(modulesOut, "file-uri-to-path", "package.json"),
 ];
 for (const file of outputs) {
   const info = await stat(file);
