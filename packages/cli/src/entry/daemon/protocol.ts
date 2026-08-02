@@ -105,9 +105,20 @@ export class AsyncQueue<T> {
 }
 
 export class DaemonCommandRouter {
+  private static readonly RETIRED_PERMISSION_LIMIT = 256;
   private commands = new AsyncQueue<DaemonInputCommand>();
   private permissionResponses: DaemonInputCommand[] = [];
-  private permissionWaiters: Array<{ id?: string; resolve: (command: DaemonInputCommand | null) => void }> = [];
+  private permissionWaiters: Array<{
+    id?: string;
+    signal?: AbortSignal;
+    onAbort?: () => void;
+    resolve: (command: DaemonInputCommand | null) => void;
+  }> = [];
+  /** Tombstones prevent a late click for a steering-cancelled prompt from
+   * leaking forever or satisfying a later legacy (id-less) permission ask. */
+  private readonly retiredPermissionIds = new Set<string>();
+  private readonly retiredPermissionOrder: string[] = [];
+  private retiredAnonymousPermissions = 0;
   private closed = false;
   /** Out-of-band interrupt — fires immediately on parse, even mid-turn while
    *  the command loop is busy streaming. Carries the command so the handler can
@@ -124,8 +135,15 @@ export class DaemonCommandRouter {
     return this.commands.shift();
   }
 
+  /** Re-enter work discovered at a durable boundary (for example, a steer that
+   * became the next ordinary turn) through the exact same command pipeline as
+   * owner input. This is intentionally not an out-of-band execution path. */
+  enqueue(command: DaemonInputCommand): void {
+    this.commands.push(command);
+  }
+
   async waitForPermission(request: ToolPermissionRequest): Promise<PermissionPromptDecision> {
-    const response = await this.takePermissionResponse(request.id);
+    const response = await this.takePermissionResponse(request.id, request.signal);
     if (!response) return "deny";
     const decision = normalizePermissionDecision(response.decision);
     if (!decision) {
@@ -138,7 +156,7 @@ export class DaemonCommandRouter {
   close(): void {
     this.closed = true;
     this.commands.close();
-    for (const waiter of this.permissionWaiters.splice(0)) waiter.resolve(null);
+    for (const waiter of this.permissionWaiters.splice(0)) this.settlePermissionWaiter(waiter, null);
   }
 
   private async pump(rl: ReturnType<typeof createInterface>): Promise<void> {
@@ -172,19 +190,29 @@ export class DaemonCommandRouter {
   private pushPermissionResponse(command: DaemonInputCommand): void {
     if (this.closed) return;
     const responseId = cleanCommandId(command.id);
+    if (responseId && this.retiredPermissionIds.delete(responseId)) {
+      const retiredIndex = this.retiredPermissionOrder.indexOf(responseId);
+      if (retiredIndex >= 0) this.retiredPermissionOrder.splice(retiredIndex, 1);
+      if (this.retiredAnonymousPermissions > 0) this.retiredAnonymousPermissions--;
+      return;
+    }
+    if (!responseId && this.retiredAnonymousPermissions > 0) {
+      this.retiredAnonymousPermissions--;
+      return;
+    }
     const waiterIndex = this.permissionWaiters.findIndex((waiter) => {
       if (!waiter.id || !responseId) return true;
       return waiter.id === responseId;
     });
     if (waiterIndex >= 0) {
       const [waiter] = this.permissionWaiters.splice(waiterIndex, 1);
-      waiter.resolve(command);
+      this.settlePermissionWaiter(waiter, command);
       return;
     }
     this.permissionResponses.push(command);
   }
 
-  private takePermissionResponse(id?: string): Promise<DaemonInputCommand | null> {
+  private takePermissionResponse(id?: string, signal?: AbortSignal): Promise<DaemonInputCommand | null> {
     const requestId = cleanCommandId(id);
     const responseIndex = this.permissionResponses.findIndex((command) => {
       const responseId = cleanCommandId(command.id);
@@ -196,6 +224,60 @@ export class DaemonCommandRouter {
       return Promise.resolve(response);
     }
     if (this.closed) return Promise.resolve(null);
-    return new Promise((resolve) => this.permissionWaiters.push({ id: requestId, resolve }));
+    if (signal?.aborted) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      const waiter: (typeof this.permissionWaiters)[number] = {
+        id: requestId,
+        signal,
+        resolve,
+      };
+      if (signal) {
+        waiter.onAbort = () => {
+          const index = this.permissionWaiters.indexOf(waiter);
+          if (index < 0) return;
+          this.permissionWaiters.splice(index, 1);
+          this.retirePermissionWaiter(waiter);
+          this.settlePermissionWaiter(waiter, null);
+        };
+        signal.addEventListener("abort", waiter.onAbort, { once: true });
+      }
+      this.permissionWaiters.push(waiter);
+      // Close the check→listener race if another owner aborted synchronously.
+      if (signal?.aborted) waiter.onAbort?.();
+    });
+  }
+
+  private settlePermissionWaiter(
+    waiter: (typeof this.permissionWaiters)[number],
+    command: DaemonInputCommand | null,
+  ): void {
+    if (waiter.signal && waiter.onAbort) {
+      waiter.signal.removeEventListener("abort", waiter.onAbort);
+    }
+    waiter.resolve(command);
+  }
+
+  private retirePermissionWaiter(waiter: (typeof this.permissionWaiters)[number]): void {
+    if (!waiter.id) {
+      this.retiredAnonymousPermissions = Math.min(
+        DaemonCommandRouter.RETIRED_PERMISSION_LIMIT,
+        this.retiredAnonymousPermissions + 1,
+      );
+      return;
+    }
+    if (this.retiredPermissionIds.has(waiter.id)) return;
+    // Some legacy clients omit response ids. Reserve one anonymous tombstone as
+    // well so a late click for this explicit request can never approve the next
+    // prompt through the router's compatibility wildcard.
+    this.retiredAnonymousPermissions = Math.min(
+      DaemonCommandRouter.RETIRED_PERMISSION_LIMIT,
+      this.retiredAnonymousPermissions + 1,
+    );
+    this.retiredPermissionIds.add(waiter.id);
+    this.retiredPermissionOrder.push(waiter.id);
+    while (this.retiredPermissionOrder.length > DaemonCommandRouter.RETIRED_PERMISSION_LIMIT) {
+      const oldest = this.retiredPermissionOrder.shift();
+      if (oldest) this.retiredPermissionIds.delete(oldest);
+    }
   }
 }

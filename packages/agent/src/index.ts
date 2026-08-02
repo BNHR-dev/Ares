@@ -67,7 +67,50 @@ export { SelfEvolveTool, type SelfEvolveOutput } from "./tools/SelfEvolve.js";
 export { SkillCraftTool, type SkillCraftOutput } from "./tools/SkillCraft.js";
 export { PersonaTool, type PersonaToolOutput } from "./tools/Persona.js";
 export { RunSkillTool, type RunSkillOutput } from "./tools/RunSkill.js";
+export {
+  makeCapabilityTool,
+  type CapabilityEnsureCallback,
+  type CapabilityEnsureOutcome,
+  type CapabilityEnsureRequest,
+  type CapabilityEnsureStatus,
+  type CapabilityProviderView,
+  type CapabilityToolAction,
+  type CapabilityToolInput,
+  type CapabilityToolOptions,
+  type CapabilityToolOutput,
+} from "./tools/Capability.js";
 export { runSkill, type RunSkillOptions, type SkillRunResult } from "./skills/runtime.js";
+export {
+  CAPABILITY_CONTRACT_VERSION,
+  CAPABILITY_MANIFEST_FILE,
+  SKILL_NAME,
+  CapabilityManifestError,
+  canonicalCapabilityManifest,
+  capabilityManifestHash,
+  capabilityManifestSchema,
+  capabilityReceiptSchema,
+  parseCapabilityManifest,
+  parseCapabilityReceipt,
+  readCapabilityManifest,
+  readCapabilityManifestIfPresent,
+  type CapabilityEffect,
+  type CapabilityManifest,
+  type CapabilityOperation,
+  type CapabilityReceipt,
+  type CapabilityScope,
+} from "./skills/manifest.js";
+export {
+  resolveCapabilityProvider,
+  resolveSkill,
+  scanCapabilityRegistry,
+  skillRoots,
+  type CapabilityProvider,
+  type CapabilityRegistryError,
+  type CapabilityRegistrySnapshot,
+  type ResolvedSkill,
+  type SkillRegistryOptions,
+  type SkillRoot,
+} from "./skills/registry.js";
 export { makeSkillHubTool, type SkillHubOutput } from "./tools/SkillHub.js";
 export {
   skillHubProbe, skillHubList, skillHubGet, skillHubPublish, installHubSkill, readLocalSkillFiles,

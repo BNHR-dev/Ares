@@ -2,9 +2,10 @@
 // into running code. This is the line between an agent that writes about
 // capabilities and one that grows its own body.
 //
-// A skill lives at ~/.ares/skills/<name>/ with a SKILL.md and an optional
-// handler.js whose default export is `async (input, ctx) => result`. This
-// runtime runs that handler in an isolated child Node process:
+// A skill lives either in <workspace>/.ares/skills/<name> (project-local) or
+// ~/.ares/skills/<name> (user-global), with project-local taking precedence.
+// Its handler.js default export is `async (input, ctx) => result`. This runtime
+// runs that handler in an isolated child Node process:
 //   - input is passed via a temp JSON file (no arg-size / escaping limits),
 //   - the result is read back from a temp JSON file,
 //   - a hard timeout + the caller's AbortSignal can kill a runaway handler,
@@ -17,12 +18,20 @@
 import path from "node:path";
 import os from "node:os";
 import { promises as fs } from "node:fs";
-import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { spawn, type ChildProcess } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:net";
-import { agentPaths, aresAgentHome } from "../paths.js";
+import { aresAgentHome } from "../paths.js";
 import { exists, writeFileAtomic } from "../files.js";
-import { SKILL_NAME } from "../tools/SkillCraft.js";
+import {
+  SKILL_NAME,
+  canonicalCapabilityManifest,
+  parseCapabilityReceipt,
+  type CapabilityManifest,
+  type CapabilityReceipt,
+  type CapabilityScope,
+} from "./manifest.js";
+import { resolveSkill } from "./registry.js";
 
 export interface RunSkillOptions {
   home?: string;
@@ -30,17 +39,31 @@ export interface RunSkillOptions {
   input?: unknown;
   timeoutMs?: number;
   signal?: AbortSignal;
+  /** Session workspace used for project-local skill resolution and exposed to
+   * the handler. It does not confine an explicitly selected targetRoot. */
+  workspace?: string;
+  /** Exact directory the provider should operate against. May be any absolute
+   * or workspace-relative owner-selected path. */
+  targetRoot?: string;
+  sessionId?: string;
+  /** Explicit provider operation. Falls back to input.op for capability skills. */
+  operation?: string;
 }
 
 export interface SkillRunResult {
   name: string;
+  scope: CapabilityScope;
   ok: boolean;
   result?: unknown;
   error?: string;
   logs: string;
   durationMs: number;
   timedOut: boolean;
+  aborted: boolean;
   exitCode: number | null;
+  targetRoot: string;
+  touchedFiles: string[];
+  receipt?: CapabilityReceipt;
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -119,6 +142,12 @@ async function main() {
   const ctx = {
     home: process.env.ARES_HOME,
     name: process.env.ARES_SKILL_NAME,
+    skillDir: process.env.ARES_SKILL_DIR,
+    workspace: process.env.ARES_SKILL_WORKSPACE,
+    targetRoot: process.env.ARES_SKILL_TARGET_ROOT,
+    sessionId: process.env.ARES_SKILL_SESSION_ID || undefined,
+    providerHash: process.env.ARES_SKILL_PROVIDER_HASH || undefined,
+    operation: process.env.ARES_SKILL_OPERATION || undefined,
     host: "127.0.0.1",
     port: Number(process.env.ARES_SKILL_PORT || process.env.PORT || 0),
   };
@@ -164,26 +193,32 @@ export async function runSkill(opts: RunSkillOptions): Promise<SkillRunResult> {
   }
 
   const home = aresAgentHome(opts.home ?? process.env.ARES_HOME);
-  const paths = agentPaths(home);
-  const skillDir = path.join(paths.skillsDir, opts.name);
-  // Defense-in-depth: confirm the resolved dir still lives under skillsDir.
-  if (!path.resolve(skillDir).startsWith(path.resolve(paths.skillsDir) + path.sep)) {
-    throw new Error(`skill '${opts.name}' resolves outside the skills directory`);
+  const workspace = path.resolve(opts.workspace ?? process.cwd());
+  const resolved = await resolveSkill(opts.name, { home, workspace });
+  if (!resolved) {
+    throw new Error(
+      `skill '${opts.name}' was not found in ${path.join(workspace, ".ares", "skills")} or ${path.join(home, "skills")}`,
+    );
   }
-  const handlerPath = path.join(skillDir, "handler.js");
+  const { dir: skillDir, handlerPath, manifest, scope } = resolved;
   const timeoutMs = opts.timeoutMs && opts.timeoutMs > 0 ? opts.timeoutMs : DEFAULT_TIMEOUT_MS;
+  const targetRoot = path.resolve(workspace, opts.targetRoot ?? workspace);
+  const targetStat = await fs.stat(targetRoot).catch(() => null);
+  if (!targetStat?.isDirectory()) throw new Error(`skill targetRoot is not a directory: ${targetRoot}`);
 
   // Cosmetic-toggle fix: a skill marked disabled (marker file dropped/removed by
   // entry.ts's skill_toggle handler) must never spawn, not just show as off in the UI.
-  if (await exists(path.join(skillDir, ".disabled"))) {
+  if (resolved.disabled) {
     throw new Error(`skill '${opts.name}' is disabled`);
   }
 
   if (!(await exists(handlerPath))) {
     throw new Error(`skill '${opts.name}' has no handler.js to run (looked in ${skillDir})`);
   }
+  const operation = providerOperation(manifest, opts.operation, opts.input);
+  const providerHash = manifest ? await capabilityProviderHash(manifest, handlerPath) : undefined;
 
-  await ensureSkillsModuleType(paths.skillsDir);
+  await ensureSkillsModuleType(resolved.root);
   const runner = await ensureRunner();
 
   const id = randomUUID();
@@ -193,16 +228,23 @@ export async function runSkill(opts: RunSkillOptions): Promise<SkillRunResult> {
 
   const startedAt = Date.now();
   const skillPort = await leaseSkillPort();
-  let run: { logs: string; timedOut: boolean; exitCode: number | null; spawnError?: Error };
+  let run: { logs: string; timedOut: boolean; aborted: boolean; exitCode: number | null; spawnError?: Error };
   try {
-    run = await new Promise<{ logs: string; timedOut: boolean; exitCode: number | null; spawnError?: Error }>((resolve) => {
+    run = await new Promise<{ logs: string; timedOut: boolean; aborted: boolean; exitCode: number | null; spawnError?: Error }>((resolve) => {
       const child = spawn(process.execPath, [runner], {
-        cwd: skillDir,
+        cwd: manifest ? targetRoot : skillDir,
         windowsHide: true,
+        detached: process.platform !== "win32",
         env: {
           ...process.env,
           ARES_HOME: home,
           ARES_SKILL_NAME: opts.name,
+          ARES_SKILL_DIR: skillDir,
+          ARES_SKILL_WORKSPACE: workspace,
+          ARES_SKILL_TARGET_ROOT: targetRoot,
+          ARES_SKILL_SESSION_ID: opts.sessionId ?? "",
+          ARES_SKILL_PROVIDER_HASH: providerHash ?? "",
+          ARES_SKILL_OPERATION: operation ?? "",
           ARES_SKILL_HANDLER: handlerPath,
           ARES_SKILL_INPUT_FILE: inputFile,
           ARES_SKILL_OUTPUT_FILE: outputFile,
@@ -215,27 +257,42 @@ export async function runSkill(opts: RunSkillOptions): Promise<SkillRunResult> {
 
       const chunks: Buffer[] = [];
       let timedOut = false;
+      let aborted = false;
+      let settled = false;
       const timer = setTimeout(() => {
         timedOut = true;
-        child.kill();
+        void terminateProcessTree(child);
       }, timeoutMs);
 
-      const onAbort = () => child.kill();
+      const onAbort = () => {
+        aborted = true;
+        void terminateProcessTree(child);
+      };
       opts.signal?.addEventListener("abort", onAbort);
+      if (opts.signal?.aborted) onAbort();
 
       const collect = (chunk: Buffer) => chunks.push(chunk);
       child.stdout.on("data", collect);
       child.stderr.on("data", collect);
 
-      child.on("error", (err) => {
+      const finish = (exitCode: number | null, spawnError?: Error) => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
         opts.signal?.removeEventListener("abort", onAbort);
-        resolve({ logs: clampLog(Buffer.concat(chunks).toString("utf8")), timedOut, exitCode: null, spawnError: err });
+        resolve({
+          logs: clampLog(Buffer.concat(chunks).toString("utf8")),
+          timedOut,
+          aborted,
+          exitCode,
+          spawnError,
+        });
+      };
+      child.on("error", (err) => {
+        finish(null, err);
       });
       child.on("close", (code) => {
-        clearTimeout(timer);
-        opts.signal?.removeEventListener("abort", onAbort);
-        resolve({ logs: clampLog(Buffer.concat(chunks).toString("utf8")), timedOut, exitCode: code });
+        finish(code);
       });
     });
   } finally {
@@ -256,49 +313,309 @@ export async function runSkill(opts: RunSkillOptions): Promise<SkillRunResult> {
   await fs.rm(inputFile, { force: true }).catch(() => {});
   await fs.rm(outputFile, { force: true }).catch(() => {});
 
+  const base = {
+    name: opts.name,
+    scope,
+    logs: run.logs,
+    durationMs,
+    timedOut: run.timedOut,
+    aborted: run.aborted,
+    exitCode: run.exitCode,
+    targetRoot,
+    touchedFiles: [] as string[],
+  };
+
   if (run.spawnError) {
     return {
-      name: opts.name,
+      ...base,
       ok: false,
       error: `failed to start skill runner: ${run.spawnError.message}`,
-      logs: run.logs,
-      durationMs,
-      timedOut: run.timedOut,
-      exitCode: run.exitCode,
     };
   }
 
   if (run.timedOut) {
     return {
-      name: opts.name,
+      ...base,
       ok: false,
       error: `skill '${opts.name}' timed out after ${timeoutMs}ms`,
-      logs: run.logs,
-      durationMs,
       timedOut: true,
-      exitCode: run.exitCode,
+    };
+  }
+
+  if (run.aborted) {
+    return {
+      ...base,
+      ok: false,
+      error: `skill '${opts.name}' was aborted`,
     };
   }
 
   if (outcome?.ok) {
-    return {
-      name: opts.name,
-      ok: true,
+    const normalized = await normalizeHandlerOutcome({
       result: outcome.result,
-      logs: run.logs,
-      durationMs,
-      timedOut: false,
-      exitCode: run.exitCode,
-    };
+      manifest,
+      operation,
+      targetRoot,
+      providerHash,
+      startedAt,
+    });
+    return { ...base, ...normalized, timedOut: false, aborted: false };
   }
 
   return {
-    name: opts.name,
+    ...base,
     ok: false,
     error: outcome?.error ?? `skill '${opts.name}' exited ${run.exitCode} without a result`,
-    logs: run.logs,
-    durationMs,
     timedOut: false,
-    exitCode: run.exitCode,
+    aborted: false,
   };
+}
+
+function providerOperation(
+  manifest: CapabilityManifest | null,
+  explicit: string | undefined,
+  input: unknown,
+): string | undefined {
+  if (!manifest) return explicit;
+  const fromInput = input && typeof input === "object" && typeof (input as Record<string, unknown>).op === "string"
+    ? String((input as Record<string, unknown>).op)
+    : undefined;
+  const operation = explicit ?? fromInput;
+  if (!operation) {
+    throw new Error(`capability provider '${manifest.id}' requires an operation (pass operation or input.op)`);
+  }
+  if (!manifest.operations[operation]) {
+    throw new Error(`capability provider '${manifest.id}' does not declare operation '${operation}'`);
+  }
+  return operation;
+}
+
+interface NormalizedHandlerOutcome {
+  ok: boolean;
+  result?: unknown;
+  error?: string;
+  touchedFiles: string[];
+  receipt?: CapabilityReceipt;
+}
+
+async function normalizeHandlerOutcome(input: {
+  result: unknown;
+  manifest: CapabilityManifest | null;
+  operation: string | undefined;
+  targetRoot: string;
+  providerHash?: string;
+  startedAt: number;
+}): Promise<NormalizedHandlerOutcome> {
+  if (!input.manifest) {
+    const nested = objectRecord(input.result);
+    if (nested?.ok === false) {
+      return {
+        ok: false,
+        result: input.result,
+        error: typeof nested.error === "string" && nested.error.trim()
+          ? nested.error
+          : "skill handler returned ok:false",
+        touchedFiles: [],
+      };
+    }
+    return { ok: true, result: input.result, touchedFiles: [] };
+  }
+
+  let receipt: CapabilityReceipt;
+  try {
+    receipt = parseCapabilityReceipt(input.result, `provider ${input.manifest.id}`);
+  } catch (error) {
+    return {
+      ok: false,
+      result: input.result,
+      error: error instanceof Error ? error.message : String(error),
+      touchedFiles: [],
+    };
+  }
+
+  const expectedOperation = input.operation!;
+  const expectedHash = input.providerHash!;
+  const receiptTarget = path.resolve(receipt.targetRoot);
+  const normalizedMutations = receipt.mutations.map((mutation) => ({
+    ...mutation,
+    path: path.resolve(input.targetRoot, mutation.path),
+  }));
+  const touchedByKey = new Map<string, string>();
+  for (const mutation of normalizedMutations) {
+    const absolute = path.resolve(mutation.path);
+    if (!isWithinRoot(input.targetRoot, absolute)) {
+      return {
+        ok: false,
+        result: input.result,
+        error: `provider mutation escapes targetRoot: ${mutation.path}`,
+        touchedFiles: [],
+        receipt: { ...receipt, targetRoot: input.targetRoot, mutations: normalizedMutations },
+      };
+    }
+    if (touchedByKey.has(normalizePath(absolute))) {
+      return {
+        ok: false,
+        result: input.result,
+        error: `provider receipt reports the same mutation more than once: ${absolute}`,
+        touchedFiles: [...touchedByKey.values()],
+        receipt: { ...receipt, targetRoot: input.targetRoot, mutations: normalizedMutations },
+      };
+    }
+    touchedByKey.set(normalizePath(absolute), absolute);
+  }
+  const touchedFiles = [...touchedByKey.values()];
+
+  let contractError: string | undefined;
+  if (receipt.providerId !== input.manifest.id) {
+    contractError = `provider receipt id '${receipt.providerId}' does not match manifest '${input.manifest.id}'`;
+  } else if (receipt.providerHash !== expectedHash) {
+    contractError = `provider receipt hash does not match the loaded manifest and handler`;
+  } else if (receipt.operation !== expectedOperation) {
+    contractError = `provider receipt operation '${receipt.operation}' does not match '${expectedOperation}'`;
+  } else if (!samePath(receiptTarget, input.targetRoot)) {
+    contractError = `provider receipt targetRoot '${receipt.targetRoot}' does not match '${input.targetRoot}'`;
+  } else if (input.manifest.operations[expectedOperation].effect === "read-only" && normalizedMutations.length > 0) {
+    contractError = `read-only provider operation '${expectedOperation}' reported mutations`;
+  } else {
+    contractError = validateEvidence(
+      input.manifest.operations[expectedOperation],
+      receipt,
+      input.startedAt,
+    ) ?? await validateMutationHashes(normalizedMutations);
+  }
+
+  const normalizedReceipt: CapabilityReceipt = {
+    ...receipt,
+    targetRoot: input.targetRoot,
+    mutations: normalizedMutations,
+  };
+  if (contractError) {
+    return {
+      ok: false,
+      result: input.result,
+      error: contractError,
+      touchedFiles,
+      receipt: normalizedReceipt,
+    };
+  }
+  if (!receipt.ok) {
+    return {
+      ok: false,
+      result: receipt.result,
+      error: receipt.error ?? "capability provider returned ok:false",
+      touchedFiles,
+      receipt: normalizedReceipt,
+    };
+  }
+  return {
+    ok: true,
+    result: receipt.result,
+    touchedFiles,
+    receipt: normalizedReceipt,
+  };
+}
+
+function validateEvidence(
+  operation: CapabilityManifest["operations"][string],
+  receipt: CapabilityReceipt,
+  startedAt: number,
+): string | undefined {
+  const evidenceByKind = new Map<string, CapabilityReceipt["evidence"]>();
+  for (const item of receipt.evidence) {
+    const bucket = evidenceByKind.get(item.kind) ?? [];
+    bucket.push(item);
+    evidenceByKind.set(item.kind, bucket);
+  }
+  for (const required of operation.evidence) {
+    const candidates = evidenceByKind.get(required) ?? [];
+    if (candidates.length === 0) return `provider receipt is missing required '${required}' evidence`;
+    if (operation.requiresFreshObservationAfter) {
+      const fresh = candidates.some((item) => Date.parse(item.observedAt) >= startedAt);
+      if (!fresh) return `provider receipt '${required}' evidence predates this invocation`;
+    }
+  }
+  return undefined;
+}
+
+async function validateMutationHashes(
+  mutations: readonly CapabilityReceipt["mutations"][number][],
+): Promise<string | undefined> {
+  for (const mutation of mutations) {
+    const stat = await fs.lstat(mutation.path).catch(() => null);
+    if (mutation.afterHash === null) {
+      if (stat) return `provider reported deletion but path still exists: ${mutation.path}`;
+      continue;
+    }
+    if (!stat?.isFile() || stat.isSymbolicLink()) {
+      return `provider mutation path is not a regular file: ${mutation.path}`;
+    }
+    const actual = createHash("sha256").update(await fs.readFile(mutation.path)).digest("hex");
+    if (actual !== mutation.afterHash) {
+      return `provider mutation hash mismatch for ${mutation.path}: expected ${mutation.afterHash}, observed ${actual}`;
+    }
+  }
+  return undefined;
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+async function capabilityProviderHash(manifest: CapabilityManifest, handlerPath: string): Promise<string> {
+  const handler = await fs.readFile(handlerPath);
+  return createHash("sha256")
+    .update(canonicalCapabilityManifest(manifest), "utf8")
+    .update("\0", "utf8")
+    .update(handler)
+    .digest("hex");
+}
+
+function samePath(left: string, right: string): boolean {
+  return normalizePath(left) === normalizePath(right);
+}
+
+function normalizePath(value: string): string {
+  const resolved = path.resolve(value);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function isWithinRoot(root: string, candidate: string): boolean {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+}
+
+async function terminateProcessTree(child: ChildProcess): Promise<void> {
+  const pid = child.pid;
+  if (!pid || child.exitCode !== null) return;
+  if (process.platform === "win32") {
+    const killed = await new Promise<boolean>((resolve) => {
+      const killer = spawn("taskkill.exe", ["/PID", String(pid), "/T", "/F"], {
+        windowsHide: true,
+        shell: false,
+        stdio: "ignore",
+      });
+      let settled = false;
+      const finish = (ok: boolean) => {
+        if (settled) return;
+        settled = true;
+        resolve(ok);
+      };
+      killer.once("error", () => finish(false));
+      killer.once("close", (code) => finish(code === 0 || child.exitCode !== null));
+      setTimeout(() => finish(false), 3_000).unref();
+    });
+    if (!killed && child.exitCode === null) child.kill("SIGKILL");
+    return;
+  }
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // already exited
+    }
+  }
 }

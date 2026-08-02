@@ -210,6 +210,7 @@ test("dispatcher: unattended worker scope strips recursive control planes but ke
     tool("Conductor"),
     tool("StandingOrder"),
     tool("CodingBackend"),
+    tool("Capability"),
     tool("EnterPlanMode"),
     tool("ExitPlanMode"),
   ]);

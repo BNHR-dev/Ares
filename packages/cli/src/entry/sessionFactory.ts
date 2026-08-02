@@ -9,7 +9,7 @@ import { isReasoningLevel } from "@ares/protocol";
 import type { ToolPermissionRequest } from "@ares/core";
 import { notice } from "../terminalUi.js";
 import { loadUiSettings, updateUiSettings, type UiSettings } from "../uiSettings.js";
-import { AresAgentRuntime, prepareAresAgent, type PersonaDef } from "@ares/agent";
+import { AresAgentRuntime, prepareAresAgent, scanCapabilityRegistry, type CapabilityProvider, type PersonaDef } from "@ares/agent";
 import { listCapabilities, seedAllCapabilities, writeCapabilitiesDoc } from "@ares/operator";
 import { ManualReminderSource, applyEngineConfigEnv } from "./daemon.js";
 import { buildEngineTools } from "./engineTools.js";
@@ -21,6 +21,64 @@ import { buildSystemPrompt, loadGitContext, loadLiveMindContext, recallFailureFi
 
 function contextSourceHash(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+/** Compile the environment detection plane from provider manifests instead of
+ * teaching the core harness a permanent list of editors/engines. Newly forged
+ * providers become visible on the next mutation without restarting Ares. */
+function makeEnvironmentArtifactSignals(home: string, workspace: string) {
+  let providers: CapabilityProvider[] = [];
+  let refreshedAt = 0;
+  return async (event: {
+    toolName: string;
+    input: unknown;
+    output?: unknown;
+    touchedFiles?: readonly string[];
+  }): Promise<string[]> => {
+    if (event.toolName === "Capability") refreshedAt = 0;
+    const command = (event.toolName === "Bash" || event.toolName === "PowerShell") &&
+      event.input && typeof event.input === "object" && !Array.isArray(event.input)
+      ? String((event.input as Record<string, unknown>).command ?? "")
+      : "";
+    const files = event.touchedFiles ?? [];
+    if (!command && files.length === 0) return [];
+
+    const now = Date.now();
+    if (now - refreshedAt > 1_000) {
+      providers = (await scanCapabilityRegistry({ home, workspace })).providers
+        .filter((provider) => provider.manifest.kind === "environment-provider");
+      refreshedAt = now;
+    }
+
+    const signals: string[] = [];
+    for (const provider of providers) {
+      const fileMatch = provider.manifest.match.files
+        .map((pattern) => ({ pattern, file: files.find((candidate) => manifestPatternMatches(pattern, candidate)) }))
+        .find((match) => match.file);
+      const commandPattern = command
+        ? provider.manifest.match.commands.find((pattern) => manifestPatternMatches(pattern, command))
+        : undefined;
+      if (fileMatch?.file) signals.push(`provider:${provider.manifest.id}:file:${path.basename(fileMatch.file)}`);
+      if (commandPattern) signals.push(`provider:${provider.manifest.id}:command:${commandPattern}`);
+    }
+    return signals;
+  };
+}
+
+export function manifestPatternMatches(pattern: string, candidate: string): boolean {
+  const normalizedPattern = pattern.replace(/\\/g, "/").trim();
+  const normalizedCandidate = candidate.replace(/\\/g, "/");
+  if (!normalizedPattern) return false;
+  if (!/[?*]/.test(normalizedPattern)) {
+    return normalizedCandidate.toLowerCase().includes(normalizedPattern.toLowerCase());
+  }
+  const escaped = normalizedPattern.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+  const source = escaped
+    .replace(/\*\*/g, "\u0000")
+    .replace(/\*/g, "[^/]*")
+    .replace(/\?/g, ".")
+    .replace(/\u0000/g, ".*");
+  return new RegExp(`(?:^|/)${source}(?:$|/)`, "i").test(normalizedCandidate);
 }
 
 export interface ResumedSessionInfo {
@@ -117,7 +175,7 @@ export async function createSession(
   args: ParsedArgs,
   resumeSessionId?: string,
   requestPermission: (request: ToolPermissionRequest) => Promise<PermissionPromptDecision> = promptPermission,
-  opts: { startAgentRuntime?: boolean; sessionId?: string } = {},
+  opts: { startAgentRuntime?: boolean; sessionId?: string; detachedStartupRecovery?: boolean } = {},
 ): Promise<LiveSession> {
   // Owner-stored service keys ride into the tool layer via env (WebSearch
   // reads ARES_BRAVE_API_KEY). Settings win only when the env isn't set.
@@ -498,9 +556,21 @@ export function makeSpanSummarizer(
   return async (messages, signal) => {
     const transcript = renderSpanForSummary(messages);
     if (!transcript.trim()) return "";
+    const configuredTimeout = Number(process.env.ARES_COMPACTION_TIMEOUT_MS);
+    const timeoutMs = Number.isFinite(configuredTimeout) && configuredTimeout > 0
+      ? Math.max(1_000, Math.floor(configuredTimeout))
+      : 30_000;
+    const timeoutSignal = AbortSignal.timeout(timeoutMs);
+    const summarizerSignal = signal
+      ? AbortSignal.any([signal, timeoutSignal])
+      : timeoutSignal;
     try {
       if (selection.subModel?.summarize) {
-        return await selection.subModel.summarize({ input: transcript, instructions: COMPACTION_INSTRUCTIONS, signal });
+        return await selection.subModel.summarize({
+          input: transcript,
+          instructions: COMPACTION_INSTRUCTIONS,
+          signal: summarizerSignal,
+        });
       }
       return await sideQuery({
         provider: selection.provider,
@@ -508,11 +578,12 @@ export function makeSpanSummarizer(
         system: COMPACTION_INSTRUCTIONS,
         user: transcript,
         maxOutputTokens: 2048,
+        reasoningLevel: "off",
         onUsage,
         // Honor a stop during compaction — the engine threads the live turn
         // signal in, so aborting the turn no longer runs the summarizer to
         // completion against a dead turn.
-        signal,
+        signal: summarizerSignal,
       });
     } catch {
       return "";
@@ -547,7 +618,7 @@ export async function createSessionWithSelection(
   selection: ProviderSelection,
   resumeSessionId?: string,
   requestPermission: (request: ToolPermissionRequest) => Promise<PermissionPromptDecision> = promptPermission,
-  opts: { startAgentRuntime?: boolean; sessionId?: string } = {},
+  opts: { startAgentRuntime?: boolean; sessionId?: string; detachedStartupRecovery?: boolean } = {},
 ): Promise<LiveSession> {
   const startAgentRuntime = opts.startAgentRuntime !== false;
   const context = cliRuntimeContext();
@@ -612,6 +683,7 @@ export async function createSessionWithSelection(
     fileReadStamps,
     sessionKernel,
   );
+  const environmentArtifactSignals = makeEnvironmentArtifactSignals(context.home, context.workspace);
   const onHistoryTrimmed = (dropped: readonly Message[]) =>
     invalidateTrimmedReadStamps(fileReadStamps, context.workspace, dropped);
   await seedAllCapabilities(context.home)
@@ -683,9 +755,11 @@ export async function createSessionWithSelection(
       maxTurns: settings.engine?.maxTurns,
       fileReadStamps,
       onHistoryTrimmed,
+      environmentArtifactSignals,
       summarizeSpan,
       contextSourceVersions,
       sessionKernel,
+      detachedStartupRecovery: opts.detachedStartupRecovery,
     });
     sessionRef = session;
     shellRegistry.configureDurability({ kernel: sessionKernel, workspace: context.workspace });
@@ -760,9 +834,11 @@ export async function createSessionWithSelection(
     maxTurns: settings.engine?.maxTurns,
     fileReadStamps,
     onHistoryTrimmed,
+    environmentArtifactSignals,
     summarizeSpan,
     contextSourceVersions,
     sessionKernel,
+    detachedStartupRecovery: opts.detachedStartupRecovery,
   });
   sessionRef = session;
   shellRegistry.configureDurability({ kernel: sessionKernel, workspace: context.workspace });

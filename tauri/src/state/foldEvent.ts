@@ -20,8 +20,70 @@ export function foldEvent(s: SessionVm, e: AresEvent): SessionVm {
   const last = items[items.length - 1];
   const session = { ...s, items };
 
+  const steerIndex = (inputId?: string): number => {
+    if (inputId) {
+      for (let i = items.length - 1; i >= 0; i--) {
+        if (items[i].kind === "steer" && (items[i] as Extract<Item, { kind: "steer" }>).inputId === inputId) return i;
+      }
+      return -1;
+    }
+    // Legacy fallback only. If an ID was supplied, never settle a different
+    // correction merely because its bubble happens to be newest.
+    for (let i = items.length - 1; i >= 0; i--) {
+      if (items[i].kind === "steer" && !(items[i] as Extract<Item, { kind: "steer" }>).landed) return i;
+    }
+    return -1;
+  };
+
+  const updateSteer = (inputId: string | undefined, patch: Partial<Extract<Item, { kind: "steer" }>>): number => {
+    const index = steerIndex(inputId);
+    if (index >= 0) items[index] = { ...(items[index] as Extract<Item, { kind: "steer" }>), ...patch };
+    return index;
+  };
+
+  const restoreSteerDraft = (inputId: string | undefined, status: "cancelled" | "rejected"): boolean => {
+    const index = updateSteer(inputId, { status, landed: false });
+    if (index < 0) return false;
+    const steer = items[index] as Extract<Item, { kind: "steer" }>;
+    if (!steer.inputId) return false;
+    const queued = session.recoverableDrafts ?? [];
+    if (!queued.some((draft) => draft.inputId === steer.inputId)) {
+      session.recoverableDrafts = [...queued, {
+        inputId: steer.inputId,
+        text: steer.text,
+        ...(steer.images?.length ? { images: [...steer.images] } : {}),
+      }];
+    }
+    return true;
+  };
+
+  const rollbackProviderAttempt = (
+    attemptId: string,
+    boundary: number,
+    options: { removeAssistant: boolean; toolUseIds?: ReadonlySet<string> },
+  ): void => {
+    for (let i = items.length - 1; i >= boundary; i--) {
+      const item = items[i];
+      if (options.removeAssistant && item.kind === "assistant" && item.providerAttemptId === attemptId) {
+        items.splice(i, 1);
+        continue;
+      }
+      if (item.kind !== "tools") continue;
+      const steps = item.steps.filter((step) => {
+        if (step.providerAttemptId !== attemptId || step.actuallyStarted === true) return true;
+        return options.toolUseIds ? !options.toolUseIds.has(step.id) : false;
+      });
+      if (steps.length === 0) items.splice(i, 1);
+      else if (steps.length !== item.steps.length) items[i] = { ...item, steps };
+    }
+  };
+
   const openAssistant = (): Extract<Item, { kind: "assistant" }> => {
-    if (last?.kind === "assistant" && last.streaming) return last;
+    if (
+      last?.kind === "assistant" &&
+      last.streaming &&
+      last.providerAttemptId === session.providerAttempt?.id
+    ) return last;
     const fresh: Extract<Item, { kind: "assistant" }> = {
       kind: "assistant",
       key: nextKey(),
@@ -31,6 +93,7 @@ export function foldEvent(s: SessionVm, e: AresEvent): SessionVm {
       model: session.turnModel,
       lane: session.turnLane,
       provider: session.turnProvider,
+      providerAttemptId: session.providerAttempt?.id,
     };
     items.push(fresh);
     return fresh;
@@ -39,10 +102,115 @@ export function foldEvent(s: SessionVm, e: AresEvent): SessionVm {
   switch (e.type) {
     case "turn_start":
       session.busy = true;
+      session.cancelling = false;
       session.activity = "marshalling";
       session.fleet = undefined; // clear last turn's fleet board
       session.codingBackend = undefined; // and last turn's delegation cut-scene (fresh elapsed clock)
       break;
+    case "startup_recovery_preparing":
+      // The daemon has claimed visible ownership of this exact durable input,
+      // even though it may still be waiting for a crashed lease to expire.
+      // Keep the composer in steer/Stop mode throughout that takeover window.
+      session.busy = true;
+      session.cancelling = false;
+      session.activity = "recovering interrupted work";
+      break;
+    case "startup_recovery_queued":
+      // Lease takeover is complete, but ordinary turn_start has not necessarily
+      // arrived yet. Do not briefly unlock the composer in that hand-off gap.
+      session.busy = true;
+      session.cancelling = false;
+      session.activity = "resuming recovered work";
+      break;
+    case "startup_recovery_failed":
+      session.busy = false;
+      session.cancelling = false;
+      session.activity = undefined;
+      items.push({
+        kind: "notice",
+        key: nextKey(),
+        text: `Ares could not safely resume the interrupted turn${e.error ? `: ${compact(stringify(e.error), 300)}` : "."} The request remains durable; restart Ares to retry it.`,
+        tone: "warn",
+      });
+      break;
+    case "provider_attempt_started": {
+      if (!e.attemptId) break;
+      const prior = session.providerAttempt;
+      if (prior && prior.id !== e.attemptId) {
+        // Provider retries do not always have an explicit superseded event.
+        // A new attempt is itself the fence for uncommitted prior output.
+        rollbackProviderAttempt(prior.id, prior.itemBoundary, { removeAssistant: true });
+      }
+      if (prior?.id === e.attemptId) {
+        session.activity = (session.steerQueued ?? 0) > 0 ? "responding to steer" : "generating";
+        break;
+      }
+      session.providerAttempt = { id: e.attemptId, itemBoundary: items.length };
+      session.activity = (session.steerQueued ?? 0) > 0 ? "responding to steer" : "generating";
+      break;
+    }
+    case "provider_attempt_superseded": {
+      const attemptId = e.attemptId;
+      const activeAttempt = session.providerAttempt;
+      const boundary = activeAttempt && activeAttempt.id === attemptId
+        ? activeAttempt.itemBoundary
+        : 0;
+      if (attemptId) {
+        // Preserve owner-authored steer bubbles and settled tools. Remove only
+        // transient output attributed to the superseded provider attempt.
+        rollbackProviderAttempt(attemptId, boundary, { removeAssistant: true });
+      }
+      if (session.providerAttempt?.id === attemptId) session.providerAttempt = undefined;
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (item.kind === "steer" && item.status === "interrupting_generation") {
+          items[i] = { ...item, status: "waiting_for_boundary" };
+        }
+      }
+      session.activity = e.reason === "steering" ? "applying steer" : "restarting generation";
+      break;
+    }
+    case "provider_attempt_effects_skipped": {
+      const attemptId = e.attemptId;
+      if (!attemptId) break;
+      const toolUseIds = new Set(e.toolUseIds ?? []);
+      // message_done already committed the assistant. Steering at this edge
+      // cancels only proposed effects that never crossed tool_start. Preserve
+      // their explicit error settlement so live UI and history reload agree.
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (item.kind !== "tools") continue;
+        const steps = item.steps.map((step) => (
+          step.providerAttemptId === attemptId &&
+          toolUseIds.has(step.id) &&
+          step.actuallyStarted !== true
+            ? {
+                ...step,
+                status: "error" as const,
+                label: `${step.name} · skipped by steer`,
+                detail: step.detail ?? "Skipped before execution because a newer owner correction arrived.",
+              }
+            : step
+        ));
+        items[i] = { ...item, steps, finishedAt: item.finishedAt ?? Date.now() };
+      }
+      for (let i = items.length - 1; i >= 0; i--) {
+        const item = items[i];
+        if (item.kind === "assistant" && item.providerAttemptId === attemptId) {
+          if (item.streaming) items[i] = { ...item, streaming: false };
+          break;
+        }
+      }
+      if (session.providerAttempt?.id === attemptId) session.providerAttempt = undefined;
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (item.kind === "steer" && item.status === "interrupting_generation") {
+          items[i] = { ...item, status: "waiting_for_boundary" };
+        }
+      }
+      session.activity = "applying steer";
+      break;
+    }
     case "consciousness_say": {
       // A proactive remark from the Watch — drop it into the conversation as a
       // finalized assistant bubble (never streaming, never sets busy).
@@ -83,6 +251,23 @@ export function foldEvent(s: SessionVm, e: AresEvent): SessionVm {
       session.activity = "thinking";
       break;
     }
+    case "message_done": {
+      const attemptId = session.providerAttempt?.id;
+      for (let i = items.length - 1; i >= 0; i--) {
+        const item = items[i];
+        if (
+          item.kind === "assistant" &&
+          item.streaming &&
+          (attemptId ? item.providerAttemptId === attemptId : true)
+        ) {
+          items[i] = { ...item, streaming: false };
+          break;
+        }
+      }
+      session.providerAttempt = undefined;
+      session.activity = e.stopReason === "tool_use" ? "settling proposed actions" : "response committed";
+      break;
+    }
     case "tool_use_start": {
       // The model just BEGAN authoring this tool call — surface it instantly,
       // before the input finishes streaming. tool_start upgrades this step.
@@ -93,6 +278,7 @@ export function foldEvent(s: SessionVm, e: AresEvent): SessionVm {
         status: "drafting",
         draftChars: 0,
         draftHead: "",
+        providerAttemptId: session.providerAttempt?.id,
       };
       session.activity = `drafting ${e.name ?? "tool"}`;
       if (last?.kind === "assistant" && last.streaming) items[items.length - 1] = { ...last, streaming: false };
@@ -135,6 +321,8 @@ export function foldEvent(s: SessionVm, e: AresEvent): SessionVm {
         name: e.name ?? "tool",
         status: "running",
         inputJson: e.input !== undefined ? compact(stringify(e.input), 1200) : undefined,
+        providerAttemptId: session.providerAttempt?.id,
+        actuallyStarted: true,
       };
       session.activity = step.label;
       if (last?.kind === "assistant" && last.streaming) items[items.length - 1] = { ...last, streaming: false };
@@ -147,7 +335,7 @@ export function foldEvent(s: SessionVm, e: AresEvent): SessionVm {
         const idx = it.steps.findIndex((st) => st.id === step.id);
         if (idx !== -1) {
           const steps = [...it.steps];
-          steps[idx] = step;
+          steps[idx] = { ...step, providerAttemptId: it.steps[idx].providerAttemptId ?? step.providerAttemptId };
           items[i] = { ...it, steps, finishedAt: undefined };
           upgraded = true;
         }
@@ -254,12 +442,30 @@ export function foldEvent(s: SessionVm, e: AresEvent): SessionVm {
         const idx = it.steps.findIndex((st) => st.id === e.id);
         if (idx === -1) continue;
         const steps = [...it.steps];
+        const completedToolName = steps[idx].name;
         steps[idx] = {
           ...steps[idx],
           status: e.type === "tool_end" ? "ok" : "error",
           durationMs: e.durationMs,
           detail: e.type === "tool_end" ? compact(e.display ?? stringify(e.output), 1600) : compact(String(e.error ?? "failed"), 1600),
         };
+        if (e.type === "tool_end" && (completedToolName === "EnterPlanMode" || completedToolName === "ExitPlanMode")) {
+          const output = e.output && typeof e.output === "object" && !Array.isArray(e.output)
+            ? e.output as Record<string, unknown>
+            : {};
+          const nextMode = output.mode === "plan" ? "plan" : output.mode === "workspace-write" ? "build" : undefined;
+          if (nextMode && session.workflowMode !== nextMode) {
+            session.workflowMode = nextMode;
+            items.push({
+              kind: "notice",
+              key: nextKey(),
+              text: nextMode === "plan"
+                ? "PLAN MODE — discussion, research, and inspection are available; edits and execution are locked."
+                : "BUILD MODE — you approved the exact plan handoff; edits and execution are unlocked.",
+              tone: "dim",
+            });
+          }
+        }
         items[i] = {
           ...it,
           steps,
@@ -287,16 +493,43 @@ export function foldEvent(s: SessionVm, e: AresEvent): SessionVm {
       break;
     }
     case "permission_request":
-      items.push({ kind: "permission", key: nextKey(), id: e.id ?? "", toolName: e.toolName ?? "tool", reason: e.reason ?? "" });
+      if (e.toolName === "ExitPlanMode") session.workflowMode = "plan";
+      items.push({ kind: "permission", key: nextKey(), id: e.id ?? "", toolName: e.toolName ?? "tool", reason: e.reason ?? "", input: e.input });
       break;
     case "permission_response": {
       for (let i = items.length - 1; i >= 0; i--) {
         const it = items[i];
         if (it.kind === "permission" && it.id === e.id) {
-          items[i] = { ...it, decided: e.decision ?? "decided" };
+          items[i] = { ...it, decided: e.decision ?? "decided", submitting: undefined };
           break;
         }
       }
+      break;
+    }
+    case "permission_submission_started": {
+      for (let i = items.length - 1; i >= 0; i--) {
+        const it = items[i];
+        if (it.kind === "permission" && it.id === e.id && !it.decided) {
+          items[i] = { ...it, submitting: e.decision ?? "decision" };
+          break;
+        }
+      }
+      break;
+    }
+    case "permission_submission_failed": {
+      for (let i = items.length - 1; i >= 0; i--) {
+        const it = items[i];
+        if (it.kind === "permission" && it.id === e.id && !it.decided) {
+          items[i] = { ...it, submitting: undefined };
+          break;
+        }
+      }
+      items.push({
+        kind: "notice",
+        key: nextKey(),
+        text: `Ares did not receive that approval response${e.error ? `: ${compact(stringify(e.error), 240)}` : "."} The approval buttons are active again.`,
+        tone: "warn",
+      });
       break;
     }
     case "system_reminder_injected": {
@@ -314,12 +547,14 @@ export function foldEvent(s: SessionVm, e: AresEvent): SessionVm {
       break;
     }
     case "compaction": {
+      // Microcompaction is silent storage maintenance. It does not call a
+      // summarizer and must not impersonate a long-running activity in chat.
+      if (e.method === "micro") break;
       const before = typeof e.tokensBefore === "number" ? e.tokensBefore : 0;
       const after = typeof e.tokensAfter === "number" ? e.tokensAfter : 0;
       const n = typeof e.summarizedMessages === "number" ? e.summarizedMessages : 0;
       const how = e.method === "ledger" ? "digest" : "summary";
       const k = (t: number) => (t >= 1000 ? `${Math.round(t / 1000)}k` : `${t}`);
-      session.activity = "compacting memory";
       items.push({
         kind: "notice",
         key: nextKey(),
@@ -389,8 +624,13 @@ export function foldEvent(s: SessionVm, e: AresEvent): SessionVm {
           tone: "warn",
         });
       }
-      session.busy = false;
-      session.steerQueued = 0;
+      // QueryEngine's terminal boundary precedes daemon verification/reflection
+      // and release of `turnActive`. Keep every composer in steer/Stop mode
+      // until the host emits turn_settled; otherwise an immediate fresh message
+      // can be admitted as a steer against the dying owner and then lost on Stop.
+      session.busy = true;
+      session.activity = session.cancelling ? "stopping safely" : "settling turn";
+      session.providerAttempt = undefined;
       session.tokensIn += input;
       session.cacheReadTokens += e.usage?.cacheReadTokens ?? 0;
       session.tokensOut += output;
@@ -402,37 +642,177 @@ export function foldEvent(s: SessionVm, e: AresEvent): SessionVm {
       }
       break;
     }
-    case "steer_applied": {
-      // The daemon folded a queued steer into the live turn — mark it landed.
-      for (let i = items.length - 1; i >= 0; i--) {
-        if (items[i].kind === "steer" && !(items[i] as Extract<Item, { kind: "steer" }>).landed) {
-          items[i] = { ...(items[i] as Extract<Item, { kind: "steer" }>), landed: true };
-          break;
+    case "turn_settled":
+      session.busy = e.continuing === true;
+      session.cancelling = false;
+      session.activity = e.continuing ? "continuing queued correction" : undefined;
+      break;
+    case "desktop_pending_input_cancelled": {
+      // This ordinary input existed only in Desktop's restart buffer. Remove
+      // its exact transcript bubble and hand the clean user-authored payload
+      // back to the composer; daemon_ready must have nothing left to replay.
+      const index = e.inputId
+        ? items.findIndex((item) => item.kind === "user" && item.inputId === e.inputId)
+        : -1;
+      if (index >= 0) items.splice(index, 1);
+      if (e.inputId) {
+        const queued = session.recoverableDrafts ?? [];
+        if (!queued.some((draft) => draft.inputId === e.inputId)) {
+          session.recoverableDrafts = [...queued, {
+            inputId: e.inputId,
+            text: e.text ?? "",
+            ...(e.images?.length ? { images: [...e.images] } : {}),
+          }];
         }
       }
-      session.steerQueued = Math.max(0, (session.steerQueued ?? 0) - 1);
-      session.activity = "steering";
+      if (!items.some((item) => item.kind === "user")) session.title = "New session";
+      session.busy = false;
+      session.cancelling = false;
+      session.activity = undefined;
       break;
     }
+    case "interrupt_requested":
+    case "interrupt_pending":
+      session.busy = true;
+      session.cancelling = true;
+      session.activity = "stopping safely";
+      break;
+    case "interrupt_settled":
+    case "interrupted_by_user":
+      session.busy = false;
+      session.cancelling = false;
+      session.steerQueued = 0;
+      session.activity = undefined;
+      break;
+    case "interrupt_idle":
+      // Idempotent Stop raced the real terminal boundary or targeted an idle
+      // session. It must not leave an optimistic Desktop gate behind.
+      session.busy = false;
+      session.cancelling = false;
+      session.activity = undefined;
+      break;
+    case "steer_applied": {
+      // The daemon folded a queued steer into the live turn — mark it landed.
+      updateSteer(e.inputId, { landed: true, status: "applied" });
+      session.steerQueued = Math.max(0, (session.steerQueued ?? 0) - 1);
+      session.activity = "steer applied";
+      break;
+    }
+    case "steer_submitted":
     case "steer_queued":
-      session.activity = "steer queued";
+      updateSteer(e.inputId, { status: "submitting" });
+      session.activity = "sending steer";
+      break;
+    case "steer_buffered":
+      updateSteer(e.inputId, { status: "waiting_for_boundary" });
+      session.activity = "waiting for active turn admission";
+      break;
+    case "steer_admitted":
+      if (e.delivery === "interrupting_generation") {
+        updateSteer(e.inputId, { status: "interrupting_generation" });
+        session.activity = "interrupting generation";
+      } else if (e.delivery === "waiting_for_action") {
+        updateSteer(e.inputId, { status: "waiting_for_action" });
+        session.activity = "waiting for current action to settle";
+      } else {
+        updateSteer(e.inputId, { status: "waiting_for_boundary" });
+        session.activity = "applying steer at next boundary";
+      }
+      break;
+    case "steer_cancelled":
+      restoreSteerDraft(e.inputId, "cancelled");
+      session.steerQueued = Math.max(0, (session.steerQueued ?? 0) - 1);
+      session.activity = "steer restored to draft";
+      break;
+    case "steer_rejected":
+      restoreSteerDraft(e.inputId, "rejected");
+      session.steerQueued = Math.max(0, (session.steerQueued ?? 0) - 1);
+      session.activity = "steer restored to draft";
+      items.push({
+        kind: "notice",
+        key: nextKey(),
+        text: `Steer was not admitted${e.error ? `: ${compact(stringify(e.error), 300)}` : "."} It was restored to your draft.`,
+        tone: "warn",
+      });
+      break;
+    case "steer_settled":
+      session.steerQueued = Math.max(0, (session.steerQueued ?? 0) - 1);
+      break;
+    case "input_replayed": {
+      if (!e.settled) break;
+      const index = steerIndex(e.inputId);
+      if (index < 0) break;
+      const steer = items[index] as Extract<Item, { kind: "steer" }>;
+      if (steer.status === "applied" || steer.status === "cancelled" || steer.status === "rejected") break;
+      if (e.status === "cancelled") {
+        restoreSteerDraft(e.inputId, "cancelled");
+        session.activity = "steer restored to draft";
+      } else {
+        updateSteer(e.inputId, { landed: true, status: "applied" });
+        session.activity = "steer already applied";
+      }
+      session.steerQueued = Math.max(0, (session.steerQueued ?? 0) - 1);
+      break;
+    }
+    case "steer_epilogue_warning":
+      if (e.status === "admitted" || e.status === "claimed") {
+        updateSteer(e.inputId, { status: "waiting_for_boundary" });
+      }
+      items.push({
+        kind: "notice",
+        key: nextKey(),
+        text: `The steer remains durably ${e.status ?? "recorded"}; only its follow-up acknowledgement failed${e.error ? `: ${compact(stringify(e.error), 300)}` : "."}`,
+        tone: "warn",
+      });
+      break;
+    case "input_rejected":
+      if (e.reason === "turn_cancelling" || e.reason === "turn_preparing" || e.reason === "turn_settling") {
+        const restored = restoreSteerDraft(e.inputId, "rejected");
+        if (restored) session.steerQueued = Math.max(0, (session.steerQueued ?? 0) - 1);
+        items.push({
+          kind: "notice",
+          key: nextKey(),
+          text: restored
+            ? e.reason === "turn_cancelling"
+              ? "That steer arrived while the turn was stopping, so it was restored to your draft. Send it when stopping finishes."
+              : e.reason === "turn_preparing"
+                ? "Ares was still preparing the turn. Your steer was restored to the draft and can be sent as soon as generation starts."
+                : "The model had already ended and the turn was settling. Your steer was restored to the draft for the next turn."
+            : "That message was not sent because the previous turn cannot accept steering at this boundary.",
+          tone: "warn",
+        });
+      }
       break;
     case "daemon_error":
       items.push({ kind: "notice", key: nextKey(), text: compact(stringify(e.error ?? "daemon error"), 500), tone: "bad" });
       break;
     case "error": {
-      const errObj = e.error as { code?: string; message?: string } | undefined;
+      const errObj = e.error as { code?: string; message?: string; retriable?: boolean } | undefined;
       const msg = errObj?.message ?? (typeof e.error === "string" ? e.error : e.text ?? "error");
+      const retriable = errObj?.retriable === true;
       // Missing Anthropic auth → an actionable in-chat sign-in prompt, not a dead error.
       if (errObj?.code === "no_auth" && /anthropic|claude/i.test(msg)) {
         items.push({ kind: "authPrompt", key: nextKey(), provider: "anthropic", text: msg });
       } else {
-        items.push({ kind: "notice", key: nextKey(), text: compact(msg, 500), tone: "bad" });
+        items.push({ kind: "notice", key: nextKey(), text: compact(msg, 500), tone: retriable ? "warn" : "bad" });
       }
-      session.busy = false;
+      // Provider errors are diagnostics, not terminal turn boundaries. Retry
+      // or failover may follow; only turn_end/interrupt settlement unlocks UI.
+      session.busy = true;
+      if (retriable) session.activity = "retrying provider";
       break;
     }
     case "desktop_error":
+      // A daemon transport failure makes an in-flight approval delivery
+      // ambiguous. Never leave its controls permanently disabled; exact prompt
+      // IDs and late-response quarantine keep a retry from approving another
+      // request.
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (item.kind === "permission" && item.submitting && !item.decided) {
+          items[i] = { ...item, submitting: undefined };
+        }
+      }
       items.push({ kind: "notice", key: nextKey(), text: compact(e.text ?? "desktop error", 500), tone: "bad" });
       break;
     default:

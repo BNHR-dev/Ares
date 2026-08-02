@@ -9,10 +9,10 @@ import { loadUiSettings } from "../uiSettings.js";
 import { aresGatewayBase } from "./providers.js";
 import { makeTelegramSetupTool } from "../telegramSetupTool.js";
 import { makeTelegramRosterTool } from "../telegramRosterTool.js";
-import { BootstrapTool, MissionTool, PersonaTool, RunSkillTool, SelfEvolveTool, SelfTool, SkillCraftTool, listPersonas, makeSkillHubTool } from "@ares/agent";
+import { BootstrapTool, MissionTool, PersonaTool, RunSkillTool, SelfEvolveTool, SelfTool, SkillCraftTool, listPersonas, makeCapabilityTool, makeSkillHubTool, resolveCapabilityProvider, runSkill, scanCapabilityRegistry } from "@ares/agent";
 import { registerPersonaSubagents } from "./rosterBridge.js";
 import { withMissionRunRecorded } from "./missionLiveness.js";
-import { QueryEngineDispatcher, acquireCapability, createGoal, listGoals, listAcquisitions, listCapabilities, newGoalId, novelDeltaCurve, reliabilityOf, runGoalToCompletion, saveGoal, loadStandingOrders, addStandingOrder, removeStandingOrder, renderStandingOrders, type StandingOrder, type Goal, type AcquisitionKind, type VerificationSpec } from "@ares/operator";
+import { QueryEngineDispatcher, acquireCapability, createGoal, listGoals, listAcquisitions, listCapabilities, markAcquisitionAcquired, newGoalId, novelDeltaCurve, reliabilityOf, runGoalToCompletion, saveGoal, setAcquisitionStatus, loadStandingOrders, addStandingOrder, removeStandingOrder, renderStandingOrders, type StandingOrder, type Goal, type AcquisitionKind, type VerificationSpec } from "@ares/operator";
 import { MemoryRouter, MemoryStore, withConsolidationLock } from "@ares/mind";
 import { makeBrowserTool } from "./browserBridge.js";
 import { ProviderSelection, fastModelFor } from "./providers.js";
@@ -108,6 +108,128 @@ export async function buildEngineTools(
     subModel: selection.subModel,
   });
 
+  // One generic adaptive-provider surface for every environment. The registry
+  // is preloaded so per-input safety is available synchronously on the first
+  // call; the tool refreshes it after discovery/acquisition/invocation.
+  const capabilitySnapshot = await scanCapabilityRegistry({
+    home: context.home,
+    workspace: context.workspace,
+  });
+  // Assigned after child scoping is built. The ensure callback cannot run
+  // until buildEngineTools returns, so it always observes the final non-
+  // recursive Worker catalog.
+  let capabilityWorkerTools: readonly EngineTool[] = [];
+  const capabilityTool = makeCapabilityTool({
+    home: context.home,
+    workspace: context.workspace,
+    initialSnapshot: capabilitySnapshot,
+    ensure: async (request, toolContext) => {
+      const acquired = await acquireCapability({
+        home: request.home,
+        capabilityName: request.capability,
+        kind: "skill",
+        requires: request.requires,
+        targetFiles: request.targetFiles,
+        description: request.description,
+        scope: request.scope,
+        workspace: request.workspace,
+        targetRoot: request.targetRoot,
+      });
+      await setAcquisitionStatus(request.home, acquired.acquisition.id, "building");
+
+      const ticks = 1;
+      const dispatcher = new QueryEngineDispatcher({
+        provider: selection.provider,
+        model: selection.model,
+        workspace: request.workspace,
+        tools: capabilityWorkerTools,
+        systemPrompt: buildSystemPrompt(runtime.permissionMode, context),
+        sessionKernel,
+        parentSessionId: request.sessionId,
+        telemetryDir: path.join(context.home, "telemetry"),
+        sessionRegistryHome: context.home,
+        requestPermission: toolContext.requestPermission,
+      });
+      let final: Goal;
+      try {
+        final = await withMissionRunRecorded(acquired.goal.id, ticks, () =>
+          runGoalToCompletion(
+            {
+              home: request.home,
+              dispatcher,
+              workspace: request.workspace,
+              signal: request.signal,
+            },
+            acquired.goal.id,
+            { maxTicks: ticks },
+          ),
+        );
+      } catch (error) {
+        // An owner Stop is resumable durable work, not proof that acquisition
+        // is blocked. Hard worker failures are made explicit for triage.
+        if (!request.signal.aborted) {
+          await setAcquisitionStatus(request.home, acquired.acquisition.id, "blocked").catch(() => {});
+        }
+        throw error;
+      }
+
+      const provider = await resolveCapabilityProvider(
+        { capability: request.capability },
+        { home: request.home, workspace: request.workspace },
+      );
+      let verification: Awaited<ReturnType<typeof runSkill>> | undefined;
+      let verificationError: string | undefined;
+      if (!provider && (final.status === "done" || final.status === "blocked")) {
+        verificationError = `acquisition Worker ended ${final.status} without registering a provider for ${request.capability}`;
+      }
+      if (provider) {
+        try {
+          verification = await runSkill({
+            home: request.home,
+            workspace: request.workspace,
+            name: provider.name,
+            input: { reason: "post-acquisition-healthcheck" },
+            targetRoot: request.targetRoot,
+            operation: provider.manifest.healthcheck.operation,
+            timeoutMs: provider.manifest.healthcheck.timeoutMs,
+            signal: request.signal,
+            sessionId: request.sessionId,
+          });
+        } catch (error) {
+          verificationError = error instanceof Error ? error.message : String(error);
+        }
+      }
+      const status = verification?.ok
+        ? "available" as const
+        : final.status === "blocked" || final.status === "done"
+          ? "blocked" as const
+          : "building" as const;
+      if (status === "available") {
+        await markAcquisitionAcquired(request.home, acquired.acquisition.id, {
+          ok: verification!.ok,
+          receipt: verification!.receipt,
+          expectedProviderId: provider!.manifest.id,
+          expectedOperation: provider!.manifest.healthcheck.operation,
+        });
+      } else {
+        await setAcquisitionStatus(request.home, acquired.acquisition.id, status);
+      }
+      return {
+        status,
+        verification,
+        error: verificationError,
+        result: {
+          ...acquired,
+          final,
+          requestedScope: request.scope,
+          targetRoot: request.targetRoot ?? request.workspace,
+          description: request.description,
+          verificationError,
+        },
+      };
+    },
+  });
+
   const baseToolDefs = [
     ...DEFAULT_TOOLS,
     makeTodoWriteTool(todoStore),
@@ -123,6 +245,7 @@ export async function buildEngineTools(
     SelfEvolveTool,
     SkillCraftTool,
     RunSkillTool,
+    capabilityTool,
     MissionTool,
     SelfTool,
     PersonaTool,
@@ -195,6 +318,10 @@ export async function buildEngineTools(
   const livingMindTool = adaptToolForEngine(makeLivingMindTool(context), enrich) as EngineTool;
   const standingOrderTool = adaptToolForEngine(makeStandingOrderTool(context), enrich) as EngineTool;
   const browserTool = adaptToolForEngine(makeBrowserTool(context), enrich) as EngineTool;
+  capabilityWorkerTools = [
+    ...childBaseTools.filter((tool) => tool.schema.name !== "Capability"),
+    browserTool,
+  ];
   // CodingBackend — optional bridge to an external coding harness
   // (Claude Code / Codex) on the ARES account. Main-agent only, like Conductor:
   // subagents/leaves can't recurse into it. It refuses any backend that is not

@@ -77,6 +77,19 @@ import {
   sessionFromHistory,
 } from "./state/session";
 import { foldEvent, toolKind, summarizeSteps } from "./state/foldEvent";
+import {
+  claimSteersForDaemonReady,
+  createSteerReplayEpoch,
+  markSteerSentInEpoch,
+  resetSteerReplayEpoch,
+  steerReplayWireText,
+} from "./state/steerReplay";
+import {
+  attachmentBudgetViolation,
+  MAX_ATTACH_B64,
+  MAX_ATTACHMENTS,
+  supportedAttachmentMediaType,
+} from "./state/attachments";
 import { compact, liveTail, stringify, fmtTokens, fmtSpend, fmtMs, fmtBytes, escapeHtml, dataUrlB64Len, splitDataImages } from "./lib/format";
 import { renderMarkdown, splitRich, inlineMd, type RichSegment } from "./lib/markdown";
 import {
@@ -182,6 +195,21 @@ function forgeFrameUrl(url: string, native: boolean, revision: number): string {
   }
   const join = url.includes("?") ? "&" : "?";
   return `${url}${join}ares_forge=${revision}`;
+}
+
+/** External sites commonly deny iframe embedding with X-Frame-Options/CSP.
+ * The Forge embeds only owner-built/local targets; real websites are rendered
+ * from Ares's Playwright screencast so the panel never shows a fake blocked
+ * page while claiming a sign-in form is available. */
+function forgeCanEmbed(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === "file:" || parsed.protocol === "asset:" || parsed.protocol === "tauri:") return true;
+    const host = parsed.hostname.toLowerCase();
+    return host === "localhost" || host === "127.0.0.1" || host === "::1" || host.endsWith(".localhost");
+  } catch {
+    return false;
+  }
 }
 
 // ─── Demo feed (browser preview) ───────────────────────────────────────────
@@ -535,6 +563,10 @@ function App() {
   const lastSeq = useRef(0);
   const scroller = useRef<HTMLDivElement | null>(null);
   const activeRef = useRef("");
+  const sessionsRef = useRef(sessions);
+  /** Synchronous click-to-ack gate. React state may not re-render between a
+   * Stop click and an immediate Enter keypress, so this closes that tiny race. */
+  const stoppingSessionsRef = useRef(new Set<string>());
   const rosterRef = useRef<PersonaVm[]>([]);
   // While the experimental Living Surface owns this session it owns narration
   // too. The hidden Classic window must not read the JSON patch stream aloud.
@@ -545,11 +577,26 @@ function App() {
   const primarySessionRef = useRef(sessions[0]?.id ?? "");
   const prefsRef = useRef(prefs);
   const restartAttempts = useRef(0);
-  const pendingGoal = useRef<{ goal: string; sessionId: string; voice?: boolean; inputId: string } | null>(null);
+  const pendingGoal = useRef<{
+    goal: string;
+    sessionId: string;
+    voice?: boolean;
+    inputId: string;
+    draftText: string;
+    images?: string[];
+  } | null>(null);
+  /** Synchronous fence for approval clicks. React commits the visual
+   * `submitting` lock immediately after the event; this closes the smaller
+   * same-tick window before that commit for every approval-card variant. */
+  const permissionSubmissionLocks = useRef<Set<string>>(new Set());
+  /** IDs submitted to the current daemon process. A new process clears this,
+   * allowing unresolved steer bubbles to replay once with their original ID. */
+  const steerReplayEpoch = useRef(createSteerReplayEpoch());
   const stderrTail = useRef<string[]>([]);
   prefsRef.current = prefs;
 
   const active = sessions.find((s) => s.id === activeId) ?? sessions[0];
+  sessionsRef.current = sessions;
   activeRef.current = active?.id ?? "";
   rosterRef.current = roster;
 
@@ -999,6 +1046,7 @@ function App() {
   const restartDaemon = useCallback(
     (provider?: string, model?: string) => {
       if (!native) return;
+      resetSteerReplayEpoch(steerReplayEpoch.current);
       setDaemon("starting");
       void invoke<DaemonStatus>("ares_restart_daemon", {
         provider: provider ?? prefsRef.current.provider,
@@ -1081,6 +1129,40 @@ function App() {
     // populate the status bar's mission count + rail's disk-session log
     void invoke("ares_daemon_command", { command: { type: "operator_status" } }).catch(() => null);
     void invoke("ares_daemon_command", { command: { type: "sessions_list" } }).catch(() => null);
+    // A crash can happen after SQLite admitted a steer but before Desktop saw
+    // its acknowledgement. Replay every unresolved bubble with the exact same
+    // identity and payload; daemon idempotency, rather than UI guesswork, then
+    // settles it. The epoch ledger absorbs duplicate ready frames from one
+    // daemon process.
+    const replaySteers = claimSteersForDaemonReady(sessionsRef.current, steerReplayEpoch.current);
+    let replayRestarted = false;
+    for (const replay of replaySteers) {
+      // Close the daemon-ready/event round-trip gap locally. An unresolved
+      // correction is owned work as soon as this epoch claims its exact ID, so
+      // keep steer/Stop controls visible until canonical replay settles it.
+      applyTo(replay.sessionId, (s) => ({
+        ...s,
+        busy: true,
+        cancelling: false,
+        activity: "recovering interrupted work",
+      }));
+      void invoke("ares_daemon_command", {
+        command: {
+          type: "steer",
+          text: steerReplayWireText(replay),
+          sessionId: replay.sessionId,
+          inputId: replay.inputId,
+        },
+      }).catch((error) => {
+        // Delivery is ambiguous: never restore or reject the bubble here. A
+        // fresh daemon epoch will safely retry the same durable identity.
+        pushLog(`[garrison] steer replay ${replay.inputId} lost transport: ${String(error)}`);
+        if (!replayRestarted) {
+          replayRestarted = true;
+          restartDaemon();
+        }
+      });
+    }
     const queued = pendingGoal.current;
     if (queued) {
       pendingGoal.current = null;
@@ -1088,7 +1170,7 @@ function App() {
         applyTo(queued.sessionId, (s) => ({ ...foldEvent(s, { type: "desktop_error", text: String(err) }), busy: false }));
       });
     }
-  }, [native, applyTo]);
+  }, [native, applyTo, pushLog, restartDaemon]);
 
   // ── daemon boot + event ingestion (native only) ──────────────────────────
   useEffect(() => {
@@ -1113,12 +1195,33 @@ function App() {
         case "daemon_stdout":
           pushLog(`[stdout] ${e.text ?? ""}`);
           return true;
+        case "interrupt_requested":
+        case "interrupt_pending":
+        case "interrupt_settled":
+        case "interrupt_idle":
         case "interrupted_by_user":
-          pushLog("[garrison] turn interrupted by user");
-          // The daemon confirmed the abort — free the session that owned the
-          // turn (not just whatever card is focused now) so its composer unlocks.
-          applyTo(e.sessionId ?? activeRef.current, (s) => ({ ...s, busy: false, steerQueued: 0, activity: undefined }));
+          pushLog(`[garrison] ${e.type}`);
+          if (e.type === "interrupt_requested" || e.type === "interrupt_pending") {
+            stoppingSessionsRef.current.add(e.sessionId ?? activeRef.current);
+          } else {
+            stoppingSessionsRef.current.delete(e.sessionId ?? activeRef.current);
+          }
+          applyTo(e.sessionId ?? activeRef.current, (s) => foldEvent(s, e));
           return true;
+        case "startup_recovery_preparing":
+        case "startup_recovery_queued":
+        case "startup_recovery_failed": {
+          const recoverySession = e.sessionId ?? activeRef.current;
+          pushLog(`[garrison] ${e.type}${e.inputId ? ` · ${e.inputId}` : ""}`);
+          // A failed takeover is a real terminal UI boundary. In particular,
+          // clear a Stop gate armed during lease wait so the composer cannot
+          // remain locally blocked after the daemon has released recovery.
+          if (e.type === "startup_recovery_failed") {
+            stoppingSessionsRef.current.delete(recoverySession);
+          }
+          applyTo(recoverySession, (s) => foldEvent(s, e));
+          return true;
+        }
         case "reasoning_set":
         case "routing_set":
         case "routing_mode_set":
@@ -1479,12 +1582,13 @@ function App() {
             const merged = disk.map((summary) => {
               const existing = byId.get(summary.id);
               if (!existing) return sessionFromSummary(summary);
+              const workflowMode = summary.workflowMode ?? existing.workflowMode;
               // A rename done on disk (meta.label) should refresh the rail title.
               if (summary.label) {
                 const next = compact(summary.label, 42);
-                if (existing.title !== next) return { ...existing, title: next };
+                if (existing.title !== next || existing.workflowMode !== workflowMode) return { ...existing, title: next, workflowMode };
               }
-              return existing;
+              return existing.workflowMode === workflowMode ? existing : { ...existing, workflowMode };
             });
             const localOnly = current.filter((session) => !disk.some((summary) => summary.id === session.id));
             return [...localOnly, ...merged];
@@ -1511,7 +1615,9 @@ function App() {
           if (e.id) {
             const hydrated = sessionFromHistory(e.id, e.messages, e.meta);
             setSessions((current) => current.map((session) => (
-              session.id === e.id ? { ...hydrated, updatedAt: session.updatedAt } : session
+              session.id === e.id
+                ? { ...hydrated, updatedAt: session.updatedAt, workflowMode: hydrated.workflowMode ?? session.workflowMode }
+                : session
             )));
           }
           return true;
@@ -1519,13 +1625,16 @@ function App() {
           pushLog(`[lifecycle] ${compact(stringify(e.event ?? {}), 200)}`);
           return true;
         case "desktop_daemon_started":
+          resetSteerReplayEpoch(steerReplayEpoch.current);
           pushLog(`[shell] daemon started (${e.provider ?? "default"} / ${e.model ?? "default"})`);
           return true;
         case "desktop_daemon_restarting":
+          resetSteerReplayEpoch(steerReplayEpoch.current);
           setDaemon("starting");
           pushLog("[shell] daemon restarting");
           return true;
         case "desktop_daemon_stopped":
+          resetSteerReplayEpoch(steerReplayEpoch.current);
           setDaemon("stopped");
           pushLog("[shell] daemon stopped");
           return true;
@@ -1533,6 +1642,7 @@ function App() {
           pushLog("[shell] daemon stream closed");
           return true;
         case "desktop_daemon_exited": {
+          resetSteerReplayEpoch(steerReplayEpoch.current);
           pushLog(`[shell] daemon exited · code ${e.code ?? "unknown"}`);
           setDaemon("error");
           const tail = stderrTail.current.slice(-4).join("\n");
@@ -1545,9 +1655,16 @@ function App() {
           // A daemon crash kills every in-flight turn, not just the one the
           // user is currently looking at — sweep ALL busy sessions so
           // background cards don't stay stuck forever with no error shown.
+          // Unresolved steer bubbles intentionally remain nonterminal; ready
+          // replay lets the durable idempotency record settle their real state.
           setSessions((prev) =>
-            prev.map((s) => (s.busy ? { ...foldEvent(s, { type: "desktop_error", text: errorText }), busy: false } : s)),
+            prev.map((s) => (s.busy ? {
+              ...foldEvent(s, { type: "desktop_error", text: errorText }),
+              busy: false,
+              cancelling: false,
+            } : s)),
           );
+          stoppingSessionsRef.current.clear();
           if (willRetry) {
             restartAttempts.current += 1;
             window.setTimeout(() => restartDaemon(), 900 * (attempt + 1));
@@ -1569,10 +1686,20 @@ function App() {
       // Surface attention-worthy events as OS notifications when you're not
       // looking at this session/window — so overnight & background work is visible.
       const ev = buffered.event;
+      if (ev.type === "permission_response" && ev.id) {
+        permissionSubmissionLocks.current.delete(ev.id);
+      }
       // Feed the composer's token-flow strip: count every streamed character of
       // the session you're LOOKING at (text, thinking, tool-input authoring).
       // One integer addition on a module-level accumulator — no React involved.
       if (!sid || sid === activeRef.current) {
+        if (ev.type === "provider_attempt_superseded" && ev.reason === "steering") {
+          // Any speech/text from this provider attempt is stale by definition.
+          // The reducer removes only that attempt's draft items; stop its voice
+          // stream at the same fence so it cannot keep talking over the steer.
+          voiceRef.current.stop();
+          resetSpokenStream();
+        }
         if ((ev.type === "text_delta" || ev.type === "thinking_delta") && ev.text) pushTokenFlow(ev.text.length);
         else if (ev.type === "tool_use_input_delta" && ev.deltaJson) pushTokenFlow(ev.deltaJson.length);
         // Voice: speak natural phrases while reply text streams. Only the session
@@ -1738,9 +1865,10 @@ function App() {
   }, []);
 
   // ── intents ──────────────────────────────────────────────────────────────
-  const send = useCallback((text: string, opts?: { voice?: boolean; images?: string[] }) => {
+  const send = useCallback((text: string, opts?: { voice?: boolean; images?: string[] }): boolean => {
     const trimmed = text.trim();
-    if (!trimmed) return;
+    const images = (opts?.images ?? []).filter((u) => u.startsWith("data:image/"));
+    if (!trimmed && images.length === 0) return false;
     // Barge-in: sending a new message cuts any reply still being spoken, and
     // resets the spoken buffer so the next turn starts clean.
     voiceRef.current.stop();
@@ -1750,9 +1878,13 @@ function App() {
     if (/^\/(mcp|connectors?)$/i.test(trimmed)) {
       setDirectoryOpen(true);
       daemonCmd({ type: "mcp_list" });
-      return;
+      return true;
     }
     const sid = activeRef.current;
+    if (
+      stoppingSessionsRef.current.has(sid) ||
+      sessionsRef.current.find((session) => session.id === sid)?.cancelling
+    ) return false;
     // ULTRA posture: steer the agent toward the Conductor fleet for this turn.
     // Prepended to the GOAL the daemon receives (provider-agnostic) but NOT shown
     // in the transcript — the user's message stays clean.
@@ -1762,35 +1894,51 @@ function App() {
     // Images ride along to the daemon appended to the goal (its
     // contentFromUserInput parses data:image URLs into image blocks), but are
     // stored on the item separately so the bubble renders thumbnails.
-    const images = (opts?.images ?? []).filter((u) => u.startsWith("data:image/"));
     const imagePart = images.length ? "\n" + images.join("\n") : "";
     const goal = ultraDirective + trimmed + imagePart;
     const inputId = `input_${crypto.randomUUID()}`;
     applyTo(sid, (s) => ({
       ...s,
       title: s.title === "New session" ? compact(trimmed || "image", 42) : s.title,
-      items: [...s.items, { kind: "user", key: nextKey(), text: trimmed, images: images.length ? images : undefined }],
+      items: [...s.items, { kind: "user", key: nextKey(), inputId, text: trimmed, images: images.length ? images : undefined }],
       busy: true,
     }));
     if (native) {
       if (daemon !== "running") {
-        pendingGoal.current = { goal, sessionId: sid, voice: opts?.voice === true, inputId };
+        pendingGoal.current = {
+          goal,
+          sessionId: sid,
+          voice: opts?.voice === true,
+          inputId,
+          draftText: trimmed,
+          images: images.length ? [...images] : undefined,
+        };
         applyTo(sid, (s) => foldEvent(s, { type: "system_reminder_injected", source: "verifier", text: "Garrison is down — restarting, your message is queued." }));
         restartDaemon();
-        return;
+        return true;
       }
       void invoke("ares_send", { goal, sessionId: sid, voice: opts?.voice === true, inputId }).catch((err) => {
-        pendingGoal.current = { goal, sessionId: sid, voice: opts?.voice === true, inputId };
+        pendingGoal.current = {
+          goal,
+          sessionId: sid,
+          voice: opts?.voice === true,
+          inputId,
+          draftText: trimmed,
+          images: images.length ? [...images] : undefined,
+        };
         applyTo(sid, (s) => ({ ...foldEvent(s, { type: "desktop_error", text: `${String(err)} — restarting the Garrison, message queued.` }), busy: true }));
         restartDaemon();
       });
     } else {
+      const settleDemo = (event: AresEvent) => apply((s) =>
+        foldEvent(foldEvent(s, event), { type: "turn_settled" }),
+      );
       window.setTimeout(() => apply((s) => foldEvent(s, { type: "turn_start" })), 150);
       // Demo mode shows the delegation CHOICE popup when asked which coder to use.
       if (/should i|which coder|use claude code or|do it yourself/i.test(trimmed)) {
         window.setTimeout(() => apply((s) => foldEvent(s, { type: "permission_request", id: "demo-offer", toolName: "CodingBackend:offer", reason: "Hand this to Claude Code (runs on your Ares account — no login needed), or have Ares do it directly?" })), 400);
-        window.setTimeout(() => apply((s) => foldEvent(s, { type: "turn_end", status: "completed", durationMs: 600, usage: { inputTokens: 500, outputTokens: 0 } })), 700);
-        return;
+        window.setTimeout(() => settleDemo({ type: "turn_end", status: "completed", durationMs: 600, usage: { inputTokens: 500, outputTokens: 0 } }), 700);
+        return true;
       }
       // Demo mode shows the delegation cut-scene when the message mentions a
       // backend — so the feature is visible without a daemon (and demoable).
@@ -1806,8 +1954,8 @@ function App() {
         cb({ phase: "done", filesTouched: 2 }, 4800);
         const reply = `Demo — I delegated to ${label} on the Ares account. In the installed app this drives the real CLI, no login needed.`;
         window.setTimeout(() => apply((s) => foldEvent(s, { type: "text_delta", text: reply })), 5100);
-        window.setTimeout(() => apply((s) => foldEvent(s, { type: "turn_end", status: "completed", durationMs: 5400, usage: { inputTokens: 4000, outputTokens: 300 } })), 5400);
-        return;
+        window.setTimeout(() => settleDemo({ type: "turn_end", status: "completed", durationMs: 5400, usage: { inputTokens: 4000, outputTokens: 300 } }), 5400);
+        return true;
       }
       // ULTRA in demo mode shows a sample fleet so the board is visible without a daemon.
       if (prefsRef.current.ultra) {
@@ -1827,8 +1975,8 @@ function App() {
         fa({ kind: "fleet_activity", event: "done", agentId: "judge", role: "review-judge", phase: "review", status: "completed" }, 6400);
         const reply = "Demo fleet complete — 3 reviewers fanned out, one judge synthesized. In the installed app this is a real Conductor run.";
         window.setTimeout(() => apply((s) => foldEvent(s, { type: "text_delta", text: reply })), 6700);
-        window.setTimeout(() => apply((s) => foldEvent(s, { type: "turn_end", status: "completed", durationMs: 7000, usage: { inputTokens: 9000, outputTokens: 600 } })), 7000);
-        return;
+        window.setTimeout(() => settleDemo({ type: "turn_end", status: "completed", durationMs: 7000, usage: { inputTokens: 9000, outputTokens: 600 } }), 7000);
+        return true;
       }
       const reply = "Demo mode — no daemon attached. In the installed app this streams from the Garrison.";
       reply.split(" ").forEach((word, i) => {
@@ -1838,10 +1986,11 @@ function App() {
         }, 300 + i * 40);
       });
       window.setTimeout(
-        () => apply((s) => foldEvent(s, { type: "turn_end", status: "completed", durationMs: 1400, usage: { inputTokens: 220, outputTokens: 18 } })),
+        () => settleDemo({ type: "turn_end", status: "completed", durationMs: 1400, usage: { inputTokens: 220, outputTokens: 18 } }),
         400 + reply.split(" ").length * 40,
       );
     }
+    return true;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [native, daemon, applyTo]);
   // Conversation mode auto-sends the recognized transcript through the same path.
@@ -1851,36 +2000,93 @@ function App() {
   const steer = useCallback((text: string, images?: string[]) => {
     const trimmed = text.trim();
     const imgs = (images ?? []).filter((u) => u.startsWith("data:image/"));
-    if (!trimmed && imgs.length === 0) return;
+    if (!trimmed && imgs.length === 0) return false;
     const sid = activeRef.current;
+    if (
+      stoppingSessionsRef.current.has(sid) ||
+      sessionsRef.current.find((session) => session.id === sid)?.cancelling
+    ) return false;
+    const inputId = `steer_${crypto.randomUUID()}`;
     applyTo(sid, (s) => ({
       ...s,
-      items: [...s.items, { kind: "steer", key: nextKey(), text: trimmed }],
+      items: [...s.items, {
+        kind: "steer",
+        key: nextKey(),
+        inputId,
+        text: trimmed,
+        images: imgs.length ? imgs : undefined,
+        status: "submitting",
+      }],
       steerQueued: (s.steerQueued ?? 0) + 1,
     }));
-    const steerText = trimmed + (imgs.length ? "\n" + imgs.join("\n") : "");
-    const inputId = `steer_${crypto.randomUUID()}`;
-    if (native) void invoke("ares_daemon_command", { command: { type: "steer", text: steerText, sessionId: sid, inputId } }).catch(() => null);
+    const steerText = steerReplayWireText({ text: trimmed, images: imgs });
+    if (native) {
+      if (daemon !== "running") {
+        // Keep the bubble unresolved. daemon_ready will claim it from session
+        // state and submit its original ID and attachments once this epoch boots.
+        restartDaemon();
+        return true;
+      }
+      markSteerSentInEpoch(steerReplayEpoch.current, sid, inputId);
+      void invoke("ares_daemon_command", {
+        command: { type: "steer", text: steerText, sessionId: sid, inputId },
+      }).catch((error) => {
+        // The write may already be canonical in SQLite even though IPC lost its
+        // acknowledgement. Leave the bubble nonterminal and replay the same ID
+        // after restart instead of manufacturing a rejected/restored duplicate.
+        pushLog(`[garrison] steer ${inputId} lost transport: ${String(error)}`);
+        restartDaemon();
+      });
+    }
+    return true;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [native, applyTo]);
+  }, [native, daemon, applyTo, pushLog, restartDaemon]);
 
   const stopTurn = useCallback(() => {
     const sid = activeRef.current;
-    // Free the UI immediately — never wait on the daemon round-trip. If the turn
-    // is wedged (no turn_end ever arrives) waiting would leave Stop feeling dead
-    // and the composer frozen. Clearing busy + steer here re-enables input now;
-    // the daemon abort below tears down the real turn.
+    const current = sessionsRef.current.find((session) => session.id === sid);
+    if (!current?.busy || current.cancelling || stoppingSessionsRef.current.has(sid)) return;
+    const localPending = pendingGoal.current?.sessionId === sid ? pendingGoal.current : null;
+    if (native && daemon !== "running" && localPending) {
+      // No daemon owns this input yet, so Stop is a local, exact cancellation.
+      // Revoke the restart buffer before any ready event can observe it, then
+      // restore only the user's clean text/images (never the hidden ULTRA wire
+      // directive) to the composer.
+      pendingGoal.current = null;
+      applyTo(sid, (s) => foldEvent(s, {
+        type: "desktop_pending_input_cancelled",
+        inputId: localPending.inputId,
+        text: localPending.draftText,
+        images: localPending.images,
+      }));
+      return;
+    }
+    stoppingSessionsRef.current.add(sid);
+    // Stop is a two-phase settlement: keep the input editable, but do not allow
+    // a new send/steer until the daemon confirms its owning generator released.
     applyTo(sid, (s) => ({
       ...s,
-      busy: false,
-      steerQueued: 0,
-      activity: undefined,
-      items: s.items.map((it) => (it.kind === "assistant" && it.streaming ? { ...it, streaming: false } : it)),
+      busy: true,
+      cancelling: true,
+      activity: "stopping safely",
     }));
-    if (native) void invoke("ares_interrupt", { sessionId: sid }).catch(() => null);
-    else applyTo(sid, (s) => foldEvent(s, { type: "turn_end", status: "interrupted", durationMs: 0 }));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [native, applyTo]);
+    if (native) {
+      void invoke("ares_interrupt", { sessionId: sid }).catch((error) => {
+        stoppingSessionsRef.current.delete(sid);
+        applyTo(sid, (s) => ({
+          ...foldEvent(s, { type: "desktop_error", text: `Could not stop the turn: ${String(error)}` }),
+          busy: false,
+          cancelling: false,
+        }));
+      });
+    } else {
+      stoppingSessionsRef.current.delete(sid);
+      applyTo(sid, (s) => foldEvent(
+        foldEvent(s, { type: "turn_end", status: "interrupted", durationMs: 0 }),
+        { type: "interrupt_settled" },
+      ));
+    }
+  }, [native, daemon, applyTo]);
 
   const undoLastChange = useCallback(() => {
     if (!native || daemon !== "running" || active?.busy) return;
@@ -1949,10 +2155,25 @@ function App() {
     // Route the answer to the session that actually raised this prompt (B4) —
     // a permission request from a background chat must never resolve into
     // whatever card happens to be focused now.
-    const owner = sessions.find((s) => s.items.some((it) => it.kind === "permission" && it.id === id));
-    if (owner) applyTo(owner.id, (s) => foldEvent(s, { type: "permission_response", id, decision }));
-    else apply((s) => foldEvent(s, { type: "permission_response", id, decision }));
-    if (native) void invoke("ares_permission_response", { id, decision }).catch(() => null);
+    const owner = sessionsRef.current.find((s) => s.items.some((it) => it.kind === "permission" && it.id === id));
+    const ownerId = owner?.id ?? activeRef.current;
+    const prompt = owner?.items.find((it) => it.kind === "permission" && it.id === id);
+    if (prompt?.kind === "permission" && (prompt.decided || prompt.submitting)) return;
+    if (!native) {
+      applyTo(ownerId, (s) => foldEvent(s, { type: "permission_response", id, decision }));
+      return;
+    }
+    if (permissionSubmissionLocks.current.has(id)) return;
+    permissionSubmissionLocks.current.add(id);
+    // Disable duplicate clicks while the bridge write is in flight, but do not
+    // mark the prompt decided until QueryEngine emits its real response event.
+    // A failed IPC write re-enables the exact card instead of parking an
+    // invisible daemon waiter forever.
+    applyTo(ownerId, (s) => foldEvent(s, { type: "permission_submission_started", id, decision }));
+    void invoke("ares_permission_response", { id, decision }).catch((error) => {
+      permissionSubmissionLocks.current.delete(id);
+      applyTo(ownerId, (s) => foldEvent(s, { type: "permission_submission_failed", id, decision, error }));
+    });
   };
 
   const applySettings = (next: Prefs, keys: Record<string, string>) => {
@@ -2513,6 +2734,7 @@ function App() {
         <PillBar
           daemon={daemon}
           busy={active?.busy ?? false}
+          cancelling={active?.cancelling ?? false}
           activity={activity ?? ""}
           conversation={convoMode}
           listening={convoListening}
@@ -2755,6 +2977,15 @@ function App() {
         <div className="titleDrag" />
         <span className="pill" data-state={daemon}>
           {daemon === "running" ? "ONLINE" : daemon.toUpperCase()}
+        </span>
+        <span
+          className="workflowPill"
+          data-mode={active?.workflowMode ?? "build"}
+          title={(active?.workflowMode ?? "build") === "plan"
+            ? "Plan mode: Ares may inspect and discuss, but cannot edit or execute"
+            : "Build mode: approved execution and editing are available"}
+        >
+          {(active?.workflowMode ?? "build") === "plan" ? "PLAN MODE" : "BUILD MODE"}
         </span>
         {prefs.uiStyle === "modern" ? (
           <div className="titleTools" onMouseDown={(ev) => ev.stopPropagation()}>
@@ -3023,11 +3254,23 @@ function App() {
         {view !== "helm" ? (
           <Composer
             busy={active?.busy ?? false}
+            cancelling={active?.cancelling ?? false}
             model={liveModel}
             autoRouting={prefs.routingMode === "auto"}
             routedLanes={routedLanes}
             todos={active?.todos ?? []}
             steerQueued={active?.steerQueued ?? 0}
+            steerActivity={active?.activity}
+            recoverableDrafts={active?.recoverableDrafts ?? []}
+            onDraftsRecovered={(inputIds) => {
+              const sid = active?.id;
+              if (!sid || inputIds.length === 0) return;
+              const recovered = new Set(inputIds);
+              applyTo(sid, (s) => ({
+                ...s,
+                recoverableDrafts: (s.recoverableDrafts ?? []).filter((draft) => !recovered.has(draft.inputId)),
+              }));
+            }}
             onSend={(t, imgs) => send(t, { images: imgs })}
             onSteer={steer}
             onStop={stopTurn}
@@ -3231,7 +3474,7 @@ function App() {
                 <input aria-label="Preview URL" value={liveUrl} onChange={(e) => setLiveUrl(e.target.value)} placeholder="localhost:3000 or https://…" />
                 <button type="submit">Launch</button>
                 <button type="button" onClick={() => setLiveRevision((n) => n + 1)} disabled={!liveTarget}>↻</button>
-                {native && liveTarget && /^https?:/i.test(liveTarget.url) ? <button type="button" onClick={() => void invoke("ares_open_url", { url: liveTarget.url })}>↗</button> : null}
+                {native && liveTarget && /^https?:/i.test(liveTarget.url) ? <button type="button" onClick={() => void invoke("ares_open_url", { url: liveTarget.url })}>Open separate copy ↗</button> : null}
               </form>
               <div className="forgeMeta">
                 {embeddedActive ? embeddedActivity || "Interactive app controlled by Ares" : liveTarget?.title || liveTarget?.url || "Launch a local app or let Ares open one"}
@@ -3240,12 +3483,24 @@ function App() {
               <div className="liveStage embed" data-on={embeddedActive ? "1" : "0"}>
                 <EmbeddedBrowser ref={embeddedRef} onActivity={setEmbeddedActivity} />
               </div>
-              {/* Playwright publishes its actual target, so the Forge is an
-                  interactive document rather than a screenshot viewer. */}
+              {/* Local apps are safely embeddable. External sites frequently
+                  refuse frames; show the actual Playwright screencast instead
+                  of a blocked iframe that falsely appears interactive. */}
               {!embeddedActive && liveTarget ? (
-                <div className="liveStage interactive">
-                  <iframe key={`${liveTarget.url}-${liveRevision}`} title={liveTarget.title || "Live preview"} src={forgeFrameUrl(liveTarget.url, native, liveRevision)} sandbox={PREVIEW_SANDBOX} />
-                  {liveBrowser ? <img className="liveTelemetry" src={`data:image/jpeg;base64,${liveBrowser.frame}`} alt="Latest automation frame" title="Latest frame seen by Ares" /> : null}
+                <div className={`liveStage interactive ${forgeCanEmbed(liveTarget.url) ? "localTarget" : "externalTarget"}`}>
+                  {forgeCanEmbed(liveTarget.url) ? (
+                    <>
+                      <iframe key={`${liveTarget.url}-${liveRevision}`} title={liveTarget.title || "Live preview"} src={forgeFrameUrl(liveTarget.url, native, liveRevision)} sandbox={PREVIEW_SANDBOX} />
+                      {liveBrowser ? <img className="liveTelemetry" src={`data:image/jpeg;base64,${liveBrowser.frame}`} alt="Latest automation frame" title="Latest frame seen by Ares" /> : null}
+                    </>
+                  ) : liveBrowser ? (
+                    <img className="liveTelemetryMain" src={`data:image/jpeg;base64,${liveBrowser.frame}`} alt="Live browser controlled by Ares" />
+                  ) : (
+                    <div className="externalPreviewNotice">
+                      <strong>This site cannot run inside the Forge.</strong>
+                      <p>Ares is opening it in its controllable browser. If human sign-in is needed, switch to that Ares browser window and sign in there; “Open separate copy” is only for manual viewing.</p>
+                    </div>
+                  )}
                 </div>
               ) : null}
               {!embeddedActive && !liveTarget ? (
@@ -4110,6 +4365,21 @@ function ModelPopover({
     () => new Set(models.filter((m) => m.group === "Local Ollama").map((m) => m.id.split(":")[0].toLowerCase())),
     [models],
   );
+  const selectModel = (pickedProvider: string, id: string) => {
+    if (pickedProvider === "ollama") {
+      const option = models.find((model) => model.id === id);
+      const pullName = option?.label ?? id;
+      const base = pullName.split(":")[0].toLowerCase();
+      const cloud = id.toLowerCase().endsWith(":cloud")
+        || option?.group.includes("cloud") === true
+        || option?.group.startsWith("Ollama Cloud") === true;
+      const localLibraryModel = option?.group === "Ollama Library";
+      if (localLibraryModel && !cloud && !localBases.has(base) && !pulls[pullName]?.done) {
+        onPull(pullName);
+      }
+    }
+    onPick(pickedProvider, id);
+  };
   const groupRank = (g: string) => {
     if (g === "Local Ollama") return 0;
     if (g.startsWith("Ollama Cloud")) return 1;
@@ -4193,7 +4463,7 @@ function ModelPopover({
                 const [p, ...rest] = key.split("/");
                 const id = rest.join("/");
                 return (
-                  <button key={`f:${key}`} className="mdlQuickChip fav" data-on={p === prefs.provider && id === prefs.model ? "1" : "0"} title={key} onClick={() => onPick(p, id)}>
+                  <button key={`f:${key}`} className="mdlQuickChip fav" data-on={p === prefs.provider && id === prefs.model ? "1" : "0"} title={key} onClick={() => selectModel(p, id)}>
                     ★ {id}
                   </button>
                 );
@@ -4202,7 +4472,7 @@ function ModelPopover({
                 const [p, ...rest] = key.split("/");
                 const id = rest.join("/");
                 return (
-                  <button key={`r:${key}`} className="mdlQuickChip" data-on={p === prefs.provider && id === prefs.model ? "1" : "0"} title={`recent · ${key}`} onClick={() => onPick(p, id)}>
+                  <button key={`r:${key}`} className="mdlQuickChip" data-on={p === prefs.provider && id === prefs.model ? "1" : "0"} title={`recent · ${key}`} onClick={() => selectModel(p, id)}>
                     ↺ {id}
                   </button>
                 );
@@ -4245,7 +4515,7 @@ function ModelPopover({
               <ModelDetail
                 model={detail}
                 selected={detail.id === value}
-                onUse={(id) => { onPick(provider, id); setDetail(null); }}
+                onUse={(id) => { selectModel(provider, id); setDetail(null); }}
                 onBack={() => setDetail(null)}
               />
             </div>
@@ -4267,7 +4537,7 @@ function ModelPopover({
                     const cloudHosted = m.group.includes("cloud") || m.group.startsWith("Ollama Cloud") || m.id.includes("cloud");
                     const pulled = isLibrary && localBases.has((m.label ?? m.id).split(":")[0].toLowerCase());
                     return (
-                      <button key={m.id} className="mdlCard" data-on={m.id === value ? "1" : "0"} style={{ "--i": Math.min(i, 20) } as React.CSSProperties} onClick={() => onPick(provider, m.id)}>
+                      <button key={m.id} className="mdlCard" data-on={m.id === value ? "1" : "0"} style={{ "--i": Math.min(i, 20) } as React.CSSProperties} onClick={() => selectModel(provider, m.id)}>
                         <span className="mdlCardTop">
                           <ProviderLogo brand={brandKey(m)} className="modelGlyph" />
                           <span className="mdlCardName">
@@ -5778,7 +6048,6 @@ function blobToBase64(blob: Blob): Promise<string> {
 // ~1568px on the long edge, so shrinking to that here costs the model nothing
 // while cutting multi-MB pastes to a few hundred KB. We re-encode as JPEG and
 // step quality/size down until the payload is comfortably under budget.
-const MAX_ATTACH_B64 = 2_000_000; // ~1.5MB decoded — leaves room for text + a 2nd image under 4.5MB
 const MAX_IMG_EDGE = 1568; // Anthropic's long-edge downscale target; larger buys no quality
 async function downscaleAttachment(dataUrl: string): Promise<string> {
   // Already small — leave it byte-for-byte (keeps PNG alpha / exact pixels).
@@ -5940,7 +6209,7 @@ function useDictation(onText: (text: string) => void) {
         const rms = Math.sqrt(energy / samples.length);
         const now = performance.now();
         if (rms >= 0.014) { heardSpeech = true; lastVoice = now; }
-        if ((heardSpeech && now - lastVoice >= 650) || (!heardSpeech && now - started >= 8_000) || now - started >= 22_000) {
+        if ((heardSpeech && now - lastVoice >= 3_000) || (!heardSpeech && now - started >= 8_000) || now - started >= 22_000) {
           setState("thinking");
           rec.stop();
           return;
@@ -5960,7 +6229,7 @@ function useDictation(onText: (text: string) => void) {
     try {
       const handle = await sidecarListen((status) => {
         setState(status === "listening" ? "recording" : "thinking");
-      }, { auto: true });
+      }, { auto: true, silenceMs: 3_000 });
       sttRef.current = handle;
       usingSidecar.current = true;
       setState("recording");
@@ -6045,6 +6314,7 @@ function AresPillGlyph({ active = false }: { active?: boolean }) {
 function PillBar({
   daemon,
   busy,
+  cancelling,
   activity,
   conversation,
   listening,
@@ -6057,6 +6327,7 @@ function PillBar({
 }: {
   daemon: DaemonState;
   busy: boolean;
+  cancelling: boolean;
   activity: string;
   conversation: boolean;
   listening: boolean;
@@ -6070,6 +6341,7 @@ function PillBar({
   const label =
     listening ? "listening…" :
     speaking ? "speaking" :
+    cancelling ? "stopping safely…" :
     busy ? (activity || "working…") :
     conversation ? "conversation open" : wakeStatus === "armed" ? "hey ares armed" : daemon === "running" ? "ready" : daemon;
 
@@ -6092,7 +6364,7 @@ function PillBar({
           {listening ? <i className="pillSpin" /> : <MicGlyph />}
         </button>
         {busy ? (
-          <button className="pillBtn" onClick={onStop} title="stop the turn">
+          <button className="pillBtn" onClick={onStop} disabled={cancelling} title={cancelling ? "turn is stopping" : "stop the turn"}>
             <svg viewBox="0 0 16 16" fill="currentColor"><rect x="4" y="4" width="8" height="8" rx="1.5" /></svg>
           </button>
         ) : null}
@@ -6110,11 +6382,15 @@ function PillBar({
 
 const Composer = React.memo(function Composer({
   busy,
+  cancelling,
   model,
   autoRouting,
   routedLanes,
   todos,
   steerQueued,
+  steerActivity,
+  recoverableDrafts,
+  onDraftsRecovered,
   onSend,
   onSteer,
   onStop,
@@ -6123,13 +6399,17 @@ const Composer = React.memo(function Composer({
   slashActions,
 }: {
   busy: boolean;
+  cancelling: boolean;
   model: string;
   autoRouting: boolean;
   routedLanes: RouteLane[];
   todos: Array<{ id: string; content: string; activeForm: string; status: string }>;
   steerQueued: number;
-  onSend: (text: string, images?: string[]) => void;
-  onSteer: (text: string, images?: string[]) => void;
+  steerActivity?: string;
+  recoverableDrafts: NonNullable<SessionVm["recoverableDrafts"]>;
+  onDraftsRecovered: (inputIds: string[]) => void;
+  onSend: (text: string, images?: string[]) => boolean;
+  onSteer: (text: string, images?: string[]) => boolean;
   onStop: () => void;
   onModelChip: () => void;
   onRoutingChip: () => void;
@@ -6160,6 +6440,36 @@ const Composer = React.memo(function Composer({
     setAttachmentsState(attachmentsRef.current);
   };
   const ref = useRef<HTMLTextAreaElement | null>(null);
+  const cancellingRef = useRef(cancelling);
+  cancellingRef.current = cancelling;
+  const restoredDraftIds = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const pending = recoverableDrafts.filter((draft) => !restoredDraftIds.current.has(draft.inputId));
+    if (pending.length === 0) return;
+    for (const draft of pending) restoredDraftIds.current.add(draft.inputId);
+    const textParts = pending.map((draft) => draft.text.trim()).filter(Boolean);
+    if (textParts.length > 0) {
+      const restored = textParts.join("\n\n");
+      setText((current) => {
+        const clean = current.trim();
+        if (!clean) return restored;
+        if (clean === restored || clean.startsWith(`${restored}\n`)) return current;
+        return `${restored}\n\n${current}`;
+      });
+    }
+    const restoredImages = pending.flatMap((draft) => draft.images ?? []);
+    if (restoredImages.length > 0) {
+      const existing = new Set(attachmentsRef.current.map((attachment) => attachment.dataUrl));
+      const additions = restoredImages
+        .filter((dataUrl) => !existing.has(dataUrl))
+        .map((dataUrl, index) => ({ name: `restored-steer-${index + 1}`, dataUrl }));
+      if (additions.length > 0) {
+        attachmentsRef.current = [...additions, ...attachmentsRef.current];
+        setAttachmentsState(attachmentsRef.current);
+      }
+    }
+    onDraftsRecovered(pending.map((draft) => draft.inputId));
+  }, [onDraftsRecovered, recoverableDrafts]);
   // The modern skin swaps the composer's glyphs for Ares sigils (markup, not
   // just CSS — the sigils are <use> refs into the sprite).
   const modern = useUiStyle() === "modern";
@@ -6178,8 +6488,18 @@ const Composer = React.memo(function Composer({
 
   const addFiles = (files: Iterable<File>) => {
     for (const file of files) {
-      if (!file.type.startsWith("image/")) continue; // vision models read images
-      if (file.size > 15 * 1024 * 1024) continue;
+      const attachmentType = supportedAttachmentMediaType(file);
+      if (!attachmentType.looksLikeImage) continue;
+      if (!attachmentType.mediaType) {
+        const notice = `[Attachment skipped: ${file.name || "image"} uses ${file.type || "an unknown image type"}; convert it to PNG, JPEG, WebP, or GIF.]`;
+        setText((current) => current.trim() ? `${current.replace(/\s+$/, "")}\n${notice}` : notice);
+        continue;
+      }
+      if (file.size > 15 * 1024 * 1024) {
+        const notice = `[Attachment skipped: ${file.name || "image"} is larger than 15 MB; resize it and try again.]`;
+        setText((current) => current.trim() ? `${current.replace(/\s+$/, "")}\n${notice}` : notice);
+        continue;
+      }
       const read: Promise<void> = new Promise((resolve) => {
         const reader = new FileReader();
         reader.onload = () => {
@@ -6192,12 +6512,41 @@ const Composer = React.memo(function Composer({
           // oversized paste can never reach the gateway and 413 the turn.
           void downscaleAttachment(dataUrl)
             .then((processed) => {
-              setAttachments((prev) => [...prev, { name: file.name || "pasted-image", dataUrl: processed }]);
+              const encodedChars = dataUrlB64Len(processed);
+              let rejected = "";
+              setAttachments((prev) => {
+                const violation = attachmentBudgetViolation(
+                  prev.map((attachment) => dataUrlB64Len(attachment.dataUrl)),
+                  encodedChars,
+                );
+                if (violation === "per_image") {
+                  rejected = `[Attachment skipped: ${file.name || "image"} could not be reduced below the per-image request limit.]`;
+                  return prev;
+                }
+                if (violation === "count") {
+                  rejected = `[Attachment skipped: one message can contain at most ${MAX_ATTACHMENTS} images.]`;
+                  return prev;
+                }
+                if (violation === "total") {
+                  rejected = "[Attachment skipped: the images exceed the total request budget; send this image in a separate message.]";
+                  return prev;
+                }
+                return [...prev, { name: file.name || "pasted-image", dataUrl: processed }];
+              });
+              if (rejected) {
+                setText((current) => current.trim() ? `${current.replace(/\s+$/, "")}\n${rejected}` : rejected);
+              }
             })
             .finally(() => resolve());
         };
         reader.onerror = () => resolve(); // never hang submit() on an unreadable file
-        reader.readAsDataURL(file);
+        // Windows drag/drop sometimes reports an empty/octet-stream MIME even
+        // for a normal .png/.jpg. Re-wrap the bytes with the extension-derived
+        // canonical type so FileReader produces a parseable image data URL.
+        const source = file.type.trim().toLowerCase() === attachmentType.mediaType
+          ? file
+          : new Blob([file], { type: attachmentType.mediaType });
+        reader.readAsDataURL(source);
       });
       pendingReads.current.add(read);
       void read.finally(() => pendingReads.current.delete(read));
@@ -6240,7 +6589,9 @@ const Composer = React.memo(function Composer({
   }, []);
 
   const submit = async () => {
+    if (cancellingRef.current) return;
     if (pendingReads.current.size > 0) await Promise.all(pendingReads.current);
+    if (cancellingRef.current) return;
     const t = text.trim();
     const currentAttachments = attachmentsRef.current;
     if (!t && currentAttachments.length === 0) return;
@@ -6248,8 +6599,11 @@ const Composer = React.memo(function Composer({
     // the transcript renders thumbnails, not a truncated base64 blob. The daemon
     // still gets them as image content, and send() shows them on the bubble.
     const imgs = currentAttachments.map((a) => a.dataUrl);
-    if (busy) onSteer(t, imgs);
-    else onSend(t, imgs);
+    if (busy) {
+      // If Stop/settlement won a local race, retain the draft. Ownership moves
+      // out of the composer only after the parent accepts this exact steer.
+      if (!onSteer(t, imgs)) return;
+    } else if (!onSend(t, imgs)) return;
     setText("");
     setAttachments(() => []);
     if (ref.current) ref.current.style.height = "auto";
@@ -6261,7 +6615,7 @@ const Composer = React.memo(function Composer({
          control strip over the input. Just a contextual steer indicator here. */}
       {busy && steerQueued > 0 ? (
         <div className="chips">
-          <span className="chip steerChip">{steerQueued} steer queued</span>
+          <span className="chip steerChip">{steerQueued > 1 ? `${steerQueued} steers · ` : ""}{steerActivity ?? "sending steer"}</span>
         </div>
       ) : null}
       {attachments.length > 0 ? (
@@ -6301,12 +6655,17 @@ const Composer = React.memo(function Composer({
       <div
         className="composerRow"
         data-busy={busy ? "1" : "0"}
+        data-cancelling={cancelling ? "1" : "0"}
         data-draft={text.trim() || attachments.length ? "1" : "0"}
       >
         <textarea
           ref={ref}
           value={text}
-          placeholder={busy ? "Steer the agent… (sent at the next safe moment)" : "Message Ares…  (paste or drop an image)"}
+          placeholder={cancelling
+            ? "Stopping current turn… your draft stays here"
+            : busy
+              ? "Steer Ares now…"
+              : "Message Ares…  (paste or drop an image)"}
           rows={1}
           onChange={(e) => {
             setText(e.target.value);
@@ -6347,14 +6706,20 @@ const Composer = React.memo(function Composer({
         </button>
         {busy ? (
           <>
-            {text.trim() ? (
-              <button className="send steer" onClick={() => void submit()} aria-label="steer" title="queue this — folded in at a safe moment">
+            {!cancelling && (text.trim() || attachments.length > 0) ? (
+              <button className="send steer" onClick={() => void submit()} aria-label="steer" title="interrupt generation now; executing actions settle first">
                 <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M8 3 L8 13 M3 8 L13 8" />
                 </svg>
               </button>
             ) : null}
-            <button className="send stop" onClick={onStop} aria-label="stop" title="stop this turn">
+            <button
+              className="send stop"
+              onClick={onStop}
+              disabled={cancelling}
+              aria-label={cancelling ? "stopping" : "stop"}
+              title={cancelling ? "waiting for the turn to settle" : "stop this turn"}
+            >
               <svg viewBox="0 0 16 16" fill="currentColor">
                 <rect x="4" y="4" width="8" height="8" rx="1.5" />
               </svg>
@@ -6720,11 +7085,27 @@ const ItemView = React.memo(function ItemView({
     );
   }
   if (item.kind === "steer") {
+    const label = item.status === "interrupting_generation"
+      ? "interrupting generation"
+      : item.status === "waiting_for_action"
+        ? "waiting for current action"
+        : item.status === "waiting_for_boundary"
+          ? "applying steer"
+          : item.status === "cancelled" || item.status === "rejected"
+            ? "restored to draft"
+            : item.status === "applied" || item.landed
+              ? "steered"
+              : "sending steer";
     return (
-      <div className="turn user steer" data-landed={item.landed ? "1" : "0"}>
+      <div className="turn user steer" data-landed={item.landed ? "1" : "0"} data-status={item.status ?? "submitting"}>
         <div className="bubble">
-          <span className="steerTag">{item.landed ? "steered" : "steer queued"}</span>
-          {item.text}
+          <span className="steerTag">{label}</span>
+          {item.images && item.images.length > 0 ? (
+            <div className="bubbleImages">
+              {item.images.map((src, index) => <img key={index} className="bubbleImage" src={src} alt="steer attachment" />)}
+            </div>
+          ) : null}
+          {item.text ? <div className="bubbleText">{item.text}</div> : null}
         </div>
       </div>
     );
@@ -6787,7 +7168,7 @@ const ItemView = React.memo(function ItemView({
     // external coder or do it itself. Claude Code = allow, Ares = deny; Codex
     // is gated until the gateway speaks the OpenAI wire.
     return (
-      <div className="cbOffer" data-decided={item.decided ? "1" : "0"}>
+      <div className="cbOffer" data-decided={item.decided ? "1" : "0"} aria-busy={item.submitting ? "true" : undefined}>
         <div className="cbOfferHead">
           <span className="cbOfferSpark" aria-hidden="true">🐉</span>
           <strong>How should I build this?</strong>
@@ -6796,16 +7177,49 @@ const ItemView = React.memo(function ItemView({
         {item.decided ? (
           <em className="gateDecided">{item.decided === "deny" ? "Ares is handling it" : "delegated ⚡"}</em>
         ) : (
-          <div className="cbOfferActions">
-            <button className="cbOfferPick cbOfferClaude" onClick={() => onPermission(item.id, "allow_once")}>
-              <span className="cbOfferGlyph">✳</span><span>Use Claude Code</span><small>on your Ares account</small>
-            </button>
-            <button className="cbOfferPick cbOfferCodex" disabled title="Coming soon — needs the gateway's OpenAI-compatible route">
-              <span className="cbOfferGlyph">◆</span><span>Codex</span><small>soon</small>
-            </button>
-            <button className="cbOfferPick cbOfferSelf" onClick={() => onPermission(item.id, "deny")}>
-              <span className="cbOfferGlyph">🐉</span><span>Ares does it</span><small>in-house</small>
-            </button>
+          <>
+            {item.submitting ? <em className="gateDecided">sending {item.submitting.replace(/_/gu, " ")}…</em> : null}
+            <div className="cbOfferActions">
+              <button className="cbOfferPick cbOfferClaude" disabled={!!item.submitting} onClick={() => onPermission(item.id, "allow_once")}>
+                <span className="cbOfferGlyph">✳</span><span>Use Claude Code</span><small>on your Ares account</small>
+              </button>
+              <button className="cbOfferPick cbOfferCodex" disabled title="Coming soon — needs the gateway's OpenAI-compatible route">
+                <span className="cbOfferGlyph">◆</span><span>Codex</span><small>soon</small>
+              </button>
+              <button className="cbOfferPick cbOfferSelf" disabled={!!item.submitting} onClick={() => onPermission(item.id, "deny")}>
+                <span className="cbOfferGlyph">🐉</span><span>Ares does it</span><small>in-house</small>
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    );
+  }
+  if (item.kind === "permission" && item.toolName === "ExitPlanMode") {
+    const plan = item.input && typeof item.input === "object" && !Array.isArray(item.input)
+      ? String((item.input as { plan?: unknown }).plan ?? "")
+      : "";
+    const approved = item.decided === "allow_once" || item.decided === "allow_always";
+    return (
+      <div className="gate planHandoff" data-decided={item.decided ? "1" : "0"} data-approved={approved ? "1" : "0"} aria-busy={item.submitting ? "true" : undefined}>
+        <div className="gateTop">
+          <Medallion glyph="forge" size={34} tone="ember" />
+          <div className="gateBody">
+            <strong>Ready to build?</strong>
+            <span className="gateReason">Approve the exact plan handoff to unlock execution</span>
+          </div>
+          {item.decided
+            ? <em className="gateDecided">{approved ? "BUILD MODE" : "KEEP PLANNING"}</em>
+            : item.submitting
+              ? <em className="gateDecided">sending {item.submitting.replace(/_/gu, " ")}…</em>
+              : null}
+        </div>
+        <p className="planHandoffReason">Planning stays read-only until you choose Build this plan.</p>
+        {plan ? <details className="planHandoffBody"><summary>Review exact plan</summary><pre>{plan}</pre></details> : null}
+        {item.decided ? null : (
+          <div className="gateActions">
+            <button className="gateAllow" disabled={!!item.submitting} onClick={() => onPermission(item.id, "allow_once")}>Build this plan</button>
+            <button className="gateDeny" disabled={!!item.submitting} onClick={() => onPermission(item.id, "deny")}>Keep planning</button>
           </div>
         )}
       </div>
@@ -6813,14 +7227,18 @@ const ItemView = React.memo(function ItemView({
   }
   if (item.kind === "permission") {
     return (
-      <div className="gate" data-decided={item.decided ? "1" : "0"}>
+      <div className="gate" data-decided={item.decided ? "1" : "0"} aria-busy={item.submitting ? "true" : undefined}>
         <div className="gateTop">
           <Medallion glyph="shield" size={34} tone="ember" />
           <div className="gateBody">
             <strong>Approval needed</strong>
             <span className="gateReason">{item.toolName} wants to act</span>
           </div>
-          {item.decided ? <em className="gateDecided">{item.decided.replace(/_/gu, " ")}</em> : null}
+          {item.decided
+            ? <em className="gateDecided">{item.decided.replace(/_/gu, " ")}</em>
+            : item.submitting
+              ? <em className="gateDecided">sending {item.submitting.replace(/_/gu, " ")}…</em>
+              : null}
         </div>
         {/* The reason carries the actual command/target. It is the thing being
             judged, so it gets the widest, most legible slot — verbatim and
@@ -6828,9 +7246,9 @@ const ItemView = React.memo(function ItemView({
         <code className="gateTarget">{item.reason || "wants to act"}</code>
         {item.decided ? null : (
           <div className="gateActions">
-            <button className="gateAllow" onClick={() => onPermission(item.id, "allow_once")}>Allow once</button>
-            <button className="gateAlways" onClick={() => onPermission(item.id, "allow_always")}>Always</button>
-            <button className="gateDeny" onClick={() => onPermission(item.id, "deny")}>Deny</button>
+            <button className="gateAllow" disabled={!!item.submitting} onClick={() => onPermission(item.id, "allow_once")}>Allow once</button>
+            <button className="gateAlways" disabled={!!item.submitting} onClick={() => onPermission(item.id, "allow_always")}>Always</button>
+            <button className="gateDeny" disabled={!!item.submitting} onClick={() => onPermission(item.id, "deny")}>Deny</button>
           </div>
         )}
       </div>

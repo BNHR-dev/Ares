@@ -239,10 +239,14 @@ export { renderCapabilitiesDoc, writeCapabilitiesDoc } from "./ledger.js";
 export {
   acquireCapability,
   listAcquisitions,
+  setAcquisitionStatus,
+  markAcquisitionAcquired,
   type Acquisition,
   type AcquisitionKind,
   type AcquisitionStatus,
   type AcquisitionResult,
+  type AcquisitionVerification,
+  type AcquisitionHealthcheckProof,
   type AcquireCapabilityInput,
 } from "./acquisition.js";
 

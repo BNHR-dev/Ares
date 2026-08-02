@@ -457,6 +457,36 @@ test("sideQuery: concatenates text deltas, defaults maxOutputTokens to 1024", as
   assert.equal(captured.req.messages[0].content[0].text, "title this");
 });
 
+test("sideQuery: enforces its output ceiling locally when a provider ignores it", async () => {
+  let closed = false;
+  let capturedSignal;
+  const provider = {
+    name: "ignores-output-cap",
+    async *stream(req) {
+      capturedSignal = req.signal;
+      try {
+        yield { type: "text_delta", text: "x".repeat(400) };
+        yield { type: "text_delta", text: "should never be consumed" };
+        yield doneEvent;
+      } finally {
+        closed = true;
+      }
+    },
+  };
+
+  const out = await sideQuery({
+    provider,
+    model: "m",
+    system: "s",
+    user: "u",
+    maxOutputTokens: 64,
+  });
+
+  assert.equal(out.length, 256, "the local four-characters-per-token backstop bounds output");
+  assert.equal(capturedSignal.aborted, true, "the ignored provider stream is aborted");
+  assert.equal(closed, true, "the provider generator is settled rather than leaked");
+});
+
 test("sideQuery: throws on error event", async () => {
   const provider = stubProvider([
     { type: "error", error: { code: "http_500", message: "boom upstream", retriable: true } },

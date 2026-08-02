@@ -256,7 +256,7 @@ class MockSTT:
         self._auto = False
         self._t0 = 0.0
 
-    def start(self, auto_stop: bool = False) -> None:
+    def start(self, auto_stop: bool = False, _silence_s: float | None = None) -> None:
         self._auto = auto_stop
         self._t0 = time.monotonic()
 
@@ -308,13 +308,15 @@ class WhisperSTT:
         self._heard_speech = False
         self._t0 = 0.0
         self._last_voice = 0.0
+        self._silence_s = VAD_SILENCE_S
 
-    def start(self, auto_stop: bool = False) -> None:
+    def start(self, auto_stop: bool = False, silence_s: float | None = None) -> None:
         self._frames = []
         self._auto = auto_stop
         self._heard_speech = False
         self._t0 = time.monotonic()
         self._last_voice = self._t0
+        self._silence_s = silence_s if silence_s is not None else VAD_SILENCE_S
         self._stream = self._sd.InputStream(
             samplerate=self.settings.sample_rate,
             channels=1,
@@ -345,7 +347,7 @@ class WhisperSTT:
             return True
         if not self._heard_speech:
             return now - self._t0 >= VAD_NO_SPEECH_S
-        return now - self._last_voice >= VAD_SILENCE_S
+        return now - self._last_voice >= self._silence_s
 
     def _close(self) -> None:
         if self._stream is not None:
@@ -585,8 +587,12 @@ async def stt_socket(websocket: WebSocket) -> None:
                 if state["listening"]:
                     continue
                 auto = bool(payload.get("auto"))
+                raw_silence_ms = payload.get("silence_ms")
+                silence_s = None
+                if isinstance(raw_silence_ms, (int, float)):
+                    silence_s = max(0.5, min(float(raw_silence_ms) / 1000.0, 10.0))
                 try:
-                    await asyncio.to_thread(stt.start, auto)
+                    await asyncio.to_thread(stt.start, auto, silence_s)
                     state["listening"] = True
                     MIC_BUSY.set()
                     await websocket.send_json({"type": "listening", "auto": auto})

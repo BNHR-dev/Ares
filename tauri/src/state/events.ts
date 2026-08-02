@@ -12,6 +12,31 @@ export interface AresEvent {
   name?: string;
   toolName?: string;
   status?: string;
+  /** Stable input identity for send/steer admission and settlement events. */
+  inputId?: string;
+  /** Desktop-only recovery payload for an ordinary input that never crossed a
+   * daemon transport boundary before the owner pressed Stop. */
+  images?: string[];
+  /** Startup-recovery visibility: exact durable IDs and current hand-off phase. */
+  inputIds?: string[];
+  count?: number;
+  phase?: string;
+  /** Provider stream-attempt identity. Superseded attempts are UI-rollback
+   * fences; they are not whole-turn cancellation. */
+  attemptId?: string;
+  /** Exact never-started effects skipped after an assistant commit. */
+  toolUseIds?: string[];
+  /** Session's post-durability routing result for a steer. */
+  disposition?: "provider_preempting" | "effect_settling" | "boundary_pending" | "idle";
+  /** Provider message terminal reason. */
+  stopReason?: string;
+  /** Steering delivery state reported by the daemon. */
+  steerPhase?: "idle" | "preparing" | "generation" | "action" | "boundary" | "settling";
+  delivery?: "interrupting_generation" | "waiting_for_action" | "waiting_for_owner_admission" | "next_boundary" | "queue" | "steer";
+  retryable?: boolean;
+  settled?: boolean;
+  /** Host epilogue released this owner but already scheduled exact successor work. */
+  continuing?: boolean;
   /** turn_end only — the engine's work-truth verdict for the turn. Drives the
    *  "finished but UNVERIFIED" disclosure so a turn that changed code without
    *  a passing check never reads as a clean finish. */
@@ -50,7 +75,7 @@ export interface AresEvent {
   summarizedMessages?: number;
   tokensBefore?: number;
   tokensAfter?: number;
-  method?: "summary" | "ledger";
+  method?: "micro" | "summary" | "ledger";
   error?: unknown;
   event?: AresEvent;
   usage?: { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; reasoningTokens?: number; modelCalls?: number };

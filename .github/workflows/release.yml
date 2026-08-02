@@ -63,7 +63,16 @@ jobs:
           projectPath: tauri
           tagName: ${{ github.ref_name }}
           releaseName: "Ares ${{ github.ref_name }}"
-          releaseBody: "Automated release. The desktop app will offer this as an in-app update."
+          releaseBody: |
+            Ares 0.32.0 rebuilds the coding harness for reliable long-horizon work.
+
+            - Durable SQLite sessions preserve plans, memory, steering, background jobs, subagents, and recovery checkpoints across compaction and restart.
+            - Steering is admitted immediately and settles safely between tool actions; Stop and restart no longer strand queued instructions.
+            - Plan mode stays read-only until the user explicitly crosses into Build mode.
+            - Read, Write, Edit, Apply Patch, and shell use exact paths, conflict-safe editing, complete logs, formatter settlement, and language-server feedback.
+            - The Conductor runs durable background jobs and bounded specialists while the main conversation remains available.
+            - Adaptive environment capabilities work in the directory the user chooses instead of locking Ares to one workspace.
+            - Browser preview/auth handoff, image attachments, automatic local Ollama pulls, and a three-second dictation pause window are polished.
           releaseDraft: false
           prerelease: false
           args: --bundles nsis
@@ -117,7 +126,16 @@ jobs:
           projectPath: tauri
           tagName: ${{ github.ref_name }}
           releaseName: "Ares ${{ github.ref_name }}"
-          releaseBody: "Automated release. The desktop app will offer this as an in-app update."
+          releaseBody: |
+            Ares 0.32.0 rebuilds the coding harness for reliable long-horizon work.
+
+            - Durable SQLite sessions preserve plans, memory, steering, background jobs, subagents, and recovery checkpoints across compaction and restart.
+            - Steering is admitted immediately and settles safely between tool actions; Stop and restart no longer strand queued instructions.
+            - Plan mode stays read-only until the user explicitly crosses into Build mode.
+            - Read, Write, Edit, Apply Patch, and shell use exact paths, conflict-safe editing, complete logs, formatter settlement, and language-server feedback.
+            - The Conductor runs durable background jobs and bounded specialists while the main conversation remains available.
+            - Adaptive environment capabilities work in the directory the user chooses instead of locking Ares to one workspace.
+            - Browser preview/auth handoff, image attachments, automatic local Ollama pulls, and a three-second dictation pause window are polished.
           releaseDraft: false
           prerelease: false
           args: --bundles appimage,deb

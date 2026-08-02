@@ -339,6 +339,18 @@ export interface AdmitInput {
   payload: JsonValue;
 }
 
+/** Atomically make one admitted request terminal. A claimed request may only
+ * be cancelled by the generation that owns it; an unclaimed request can be
+ * cancelled by durable input identity before a runner starts. */
+export interface CancelInputInput {
+  sessionId: string;
+  fence?: RunFence;
+  /** Control-plane cancellation may use an exact claimed-generation CAS even
+   * after that runner's lease expires. This cannot affect a replacement claim. */
+  expectedGeneration?: number;
+  reason?: JsonValue;
+}
+
 export interface CreateBackgroundJobInput {
   id?: string;
   sessionId: string;
@@ -424,6 +436,10 @@ export interface AppendContextEpochInput {
   sourceVersions?: JsonValue;
   baseEventSequence?: number | null;
   tokenCount?: number | null;
+  /** Refresh the latest epoch in place when it has this reason and belongs to
+   * the same generation. Intended for high-frequency, lossless projections such
+   * as microcompaction; full semantic compactions remain immutable epochs. */
+  coalesceLatest?: boolean;
 }
 
 export interface CreatePlanRevisionInput {

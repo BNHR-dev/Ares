@@ -230,10 +230,22 @@ export async function recallFailureFixFromMemory(
   }
 }
 
+/** Remove inline image bytes from semantic/lifecycle channels. The exact image
+ * blocks still travel through Session content; memory, routing telemetry, and
+ * the coding journal need only a stable attachment marker. Mirroring megabytes
+ * of base64 through lifecycle IPC was enough to stall Desktop during image
+ * steering. */
+export function semanticUserMessage(userMessage: string): string {
+  return userMessage
+    .replace(/data:image\/[a-z0-9.+-]+[^,\r\n]*;base64,[^\s]+/gi, "[attached image]")
+    .trim();
+}
+
 export async function prepareUserTurn(live: LiveSession, userMessage: string): Promise<void> {
-  await live.agentRuntime?.beforeTurn(userMessage);
-  await mindBeforeTurn(live, userMessage);
-  const codingState = live.codingJournal.beginTurn(userMessage);
+  const semanticMessage = semanticUserMessage(userMessage);
+  await live.agentRuntime?.beforeTurn(semanticMessage);
+  await mindBeforeTurn(live, semanticMessage);
+  const codingState = live.codingJournal.beginTurn(semanticMessage);
   if (codingState) {
     live.queueSystemReminder(codingState, "instructions");
     if (process.env.ARES_REPO_MAP !== "0") {
@@ -272,7 +284,7 @@ export async function prepareUserTurn(live: LiveSession, userMessage: string): P
   // reminder is hard-capped in items + chars so it can't dominate the window.
   const awareness = consciousnessContextReminder();
   if (awareness) live.queueSystemReminder(awareness, "memory");
-  live.queueSystemReminder(buildForegroundReminder(userMessage), "instructions");
+  live.queueSystemReminder(buildForegroundReminder(semanticMessage), "instructions");
 }
 
 async function mindBeforeTurn(live: LiveSession, userMessage: string): Promise<void> {
@@ -695,7 +707,13 @@ The user may configure shell hooks (PreToolUse, PostToolUse, SessionStart) in \`
 
 ## Plan mode
 
-If you're in plan mode (current mode: \`${permissionMode}\`; the prompt shows \`[PLAN]\`), user-workspace writes are blocked. Use this turn to inspect and discuss freely. Keep the complete living plan current with **UpdatePlanDraft** after material discoveries or decisions; it is durably revisioned across compaction and restart. When ready, call **ExitPlanMode** without repeating the body to submit those exact draft bytes (or pass a final replacement body) — only explicit user approval restores build authority.
+Treat plan/build as an owner-controlled workflow boundary, not a tone. If the owner explicitly asks you to implement, fix, or build, stay in build mode and act; do not force a planning ceremony onto ordinary coding. If they ask to explore a consequential design, policy, architecture, or ambiguous implementation before committing changes, recommend plan mode (and enter it when they ask or agree) so the discussion can continue without accidental execution.
+
+If you're in plan mode (current mode: \`${permissionMode}\`; the prompt/UI shows \`PLAN MODE\`), user-workspace writes, effectful shell calls, mutating environment operations, and acquisition Workers are blocked. You may inspect, research, ask questions, use read-only subagents, and talk for as many turns as needed. Keep the complete living plan current with **UpdatePlanDraft** after material discoveries or decisions; it is durably revisioned across compaction and restart. Do not imply that you are implementing while planning. When the plan is ready, call **ExitPlanMode** without repeating the body to present the exact durable draft in a "Ready to build?" approval handoff. Only the owner's explicit approval changes the UI to \`BUILD MODE\` and restores execution authority; a denial means continue planning.
+
+## Adaptive editor and environment control
+
+Do not guess at live visual state from serialized coordinates alone. When work depends on seeing or controlling an editor, renderer, simulator, design tool, game engine, or other external environment, use **Capability list/resolve** to find a matching environment provider. If the needed observation/control operation is missing and you are in build mode, call **Capability ensure** so Ares creates and verifies a reusable adapter; do not wait for the owner to tell you to inspect your own capability gap. Providers declare their file/command matchers and effects, so this applies to current and future tools without product-specific logic in the harness. After any visual mutation, invoke a read-only observation operation that returns fresh screenshot/frame evidence and inspect it before making another spatial correction or claiming success. In plan mode you may resolve and healthcheck read-only providers, but you must wait for the approved build handoff before ensure or mutation.
 
 ## Reach — the machine, not just the workspace
 

@@ -38,6 +38,50 @@ export interface ChangelogEntry {
 // from the "earlier updates" strip.
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.32.0",
+    date: "August 2026",
+    title: "The long-horizon coding engine",
+    tagline: "Ares can now plan for hours, build across a real codebase, survive interruptions and restarts, and keep every worker and tool grounded in durable state.",
+    highlights: [
+      {
+        icon: "⌁",
+        title: "Steering that lands",
+        blurb: "New instructions are admitted immediately, settle safely between tool actions, survive Stop and restart, and can no longer wedge a session in a queued-steering loop.",
+        tag: "Safer",
+      },
+      {
+        icon: "▣",
+        title: "Plan means plan",
+        blurb: "Plan mode is read-only for as long as you want to talk; Ares asks before visibly crossing into Build mode, then executes the plan you shaped together.",
+        tag: "New",
+      },
+      {
+        icon: "∞",
+        title: "Work survives everything",
+        blurb: "SQLite-backed sessions preserve plans, memory, steering, background jobs, subagents and recovery checkpoints through compaction, crashes and app restarts.",
+        tag: "New",
+      },
+      {
+        icon: "⚒",
+        title: "Coding tools rebuilt",
+        blurb: "Read, Write, Edit, Apply Patch and shell now use exact paths, conflict-safe edits, complete logs, formatter settlement and language-server feedback before Ares calls work finished.",
+        tag: "Safer",
+      },
+      {
+        icon: "⌘",
+        title: "Real background work",
+        blurb: "The Conductor can run durable jobs and bounded specialist agents while the main conversation continues, reconcile their results, and resume unfinished work after restart.",
+        tag: "New",
+      },
+      {
+        icon: "◉",
+        title: "Adapts to the work",
+        blurb: "Ares discovers the project, tools and visual workflow it needs in any directory you choose, while browser previews, Ollama model setup and three-second dictation pauses remove everyday friction.",
+        tag: "Polished",
+      },
+    ],
+  },
+  {
     version: "0.31.0",
     date: "July 2026",
     title: "The roster — specialists Ares can wear",

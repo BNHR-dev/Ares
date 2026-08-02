@@ -237,6 +237,7 @@ const OPERATOR_CONTROL_PLANE_TOOLS = new Set([
   "Conductor",
   "StandingOrder",
   "CodingBackend",
+  "Capability",
   "EnterPlanMode",
   "UpdatePlanDraft",
   "ExitPlanMode",

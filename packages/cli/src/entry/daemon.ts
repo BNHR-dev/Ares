@@ -37,7 +37,7 @@ import { ParsedArgs, cliVersion, transitionPermissionMode } from "./runtime.js";
 import { LiveSession, chatContextBudget, createSession, createSessionWithSelection, handleReasoningCommand, isProviderFatalError, makeSpanSummarizer, modelLikelyHasVision, pickCapacitySibling, pickHealthyFallback, pickVisionFallback, resolveReasoningLevel } from "./sessionFactory.js";
 import { startGatewayMirror } from "./telegramWiring.js";
 import { contentFromUserInput, undoLines } from "./terminalLines.js";
-import { buildSystemPrompt, disposeLiveSession, finishTurn, gatherGitRunFacts, lastTriageRun, mindSessionEnded, prepareUserTurn } from "./turnPipeline.js";
+import { buildSystemPrompt, disposeLiveSession, finishTurn, gatherGitRunFacts, lastTriageRun, mindSessionEnded, prepareUserTurn, semanticUserMessage } from "./turnPipeline.js";
 
 // Satellite modules (extracted, closure-free helpers — command handlers and
 // their shared mutable state stay in this file):
@@ -53,7 +53,7 @@ import { normalizeRoutingCommand } from "./daemon/routing.js";
 import { trimRolloutForReport } from "./daemon/report.js";
 import { daemonSkillsList } from "./daemon/skills.js";
 import { daemonUsageStats } from "./daemon/usageStats.js";
-import { DaemonCommandRouter } from "./daemon/protocol.js";
+import { DaemonCommandRouter, type DaemonInputCommand } from "./daemon/protocol.js";
 import { mcpDirectorySnapshot } from "./daemon/mcp.js";
 
 // Back-compat re-exports: garrisonCmd.ts + sessionFactory.ts import these from
@@ -174,7 +174,12 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
   let live: LiveSession;
   let browserExtensionBridge: BrowserBridgeServer | null = null;
   try {
-    live = await createSession(args, undefined, requestPermission);
+    live = await createSession(args, undefined, requestPermission, {
+      // The daemon owns a richer visible pipeline than Session itself: routing,
+      // preparation, persona, vision, failover, verification, and NDJSON events.
+      // Never let the constructor execute recovered work behind that pipeline.
+      detachedStartupRecovery: false,
+    });
     const bridgeConfigPath = path.join(live.context.home, "browser-bridge", "config.json");
     try {
       const raw = JSON.parse(await readFile(bridgeConfigPath, "utf8")) as {
@@ -215,6 +220,51 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
   interface DaemonEntry {
     live: LiveSession;
     turnActive: boolean;
+    /** Durable identity of the ordinary input that owns this daemon turn. */
+    activeInputId?: string;
+    /** Stop was accepted; no new send may be inferred as steering until the
+     * owner generator and its post-turn settlement have actually unwound. */
+    cancelRequested: boolean;
+    /** Steers admitted against the active turn and not yet acknowledged. */
+    pendingSteerInputIds: Set<string>;
+    /** Admission/drain tasks, including the rare steer that becomes the next
+     * turn after the prior generation crossed its terminal boundary. */
+    pendingSteerTasks: Map<string, Promise<void>>;
+    /** Admission tickets serialize attachment parsing plus the SQLite flush,
+     * while each steer remains free to settle independently afterward. */
+    steerAdmissionTail: Promise<void>;
+    /** Steers routed after QueryEngine's terminal fence. They re-enter the
+     * ordinary daemon turn pipeline only after the owner wrapper releases. */
+    deferredSteers: Map<string, { text: string; sessionId?: string }>;
+    /** Exact deferred correction handed from a settled owner to the ordinary
+     * command runner. Stop remains bound to this ID until that runner marks it
+     * active; there must never be an observable idle gap between the two. */
+    successorHandoff?: { inputId: string; sessionId?: string; cancelRequested: boolean };
+    /** Bounded same-process replay fence for acknowledgements that arrive after
+     * the admission task has already left pendingSteerTasks. */
+    settledSteerInputIds: Set<string>;
+    /** Corrections received before the owner input crosses SQLite admission.
+     * They flush synchronously from that owner's input_admitted observer, after
+     * its FIFO reservation is guaranteed to win. */
+    preparingSteers: Map<string, { text: string; sessionId?: string }>;
+    /** Truthful live boundary for steering. A provider attempt can be superseded
+     * immediately; an executing tool must settle before its correction lands. */
+    steeringPhase: "idle" | "preparing" | "generation" | "action" | "boundary" | "settling";
+    /** Parallel tool calls share one action boundary. */
+    activeToolIds: Set<string>;
+    /** Canonical crash-recovered inputs waiting to re-enter the ordinary daemon
+     * send path. Only one is scheduled at a time so every turn is observable. */
+    startupRecoveryQueue: Array<{ inputId: string; goal: string; sessionId?: string }>;
+    /** Exact recovered input currently scheduled or executing. */
+    startupRecoveryInputId?: string;
+    /** The exact ID above is waiting for crashed-lease takeover, before it can
+     * be safely cancelled or admitted by this daemon generation. */
+    startupRecoveryPreparing: boolean;
+    /** Stop arrived during that takeover window and must be applied immediately
+     * after the old claim is requeued, before ordinary execution begins. */
+    startupRecoveryCancelRequested: boolean;
+    /** Prevent duplicate lease takeover/listing for one hosted Session. */
+    startupRecoveryPrepared: boolean;
     /** The lane (task domain) this session is currently on, for sticky auto
      *  routing — the model only switches when the lane actually changes. */
     lane?: string;
@@ -225,7 +275,24 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
   }
   const DEFAULT_SID = "__primary__";
   const sessions = new Map<string, DaemonEntry>();
-  const primaryEntry: DaemonEntry = { live, turnActive: false, personaGate: newPersonaGate() };
+  const primaryEntry: DaemonEntry = {
+    live,
+    turnActive: false,
+    cancelRequested: false,
+    pendingSteerInputIds: new Set(),
+    pendingSteerTasks: new Map(),
+    steerAdmissionTail: Promise.resolve(),
+    deferredSteers: new Map(),
+    settledSteerInputIds: new Set(),
+    preparingSteers: new Map(),
+    steeringPhase: "idle",
+    activeToolIds: new Set(),
+    startupRecoveryQueue: [],
+    startupRecoveryPrepared: false,
+    startupRecoveryPreparing: false,
+    startupRecoveryCancelRequested: false,
+    personaGate: newPersonaGate(),
+  };
   let mainSelection = live.selection;
   let mainProviderFamily = providerFamilyForSelection(live.selection);
   let activeTurns = 0;
@@ -504,12 +571,213 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
       selection,
       saved ? sid : undefined,
       requestPermission,
-      { startAgentRuntime: false, sessionId: saved ? undefined : sid },
+      {
+        startAgentRuntime: false,
+        sessionId: saved ? undefined : sid,
+        detachedStartupRecovery: false,
+      },
     );
-    const entry: DaemonEntry = { live: fresh, turnActive: false, personaGate: newPersonaGate() };
+    const entry: DaemonEntry = {
+      live: fresh,
+      turnActive: false,
+      cancelRequested: false,
+      pendingSteerInputIds: new Set(),
+      pendingSteerTasks: new Map(),
+      steerAdmissionTail: Promise.resolve(),
+      deferredSteers: new Map(),
+      settledSteerInputIds: new Set(),
+      preparingSteers: new Map(),
+      steeringPhase: "idle",
+      activeToolIds: new Set(),
+      startupRecoveryQueue: [],
+      startupRecoveryPrepared: false,
+      startupRecoveryPreparing: false,
+      startupRecoveryCancelRequested: false,
+      personaGate: newPersonaGate(),
+    };
     sessions.set(sid, entry);
     tagEmit(sid, { type: "session_opened", model: fresh.selection.model, provider: fresh.selection.provider.name });
+    await prepareDaemonStartupRecovery(entry, sid);
     return entry;
+  };
+
+  const startupRecoveryGoal = (payload: unknown): string => {
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      return "Continue the pending request.";
+    }
+    const value = payload as { content?: unknown; text?: unknown };
+    if (typeof value.text === "string" && value.text.trim()) return value.text.trim();
+    if (!Array.isArray(value.content)) return "Continue the pending request.";
+    const text = value.content
+      .flatMap((block) => {
+        if (!block || typeof block !== "object" || Array.isArray(block)) return [];
+        const candidate = block as { type?: unknown; text?: unknown };
+        return candidate.type === "text" && typeof candidate.text === "string"
+          ? [candidate.text]
+          : [];
+      })
+      .join("\n")
+      .trim();
+    return text || "Continue the pending request with its attached content.";
+  };
+
+  // Object identity distinguishes daemon-scheduled recovery work from an
+  // indistinguishable same-ID wire replay without expanding the public NDJSON
+  // protocol (or trusting a client-supplied internal marker).
+  const internalStartupRecoveryCommands = new WeakSet<object>();
+  const suppressedInternalRecoveryReplays = new Set<string>();
+  const enqueueStartupRecoveryCommand = (command: DaemonInputCommand): void => {
+    internalStartupRecoveryCommands.add(command);
+    commands.enqueue(command);
+  };
+
+  const scheduleNextStartupRecovery = async (entry: DaemonEntry): Promise<boolean> => {
+    if (entry.turnActive || entry.startupRecoveryPreparing || entry.startupRecoveryInputId) return false;
+    const kernel = await openWorkspaceSessionKernel(entry.live.context.workspace);
+    while (true) {
+      const next = entry.startupRecoveryQueue.shift();
+      if (!next) return false;
+      const canonical = kernel.getInput(next.inputId);
+      if (canonical?.state === "consumed" || canonical?.state === "cancelled") {
+        // The recovered owner can consume attached steers in its own provider
+        // generation. A stale startup snapshot must never turn those terminal
+        // rows into synthetic follow-up turns (or re-run mutable preparation).
+        tagEmit(next.sessionId, {
+          type: "input_replayed",
+          inputId: next.inputId,
+          settled: true,
+          delivery: canonical.delivery,
+          status: canonical.state,
+        });
+        continue;
+      }
+      entry.startupRecoveryInputId = next.inputId;
+      enqueueStartupRecoveryCommand({
+        type: "send",
+        goal: next.goal,
+        sessionId: next.sessionId,
+        inputId: next.inputId,
+      });
+      return true;
+    }
+  };
+
+  const prepareDaemonStartupRecovery = async (
+    entry: DaemonEntry,
+    sessionId: string | undefined,
+  ): Promise<void> => {
+    if (entry.startupRecoveryPrepared) return;
+    entry.startupRecoveryPrepared = true;
+    // Preserve admission order. A queue owner followed by steers is one crashed
+    // generation, not independent turns: Session's explicit recovery admission
+    // lets that owner reclaim the head and drain its attached steer inbox.
+    const discovered = entry.live.session.pendingHostManagedStartupRecovery();
+    if (discovered.length === 0) return;
+    const [first, ...rest] = discovered.map((input) => ({
+      inputId: input.id,
+      goal: startupRecoveryGoal(input.payload),
+      sessionId,
+    }));
+    entry.startupRecoveryInputId = first.inputId;
+    entry.startupRecoveryQueue.push(...rest);
+    entry.startupRecoveryPreparing = true;
+    tagEmit(sessionId, {
+      type: "startup_recovery_preparing",
+      inputId: first.inputId,
+      inputIds: discovered.map((input) => input.id),
+      count: discovered.length,
+    });
+    try {
+      await entry.live.session.prepareHostManagedStartupRecovery();
+      if (entry.startupRecoveryCancelRequested) {
+        entry.live.session.interrupt(first.inputId);
+      }
+      entry.startupRecoveryPreparing = false;
+      tagEmit(sessionId, {
+        type: "startup_recovery_queued",
+        inputIds: discovered.map((input) => input.id),
+        count: discovered.length,
+      });
+      enqueueStartupRecoveryCommand({ type: "send", goal: first.goal, sessionId, inputId: first.inputId });
+    } catch (error) {
+      entry.startupRecoveryPreparing = false;
+      entry.startupRecoveryInputId = undefined;
+      entry.startupRecoveryQueue.length = 0;
+      entry.startupRecoveryCancelRequested = false;
+      tagEmit(sessionId, {
+        type: "startup_recovery_failed",
+        error: error instanceof Error ? error.message : String(error),
+        retryable: true,
+      });
+    }
+  };
+
+  const trackSteeringBoundary = (entry: DaemonEntry, event: { type: string; id?: string }): void => {
+    if (event.type === "turn_start") {
+      entry.steeringPhase = "boundary";
+    } else if (event.type === "provider_attempt_started") {
+      entry.steeringPhase = "generation";
+    } else if (event.type === "provider_attempt_superseded") {
+      entry.steeringPhase = "boundary";
+    } else if (event.type === "tool_start") {
+      if (event.id) entry.activeToolIds.add(event.id);
+      entry.steeringPhase = "action";
+    } else if (event.type === "tool_end" || event.type === "tool_error") {
+      if (event.id) entry.activeToolIds.delete(event.id);
+      if (entry.activeToolIds.size === 0) entry.steeringPhase = "boundary";
+    } else if (event.type === "compaction") {
+      entry.steeringPhase = "boundary";
+    } else if (event.type === "turn_end") {
+      entry.steeringPhase = "settling";
+    }
+  };
+
+  const announceSteerTerminal = (
+    entry: DaemonEntry,
+    sessionId: string | undefined,
+    inputId: string,
+    state: "consumed" | "cancelled",
+  ): boolean => {
+    if (entry.settledSteerInputIds.has(inputId)) return false;
+    entry.settledSteerInputIds.add(inputId);
+    while (entry.settledSteerInputIds.size > 512) {
+      const oldest = entry.settledSteerInputIds.values().next().value as string | undefined;
+      if (!oldest) break;
+      entry.settledSteerInputIds.delete(oldest);
+    }
+    tagEmit(sessionId, {
+      type: state === "consumed" ? "steer_applied" : "steer_cancelled",
+      inputId,
+      status: state,
+    });
+    return true;
+  };
+
+  const monitorDeferredSteer = (
+    entry: DaemonEntry,
+    sessionId: string | undefined,
+    inputId: string,
+  ): void => {
+    void (async () => {
+      const kernel = await openWorkspaceSessionKernel(entry.live.context.workspace);
+      while (entry.turnActive && entry.deferredSteers.has(inputId)) {
+        const state = kernel.getInput(inputId)?.state;
+        if (state === "consumed" || state === "cancelled") {
+          entry.deferredSteers.delete(inputId);
+          announceSteerTerminal(entry, sessionId, inputId, state);
+          return;
+        }
+        await new Promise<void>((resolve) => setTimeout(resolve, 20));
+      }
+    })().catch((error) => {
+      tagEmit(sessionId, {
+        type: "steer_epilogue_warning",
+        inputId,
+        status: "admitted",
+        retryable: true,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
   };
 
   const admitSteer = (
@@ -518,42 +786,283 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
     text: string,
     inputId: string,
   ): void => {
-    tagEmit(sessionId, { type: "steer_queued", text, inputId });
-    void (async () => {
-      for await (const _event of entry.live.session.sendContent(
-        [{ type: "text", text }],
-        { inputId, delivery: "steer" },
-      )) {
-        // The active turn owns the visible event stream. This generator crosses
-        // the durable admission/ack path and normally yields nothing itself.
-      }
-      tagEmit(sessionId, { type: "steer_applied", text, inputId });
-    })().catch((error) => {
+    if (entry.cancelRequested) {
       tagEmit(sessionId, {
-        type: "daemon_error",
-        error: `steer admission failed: ${error instanceof Error ? error.message : String(error)}`,
+        type: "input_rejected",
+        inputId,
+        reason: "turn_cancelling",
+        retryable: true,
+      });
+      return;
+    }
+    if (
+      entry.pendingSteerInputIds.has(inputId) ||
+      entry.deferredSteers.has(inputId) ||
+      entry.settledSteerInputIds.has(inputId)
+    ) {
+      tagEmit(sessionId, {
+        type: "input_replayed",
+        inputId,
+        settled: entry.settledSteerInputIds.has(inputId),
+        delivery: "steer",
+      });
+      return;
+    }
+    const submittedDuring = entry.steeringPhase;
+    entry.pendingSteerInputIds.add(inputId);
+    tagEmit(sessionId, {
+      type: "steer_submitted",
+      inputId,
+      steerPhase: submittedDuring,
+    });
+    // Each caller reserves an admission ticket synchronously. It waits for the
+    // prior steer to finish attachment parsing + SQLite routing, but not for that
+    // prior steer to be consumed by the owner turn.
+    const previousAdmission = entry.steerAdmissionTail;
+    let releaseAdmission!: () => void;
+    const admissionDone = new Promise<void>((resolve) => { releaseAdmission = resolve; });
+    entry.steerAdmissionTail = previousAdmission.catch(() => undefined).then(() => admissionDone);
+    let admissionReleased = false;
+    const releaseAdmissionOnce = (): void => {
+      if (admissionReleased) return;
+      admissionReleased = true;
+      releaseAdmission();
+    };
+    let terminalAnnounced = false;
+    const task = (async () => {
+      await previousAdmission.catch(() => undefined);
+      let admissionAnnounced = false;
+      // Parse attachments before Session admission. This makes the canonical
+      // SQLite payload identical to an ordinary owner turn: text plus structured
+      // image blocks, never an opaque data URL hidden inside one text block.
+      const steerContent = await contentFromUserInput(text, entry.live.context.workspace);
+      // `steer_routed` is emitted after input_admitted has crossed its audit
+      // flush and QueryEngine has returned the actual live disposition. Do not
+      // infer routing from the daemon phase sampled before that async boundary.
+      const unsubscribe = entry.live.session.observeEvents((event) => {
+        if (event.type !== "steer_routed" || event.inputId !== inputId || admissionAnnounced) return;
+        admissionAnnounced = true;
+        const routed = event.disposition === "provider_preempting"
+          ? { steerPhase: "generation" as const, delivery: "interrupting_generation" as const }
+          : event.disposition === "effect_settling"
+            ? { steerPhase: "action" as const, delivery: "waiting_for_action" as const }
+            : event.disposition === "idle"
+              ? { steerPhase: "idle" as const, delivery: "next_boundary" as const }
+              : { steerPhase: "boundary" as const, delivery: "next_boundary" as const };
+        tagEmit(sessionId, {
+          type: "steer_admitted",
+          inputId,
+          disposition: event.disposition,
+          ...routed,
+        });
+        // This is the post-flush routing boundary. The next steer may now parse
+        // and admit even while this one independently waits to be consumed.
+        releaseAdmissionOnce();
+      });
+      try {
+        const kernel = await openWorkspaceSessionKernel(entry.live.context.workspace);
+        // Admission-only: this sender never acquires the owner's FIFO lease and
+        // therefore can never execute an inherited turn outside daemon routing,
+        // vision, persona, recall, failover, and journal preparation.
+        for await (const _event of entry.live.session.sendContent(
+          steerContent,
+          { inputId, delivery: "steer", admitOnlySteer: true },
+        )) {
+          // Existing terminal idempotency records can yield a synthetic boundary;
+          // canonical SQLite state below is the exact acknowledgement authority.
+        }
+        releaseAdmissionOnce();
+        const canonical = kernel.getInput(inputId);
+        if (canonical?.state === "consumed" || canonical?.state === "cancelled") {
+          terminalAnnounced = true;
+          announceSteerTerminal(entry, sessionId, inputId, canonical.state);
+        } else if (canonical?.state === "admitted" || canonical?.state === "claimed") {
+          entry.deferredSteers.set(inputId, { text, sessionId });
+          monitorDeferredSteer(entry, sessionId, inputId);
+        } else {
+          tagEmit(sessionId, { type: "steer_settled", inputId, status: canonical?.state ?? "unknown" });
+        }
+      } finally {
+        unsubscribe();
+      }
+    })().catch(async (error) => {
+      const detail = error instanceof Error ? error.message : String(error);
+      let canonical: ReturnType<Awaited<ReturnType<typeof openWorkspaceSessionKernel>>["getInput"]> | undefined;
+      try {
+        const kernel = await openWorkspaceSessionKernel(entry.live.context.workspace);
+        canonical = kernel.getInput(inputId) ?? undefined;
+      } catch {
+        // The original error is the useful diagnostic. A failed read-back means
+        // there is no canonical evidence with which to override rejection.
+      }
+
+      if (terminalAnnounced || canonical) {
+        if (!terminalAnnounced && (canonical?.state === "consumed" || canonical?.state === "cancelled")) {
+          terminalAnnounced = true;
+          announceSteerTerminal(entry, sessionId, inputId, canonical.state);
+        } else if (canonical?.state === "admitted" || canonical?.state === "claimed") {
+          entry.deferredSteers.set(inputId, { text, sessionId });
+          monitorDeferredSteer(entry, sessionId, inputId);
+        }
+        // Admission/consumption is canonical. A later audit, forwarding, or
+        // epilogue failure must never restore the same correction as a draft.
+        tagEmit(sessionId, {
+          type: "steer_epilogue_warning",
+          error: detail,
+          inputId,
+          status: canonical?.state ?? "terminal",
+          retryable: canonical?.state === "admitted" || canonical?.state === "claimed",
+        });
+        return;
+      }
+
+      tagEmit(sessionId, {
+        type: "steer_rejected",
+        error: detail,
+        reason: "admission_failed",
+        retryable: true,
         inputId,
       });
+    }).finally(() => {
+      releaseAdmissionOnce();
+      entry.pendingSteerInputIds.delete(inputId);
+      entry.pendingSteerTasks.delete(inputId);
+    });
+    entry.pendingSteerTasks.set(inputId, task);
+  };
+
+  const bufferPreparingSteer = (
+    entry: DaemonEntry,
+    sessionId: string | undefined,
+    text: string,
+    inputId: string,
+  ): void => {
+    if (
+      entry.preparingSteers.has(inputId) ||
+      entry.pendingSteerInputIds.has(inputId) ||
+      entry.deferredSteers.has(inputId) ||
+      entry.settledSteerInputIds.has(inputId)
+    ) {
+      tagEmit(sessionId, { type: "input_replayed", inputId, settled: entry.settledSteerInputIds.has(inputId), delivery: "steer" });
+      return;
+    }
+    entry.preparingSteers.set(inputId, { text, sessionId });
+    tagEmit(sessionId, {
+      type: "steer_buffered",
+      inputId,
+      steerPhase: "preparing",
+      delivery: "waiting_for_owner_admission",
     });
   };
 
-  commands.onInterrupt = (command) => {
-    const sid = command.sessionId || DEFAULT_SID;
-    const entry = sessions.get(sid);
-    if (!entry) {
-      // Unknown/not-yet-spawned session id: do NOT silently interrupt the
-      // primary (that was hitting the wrong target and leaving the real busy
-      // session running). Abort every session that's actually mid-turn instead.
-      let hit = false;
-      for (const e of sessions.values()) {
-        if (e.turnActive) { e.live.session.interrupt(); hit = true; }
+  const flushPreparingSteers = (entry: DaemonEntry): void => {
+    const buffered = [...entry.preparingSteers.entries()];
+    entry.preparingSteers.clear();
+    for (const [inputId, steer] of buffered) {
+      if (entry.cancelRequested) {
+        tagEmit(steer.sessionId, {
+          type: "steer_cancelled",
+          inputId,
+          status: "cancelled",
+        });
+      } else {
+        admitSteer(entry, steer.sessionId, steer.text, inputId);
       }
-      if (!hit) primaryEntry.live.session.interrupt();
-      tagEmit(command.sessionId, { type: "interrupted_by_user" });
+    }
+  };
+
+  commands.onInterrupt = (command) => {
+    const entry = command.sessionId ? sessions.get(command.sessionId) : primaryEntry;
+    // A terminal-fence steer becomes the next ordinary turn. The command is
+    // queued out-of-band after its predecessor releases, so there is a real
+    // (usually sub-millisecond) interval in which no turn is active. Keep exact
+    // ownership across that handoff: Stop cancels the durable successor instead
+    // of reporting idle and allowing it to start behind the user's back.
+    if (entry?.successorHandoff && !entry.turnActive) {
+      const handoff = entry.successorHandoff;
+      if (handoff.cancelRequested) {
+        tagEmit(command.sessionId, {
+          type: "interrupt_pending",
+          inputId: handoff.inputId,
+          phase: "successor_handoff",
+        });
+        return;
+      }
+      handoff.cancelRequested = true;
+      const accepted = entry.live.session.interrupt(handoff.inputId);
+      if (accepted) {
+        announceSteerTerminal(entry, handoff.sessionId, handoff.inputId, "cancelled");
+      }
+      tagEmit(command.sessionId, {
+        type: accepted ? "interrupt_requested" : "interrupt_pending",
+        inputId: handoff.inputId,
+        phase: "successor_handoff",
+      });
       return;
     }
-    entry.live.session.interrupt();
-    tagEmit(command.sessionId, { type: "interrupted_by_user" });
+    // Recovery owns this exact input from discovery until the ordinary send
+    // wrapper takes over. Keep Stop bound across the tiny queued hand-off too;
+    // otherwise a click after startup_recovery_queued but before turnActive
+    // could be reported as idle and the recovered request would still run.
+    if (entry?.startupRecoveryInputId && !entry.turnActive) {
+      if (entry.startupRecoveryCancelRequested) {
+        tagEmit(command.sessionId, {
+          type: "interrupt_pending",
+          inputId: entry.startupRecoveryInputId,
+        });
+        return;
+      }
+      entry.startupRecoveryCancelRequested = true;
+      // During lease takeover the old generation still owns the claim, so the
+      // recovery continuation applies this intent after fencing. Once takeover
+      // has completed, cancel the admitted row immediately before dequeue.
+      const accepted = entry.startupRecoveryPreparing
+        ? true
+        : entry.live.session.interrupt(entry.startupRecoveryInputId);
+      tagEmit(command.sessionId, {
+        type: accepted ? "interrupt_requested" : "interrupt_pending",
+        inputId: entry.startupRecoveryInputId,
+        phase: "startup_recovery",
+      });
+      return;
+    }
+    if (!entry || !entry.turnActive || !entry.activeInputId) {
+      tagEmit(command.sessionId, { type: "interrupt_idle" });
+      return;
+    }
+    if (entry.cancelRequested) {
+      tagEmit(command.sessionId, {
+        type: "interrupt_pending",
+        inputId: entry.activeInputId,
+      });
+      return;
+    }
+    const inputId = entry.activeInputId;
+    const accepted = entry.live.session.interrupt(inputId);
+    // Even if Session already crossed its terminal boundary, the daemon wrapper
+    // can still own routing/post-turn work. Gate fresh sends until finally
+    // releases turnActive so they cannot be inferred as late steering.
+    entry.cancelRequested = true;
+    for (const [steerInputId, steer] of entry.preparingSteers) {
+      tagEmit(steer.sessionId, {
+        type: "steer_cancelled",
+        inputId: steerInputId,
+        status: "cancelled",
+      });
+    }
+    entry.preparingSteers.clear();
+    for (const steerInputId of entry.pendingSteerInputIds) {
+      entry.live.session.interrupt(steerInputId);
+    }
+    for (const [steerInputId, deferred] of entry.deferredSteers) {
+      if (!entry.live.session.interrupt(steerInputId)) continue;
+      entry.deferredSteers.delete(steerInputId);
+      announceSteerTerminal(entry, deferred.sessionId, steerInputId, "cancelled");
+    }
+    tagEmit(command.sessionId, {
+      type: accepted ? "interrupt_requested" : "interrupt_pending",
+      inputId,
+    });
     // Do not synthesize completion on a timer. The Session owns a FIFO run lease
     // and remains busy until the provider/tool generator actually unwinds; a UI
     // timeout must never permit a second turn to overlap an unknown side effect.
@@ -695,6 +1204,12 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
   });
   let unsubscribeGatewayMirror: (() => void) | undefined;
   startGatewayMirror(live.context, tagEmit).catch(() => {});
+
+  // Recovery starts only after daemon_ready and every host-level observer is
+  // installed. Incoming UI commands are already buffered by the router; the
+  // gate in the send handler below places the oldest canonical recovered ID in
+  // front of any command that arrived during expired-lease reconciliation.
+  await prepareDaemonStartupRecovery(primaryEntry, live.session.meta.id);
 
   try {
     while (true) {
@@ -1139,6 +1654,15 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
         const model = typeof command.model === "string" ? command.model.trim() : "";
         if (!model || !/^[a-z0-9._:\/-]+$/i.test(model)) {
           process.stdout.write(JSON.stringify({ type: "ollama_pull_done", model, ok: false, error: "a valid model name is required" }) + "\n");
+          continue;
+        }
+        if (model.toLowerCase().endsWith(":cloud")) {
+          process.stdout.write(JSON.stringify({
+            type: "ollama_pull_done",
+            model,
+            ok: false,
+            error: "Ollama Cloud models run remotely and do not need to be pulled.",
+          }) + "\n");
           continue;
         }
         void (async () => {
@@ -1823,6 +2347,26 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
         }
         const entry = sessions.get(command.sessionId || DEFAULT_SID);
         if (entry?.turnActive) {
+          if (entry.cancelRequested) {
+            tagEmit(command.sessionId, {
+              type: "input_rejected",
+              inputId: requestedInputId || undefined,
+              reason: "turn_cancelling",
+              retryable: true,
+            });
+            continue;
+          }
+          if (entry.steeringPhase === "preparing") {
+            bufferPreparingSteer(entry, command.sessionId, text.trim(), requestedInputId || `steer_${randomUUID()}`);
+            continue;
+          }
+          if (entry.steeringPhase === "settling") {
+            // The previous provider already committed its terminal boundary.
+            // Durable FIFO turns this correction into the next ordinary turn;
+            // admit it instead of bouncing a message the UI just showed as sent.
+            admitSteer(entry, command.sessionId, text.trim(), requestedInputId || `steer_${randomUUID()}`);
+            continue;
+          }
           admitSteer(entry, command.sessionId, text.trim(), requestedInputId || `steer_${randomUUID()}`);
           continue;
         }
@@ -1843,6 +2387,11 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
       // stream concurrently and steer/interrupt land mid-turn.
       const sid = command.sessionId || DEFAULT_SID;
       const goal = command.goal;
+      // Data URLs remain in `goal` until contentFromUserInput converts them to
+      // provider image blocks. Routing, persona selection, reminders, and
+      // durable reflection only need the semantic text and must never ingest
+      // megabytes of base64 attachment bytes.
+      const semanticGoal = semanticUserMessage(goal);
       const voiceMode = command.voice === true;
       const requestedInputId = typeof command.inputId === "string" ? command.inputId.trim() : "";
       if (command.inputId !== undefined && (!requestedInputId || requestedInputId.length > 1_024)) {
@@ -1859,11 +2408,88 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
         });
         continue;
       }
+      const isSuccessorHandoff = entry.successorHandoff?.inputId === inputId;
+      if (
+        (canonicalInput?.state === "consumed" || canonicalInput?.state === "cancelled") &&
+        !isSuccessorHandoff
+      ) {
+        const internalStartupRecovery = internalStartupRecoveryCommands.has(command);
+        if (internalStartupRecovery && suppressedInternalRecoveryReplays.delete(inputId)) {
+          // resolveEntry() may discover recovery while handling the Desktop's
+          // same-ID replay, leaving one daemon-scheduled copy behind it. The
+          // wire command already received the complete terminal lifecycle.
+          continue;
+        }
+        // Exact-ID transport replay is a terminal acknowledgement, not a new
+        // turn. Settle it before routing, reminders, persona/vision selection,
+        // attachment parsing, or any other mutable preparation can run twice.
+        tagEmit(command.sessionId, {
+          type: "input_replayed",
+          inputId,
+          settled: true,
+          delivery: canonicalInput.delivery,
+          status: canonicalInput.state,
+        });
+        if (entry.turnActive) continue;
+
+        const completesStartupRecovery = entry.startupRecoveryInputId === inputId;
+        const settlesRequestedStartupStop = completesStartupRecovery && entry.startupRecoveryCancelRequested;
+        if (completesStartupRecovery && !internalStartupRecovery) {
+          suppressedInternalRecoveryReplays.add(inputId);
+        }
+        const queuedRecoveryIndex = entry.startupRecoveryQueue.findIndex((pending) => pending.inputId === inputId);
+        if (queuedRecoveryIndex >= 0) entry.startupRecoveryQueue.splice(queuedRecoveryIndex, 1);
+        if (completesStartupRecovery) {
+          entry.startupRecoveryInputId = undefined;
+          entry.startupRecoveryCancelRequested = false;
+          await scheduleNextStartupRecovery(entry);
+        }
+        tagEmit(command.sessionId, {
+          type: "turn_end",
+          inputId,
+          status: canonicalInput.state === "consumed" ? "completed" : "interrupted",
+          workStatus: entry.live.session.lastWorkStatus,
+          usage: { inputTokens: 0, outputTokens: 0 },
+          durationMs: 0,
+        });
+        if (settlesRequestedStartupStop) {
+          tagEmit(command.sessionId, { type: "interrupt_settled", inputId });
+        }
+        tagEmit(command.sessionId, {
+          type: "turn_settled",
+          inputId,
+          continuing: Boolean(entry.startupRecoveryInputId),
+        });
+        continue;
+      }
       const canonicalPayload = canonicalInput?.payload;
       const canonicalTurnContent = canonicalPayload && typeof canonicalPayload === "object" && !Array.isArray(canonicalPayload)
         && Array.isArray((canonicalPayload as { content?: unknown }).content)
         ? (canonicalPayload as unknown as { content: ContentBlock[] }).content.map((block) => ({ ...block }))
         : null;
+      if (
+        !entry.turnActive &&
+        entry.startupRecoveryInputId &&
+        entry.startupRecoveryInputId !== inputId
+      ) {
+        const alreadyScheduled = entry.startupRecoveryQueue.some((pending) => pending.inputId === inputId);
+        if (alreadyScheduled) {
+          tagEmit(command.sessionId, {
+            type: "input_replayed",
+            inputId,
+            settled: false,
+            delivery: canonicalInput?.delivery ?? "queue",
+            status: canonicalInput?.state ?? "admitted",
+          });
+        } else {
+          // daemon_ready may prompt the UI to submit while lease takeover is
+          // still normalizing the crashed generation. Requeue that fresh wire
+          // command behind the exact recovered ID rather than letting it become
+          // the owner of an older durable inbox head.
+          commands.enqueue({ ...command });
+        }
+        continue;
+      }
       if (entry.turnActive) {
         if (canonicalInput) {
           // This is a transport retry of an input the active Session already
@@ -1872,25 +2498,80 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
           tagEmit(command.sessionId, {
             type: "input_replayed",
             inputId,
-            settled: canonicalInput.state === "consumed" || canonicalInput.state === "cancelled",
+            settled: false,
             delivery: canonicalInput.delivery,
+            status: canonicalInput.state,
           });
           continue;
         }
         // A send mid-turn is the same durable steering path.
+        if (entry.cancelRequested) {
+          tagEmit(command.sessionId, {
+            type: "input_rejected",
+            inputId,
+            reason: "turn_cancelling",
+            retryable: true,
+          });
+          continue;
+        }
+        if (entry.steeringPhase === "preparing") {
+          bufferPreparingSteer(entry, command.sessionId, goal.trim(), inputId);
+          continue;
+        }
+        if (entry.steeringPhase === "settling") {
+          admitSteer(entry, command.sessionId, goal.trim(), inputId);
+          continue;
+        }
         admitSteer(entry, command.sessionId, goal.trim(), inputId);
         continue;
       }
+      const successorHandoff = isSuccessorHandoff
+        ? entry.successorHandoff
+        : undefined;
+      // Deterministic fault window for the exact handoff regression. Production
+      // never waits here; the hook only makes the otherwise tiny out-of-band
+      // Stop interval reproducible in the daemon integration suite.
+      const testSuccessorHandoffWindowMs = Number(process.env.ARES_TEST_DAEMON_SUCCESSOR_HANDOFF_WINDOW_MS ?? 0);
+      if (
+        successorHandoff &&
+        Number.isFinite(testSuccessorHandoffWindowMs) &&
+        testSuccessorHandoffWindowMs > 0
+      ) {
+        const deadline = Date.now() + Math.min(10_000, Math.floor(testSuccessorHandoffWindowMs));
+        while (!successorHandoff.cancelRequested && Date.now() < deadline) {
+          await new Promise<void>((resolve) => setTimeout(resolve, 5));
+        }
+      }
+      const inheritedHandoffCancellation = successorHandoff?.cancelRequested === true;
       const inputDelivery = canonicalInput?.delivery ?? (idleSteer ? "steer" : "queue");
       entry.turnActive = true;
+      entry.activeInputId = inputId;
+      entry.cancelRequested = inheritedHandoffCancellation;
+      if (successorHandoff) entry.successorHandoff = undefined;
+      entry.steeringPhase = "preparing";
+      entry.activeToolIds.clear();
       activeTurns++;
       void (async () => {
+        const ownerCancellationPending = (): boolean =>
+          entry.cancelRequested && entry.activeInputId === inputId;
+        // Deterministic fault window for the daemon regression suite. It is
+        // inert unless explicitly enabled, and wakes as soon as Stop binds to
+        // this exact pre-admission owner rather than delaying cancellation.
+        const testPreAdmissionWindowMs = Number(process.env.ARES_TEST_DAEMON_PRE_ADMISSION_WINDOW_MS ?? 0);
+        if (Number.isFinite(testPreAdmissionWindowMs) && testPreAdmissionWindowMs > 0) {
+          const deadline = Date.now() + Math.min(10_000, Math.floor(testPreAdmissionWindowMs));
+          while (!ownerCancellationPending() && Date.now() < deadline) {
+            await new Promise<void>((resolve) => setTimeout(resolve, 5));
+          }
+        }
         // Auto routing is STICKY (S2): a model OWNS the conversation until the
         // task domain (lane) actually changes. No per-turn flip-flop and no
         // mid-conversation model swap — context and the prompt cache stay
         // coherent, so you never get quality/personality whiplash per message.
         try {
+          if (ownerCancellationPending()) throw new Error("owner cancelled before optional routing");
           const settings = await loadUiSettings();
+          if (ownerCancellationPending()) throw new Error("owner cancelled during optional routing");
           const recentGoals = entry.live.session
             .history()
             .filter((message) => message.role === "user" && !message.content.some((block) => block.type === "tool_result"))
@@ -1901,11 +2582,11 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
           // kept classifying a fresh chat message as "coding", so the route
           // never flipped back. History now only breaks ties for short
           // follow-ups ("yes do it") that carry no lane signal of their own.
-          const goalLane = classifyLane(goal);
+          const goalLane = classifyLane(semanticGoal);
           const lane = goalLane !== "chat"
             ? goalLane
-            : goal.trim().split(/\s+/u).length < 8
-              ? classifyLane([...recentGoals, goal].join("\n"))
+            : semanticGoal.trim().split(/\s+/u).length < 8
+              ? classifyLane([...recentGoals, semanticGoal].join("\n"))
               : "chat";
           let model = entry.live.selection.model;
           let providerName = providerFamilyForSelection(entry.live.selection);
@@ -1924,8 +2605,11 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
             // for the lane. Otherwise the current model keeps the conversation.
             if (assigned?.family && assigned.model && !onAssigned && !isProviderDead(assigned.family) && (laneChanged || firstTurn || currentDead)) {
               try {
+                if (ownerCancellationPending()) throw new Error("owner cancelled before route selection");
                 const sel = await selectProvider(new Map([["provider", assigned.family], ["model", assigned.model]]));
+                if (ownerCancellationPending()) throw new Error("owner cancelled during route selection");
                 await preflightProviderSelection(sel);
+                if (ownerCancellationPending()) throw new Error("owner cancelled during provider preflight");
                 await entry.live.session.setProvider(sel.provider, sel.model, {
                   contextBudgetTokens: chatContextBudget(sel),
                   summarizeSpan: makeSpanSummarizer(sel, (usage) =>
@@ -1944,9 +2628,11 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
             } else {
               source = "sticky"; // staying on the model that already owns this conversation
             }
-            entry.lane = lane;
+            if (!ownerCancellationPending()) entry.lane = lane;
           }
-          tagEmit(command.sessionId, { type: "route_resolved", model, provider: providerName, lane, source });
+          if (!ownerCancellationPending()) {
+            tagEmit(command.sessionId, { type: "route_resolved", model, provider: providerName, lane, source });
+          }
         } catch {
           // best-effort — never block a turn on attribution
         }
@@ -1955,14 +2641,18 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
         let revertSelection: ProviderSelection | null = null;
         let escalatedSelection: ProviderSelection | null = null;
         try {
-          await prepareUserTurn(entry.live, goal);
+          if (!ownerCancellationPending()) {
+            await prepareUserTurn(entry.live, semanticGoal);
+          }
           // Persona triggers. Runs BEFORE the prompt is sent so an "auto"
           // persona is worn for the very turn that summoned it. It never
           // overrides a persona already in play, and it always emits an event —
           // the owner sees the switch (and can revert) rather than wondering why
           // the tone changed.
-          const autoPersona = await personaForMessage(entry.live, goal, (payload) => tagEmit(sid, payload), entry.personaGate).catch(() => null);
-          if (autoPersona) {
+          const autoPersona = ownerCancellationPending()
+            ? null
+            : await personaForMessage(entry.live, semanticGoal, (payload) => tagEmit(sid, payload), entry.personaGate).catch(() => null);
+          if (autoPersona && !ownerCancellationPending()) {
             entry.live.queueSystemReminder(
               `You are now wearing the ${autoPersona.label} persona (matched from the owner's message). Open your reply by greeting them briefly in that persona's voice — one or two sentences — so they know who they're talking to, then get to work. If they ask you to drop it, call Persona with action:"release".`,
               "instructions",
@@ -1981,10 +2671,10 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
           const turnContent = canonicalTurnContent ?? await contentFromUserInput(goal, entry.live.context.workspace);
           if (voiceMode && !canonicalTurnContent) turnContent.unshift({ type: "system_reminder", text: "<voice-mode/>" });
           const hasImages = turnContent.some((block) => block.type === "image");
-          if (hasImages && !modelLikelyHasVision(entry.live.selection.model)) {
+          if (!ownerCancellationPending() && hasImages && !modelLikelyHasVision(entry.live.selection.model)) {
             const pinned = entry.live.selection;
             const visionSel = await pickVisionFallback(pinned, liveDeadProviders()).catch(() => null);
-            if (visionSel) {
+            if (visionSel && !ownerCancellationPending()) {
               await entry.live.session.setProvider(visionSel.provider, visionSel.model, {
                 contextBudgetTokens: chatContextBudget(visionSel),
                 summarizeSpan: makeSpanSummarizer(visionSel, (usage) =>
@@ -2011,11 +2701,17 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
           // tool_start. Turn-scoped (not per-generator) because a steer can
           // interrupt between the two halves of one tool call.
           const toolNamesById = new Map<string, string>();
+          let promotedSteerApplied = false;
           const streamOnce = async (gen: AsyncGenerator<unknown>) => {
             let eventCount = 0;
             for await (const event of gen) {
               eventCount++;
               const ev = event as { type: string; status?: "completed" | "interrupted" | "failed"; error?: { code?: string; message?: string }; touchedFiles?: string[]; text?: string; id?: string; name?: string; output?: unknown };
+              trackSteeringBoundary(entry, ev);
+              if (ev.type === "turn_start" && inputDelivery === "steer" && !promotedSteerApplied) {
+                promotedSteerApplied = true;
+                tagEmit(sid, { type: "steer_applied", inputId, status: "claimed" });
+              }
               if (ev.type === "tool_start" && ev.id && ev.name) toolNamesById.set(ev.id, ev.name);
               // Persona adopt/release: the tool itself only validates and echoes
               // (it has no session handle), so the daemon is what actually swaps
@@ -2038,14 +2734,32 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
             }
             return eventCount;
           };
-          const initialEventCount = await streamOnce(
-            entry.live.session.sendContent(turnContent, { inputId, delivery: inputDelivery }),
-          );
+          let ownerAdmitted = false;
+          const unsubscribeOwnerAdmission = entry.live.session.observeEvents((event) => {
+            if (ownerAdmitted || event.type !== "input_admitted" || event.inputId !== inputId) return;
+            ownerAdmitted = true;
+            // Session reserves the owner's FIFO ticket in the same continuation
+            // immediately after this observer. Flushing here cannot overtake it:
+            // each buffered steer begins on a later microtask.
+            queueMicrotask(() => flushPreparingSteers(entry));
+          });
+          let initialEventCount: number;
+          try {
+            initialEventCount = await streamOnce(
+              entry.live.session.sendContent(turnContent, {
+                inputId,
+                delivery: inputDelivery,
+                recoverExistingInput: entry.startupRecoveryInputId === inputId,
+              }),
+            );
+          } finally {
+            unsubscribeOwnerAdmission();
+          }
           if (initialEventCount === 0) {
             // The stable input already completed before a desktop/daemon retry.
             // Acknowledge it without calling the provider, re-running post-turn
             // learning, or leaving the restarted UI spinner busy forever.
-            tagEmit(sid, { type: "input_replayed", inputId, settled: true });
+            tagEmit(sid, { type: "input_replayed", inputId, settled: true, status: canonicalInput?.state ?? "consumed" });
             tagEmit(sid, {
               type: "turn_end",
               status: "completed",
@@ -2054,6 +2768,26 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
               durationMs: 0,
             });
             return;
+          }
+
+          // Let the integration suite deterministically submit a correction
+          // after the engine's terminal fence but before host settlement. This
+          // is inert in production and exercises the deferred-successor path,
+          // not the easier live-generation steering path.
+          if (
+            !successorHandoff &&
+            entry.settledSteerInputIds.size === 0 &&
+            Number.isFinite(testSuccessorHandoffWindowMs) &&
+            testSuccessorHandoffWindowMs > 0
+          ) {
+            const deadline = Date.now() + Math.min(10_000, Math.floor(testSuccessorHandoffWindowMs));
+            while (
+              entry.pendingSteerInputIds.size === 0 &&
+              entry.deferredSteers.size === 0 &&
+              Date.now() < deadline
+            ) {
+              await new Promise<void>((resolve) => setTimeout(resolve, 5));
+            }
           }
 
           // Self-healing fallback: if the turn died because the current provider
@@ -2127,11 +2861,12 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
           // A completed turn may have landed a commit — reflect it into the war
           // map. Fire-and-forget; reflection never delays or breaks the turn.
           if (turnState.status === "completed" && (entry.live.session.lastWorkStatus === "verified" || entry.live.session.lastWorkStatus === "not_applicable")) {
-            void reflectAfterTurn(goal).catch(() => {});
+            void reflectAfterTurn(semanticGoal).catch(() => {});
             // Learn from the conversation too — durable facts/preferences → memory.
             void reflectConversationAfterTurn(entry, sid).catch(() => {});
           }
         } catch (err) {
+          turnState.status = "failed";
           tagEmit(command.sessionId, { type: "error", error: { code: "turn_throw", message: err instanceof Error ? err.message : String(err), retriable: false } });
           tagEmit(command.sessionId, { type: "turn_end", status: "failed", usage: {}, durationMs: 0 });
         } finally {
@@ -2153,8 +2888,137 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
               // keep the vision model rather than kill the session
             }
           }
+          // Core deliberately requeues failed inputs so explicit resumeTurn()
+          // remains possible for non-daemon hosts. This daemon has already
+          // exhausted its live retry/failover policy and is about to unlock the
+          // Desktop, so leaving that owner admitted would strand every later
+          // queue input behind a row with no runner. Make the explicit failed
+          // boundary terminal here; canonical messages/effects remain in the
+          // ledger and a fresh user message can continue from them safely.
+          let settlementRecoveryScheduled = false;
+          if (turnState.status === "failed") {
+            const kernel = await openWorkspaceSessionKernel(entry.live.context.workspace);
+            const failedOwner = kernel.getInput(inputId);
+            if (failedOwner?.state === "admitted" || failedOwner?.state === "claimed") {
+              try {
+                kernel.cancelInput(inputId, {
+                  sessionId: entry.live.session.meta.id,
+                  ...(failedOwner.state === "claimed" && failedOwner.claimedGeneration !== null
+                    ? { expectedGeneration: failedOwner.claimedGeneration }
+                    : {}),
+                  reason: {
+                    code: "DAEMON_TURN_FAILED",
+                    message: "The hosted turn exhausted retry/failover and reached an explicit failed boundary",
+                  },
+                });
+              } catch (settlementError) {
+                // Never unlock over an unowned queue head. Rebind the exact ID
+                // to the ordinary recovery pipeline; the next wrapper either
+                // settles it or keeps the UI truthfully busy.
+                settlementRecoveryScheduled = true;
+                entry.startupRecoveryInputId = inputId;
+                commands.enqueue({ type: "send", goal, sessionId: command.sessionId, inputId });
+                tagEmit(command.sessionId, {
+                  type: "input_settlement_retry",
+                  inputId,
+                  error: settlementError instanceof Error ? settlementError.message : String(settlementError),
+                });
+              }
+            }
+          }
+          // Preparation can fail before the owner input reaches its SQLite
+          // admission fence. Corrections buffered behind that fence must return
+          // to their exact drafts instead of surviving as invisible memory.
+          for (const [bufferedInputId, buffered] of entry.preparingSteers) {
+            tagEmit(buffered.sessionId, {
+              type: "steer_rejected",
+              inputId: bufferedInputId,
+              reason: "owner_not_admitted",
+              retryable: true,
+              error: "the active turn ended before its input admission boundary",
+            });
+          }
+          entry.preparingSteers.clear();
+          // Admission tasks never own a run lease. Drain only their parse +
+          // SQLite routing fences, then decide synchronously which corrections
+          // the owner consumed and which must re-enter the ordinary turn runner.
+          while (entry.pendingSteerTasks.size > 0) {
+            await Promise.allSettled([...entry.pendingSteerTasks.values()]);
+          }
+          const deferredCommands: Array<{ text: string; sessionId?: string; inputId: string }> = [];
+          if (entry.deferredSteers.size > 0) {
+            const kernel = await openWorkspaceSessionKernel(entry.live.context.workspace);
+            let nextDeferredChosen = false;
+            for (const [deferredInputId, deferred] of entry.deferredSteers) {
+              const state = kernel.getInput(deferredInputId)?.state;
+              if (state === "consumed" || state === "cancelled") {
+                announceSteerTerminal(entry, deferred.sessionId, deferredInputId, state);
+                entry.deferredSteers.delete(deferredInputId);
+              } else if (state === "admitted" || state === "claimed") {
+                // The daemon runner itself is single-owner. Queue only the first
+                // canonical correction now; later rows remain ordered in this
+                // map and the promoted turn's own finally schedules the next.
+                if (!nextDeferredChosen) {
+                  nextDeferredChosen = true;
+                  deferredCommands.push({ ...deferred, inputId: deferredInputId });
+                  entry.deferredSteers.delete(deferredInputId);
+                }
+              } else {
+                tagEmit(deferred.sessionId, {
+                  type: "steer_epilogue_warning",
+                  inputId: deferredInputId,
+                  status: state ?? "missing",
+                  retryable: true,
+                  error: "durable steer could not be found at owner settlement",
+                });
+                entry.deferredSteers.delete(deferredInputId);
+              }
+            }
+          }
+          const completedStartupRecovery = entry.startupRecoveryInputId === inputId;
+          const startupRecoveryWasCancelled = completedStartupRecovery && entry.startupRecoveryCancelRequested;
+          const cancelledInputId = entry.cancelRequested
+            ? entry.activeInputId
+            : startupRecoveryWasCancelled
+              ? inputId
+              : undefined;
+          const deferredSuccessor = deferredCommands[0];
+          if (deferredSuccessor) {
+            entry.successorHandoff = {
+              inputId: deferredSuccessor.inputId,
+              sessionId: deferredSuccessor.sessionId,
+              cancelRequested: false,
+            };
+          }
           entry.turnActive = false;
+          entry.activeInputId = undefined;
+          entry.cancelRequested = false;
+          entry.steeringPhase = "idle";
+          entry.activeToolIds.clear();
           activeTurns--;
+          if (cancelledInputId) {
+            tagEmit(command.sessionId, { type: "interrupt_settled", inputId: cancelledInputId });
+          }
+          if (completedStartupRecovery && !settlementRecoveryScheduled) {
+            entry.startupRecoveryInputId = undefined;
+            entry.startupRecoveryCancelRequested = false;
+          }
+          // Same command path as a fresh owner turn: routing, vision escalation,
+          // persona, recall, failover, verification, and journaling all run.
+          for (const deferred of deferredCommands) {
+            commands.enqueue({
+              type: "send",
+              goal: deferred.text,
+              sessionId: deferred.sessionId,
+              inputId: deferred.inputId,
+            });
+          }
+          await scheduleNextStartupRecovery(entry);
+          tagEmit(command.sessionId, {
+            type: "turn_settled",
+            inputId,
+            continuing: settlementRecoveryScheduled || deferredCommands.length > 0 || Boolean(entry.startupRecoveryInputId),
+          });
         }
       })();
     }

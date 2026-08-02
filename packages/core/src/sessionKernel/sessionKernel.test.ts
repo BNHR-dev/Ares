@@ -4,6 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import { projectMessagesFromKernel } from "../session.js";
 import {
   IdempotencyConflictError,
   InvalidStateTransitionError,
@@ -314,6 +315,83 @@ test("admission sequence is deterministic and explicit claims preserve caller ow
   store.close();
 });
 
+test("generation-bound cancellation is terminal and release never requeues the claim", () => {
+  const clock = testClock();
+  const store = inMemoryStore(clock);
+  store.createSession({ id: "cancelled-claim" });
+  store.admitInput({
+    id: "cancel-me",
+    sessionId: "cancelled-claim",
+    idempotencyKey: "cancel-me",
+    delivery: "queue",
+    payload: { content: [{ type: "text", text: "stop this" }] },
+  });
+  const fence = fenceOf(store.acquireRunnerLease("cancelled-claim", "desktop", 5_000));
+  store.claimInput(fence, "cancel-me");
+
+  clock.advance(25);
+  const cancelled = store.cancelInput("cancel-me", {
+    sessionId: "cancelled-claim",
+    fence,
+    reason: { code: "USER_CANCELLED" },
+  });
+  assert.equal(cancelled.state, "cancelled");
+  assert.equal(cancelled.claimedGeneration, null);
+  assert.equal(cancelled.claimedAtMs, null);
+  assert.equal(cancelled.consumedAtMs, clock.now());
+  assert.deepEqual(
+    store.cancelInput("cancel-me", { sessionId: "cancelled-claim", fence }),
+    cancelled,
+    "duplicate Stop returns the one terminal record",
+  );
+
+  store.releaseRunnerLease(fence, {
+    executionState: "interrupted",
+    workOutcome: "not_applicable",
+  });
+  assert.equal(store.getInput("cancel-me")?.state, "cancelled");
+  assert.equal(store.listInputs("cancelled-claim", "admitted").length, 0);
+  const events = store.listEvents("cancelled-claim");
+  assert.equal(events.filter((event) => event.type === "input.cancelled").length, 1);
+  assert.equal(events.filter((event) => event.type === "input.requeued").length, 0);
+  assert.equal(store.requireSession("cancelled-claim").executionState, "interrupted");
+  store.close();
+});
+
+test("control-plane Stop can cancel an expired claim without touching a replacement generation", () => {
+  const clock = testClock();
+  const store = inMemoryStore(clock);
+  store.createSession({ id: "expired-stop" });
+  store.admitInput({
+    id: "expired-input",
+    sessionId: "expired-stop",
+    idempotencyKey: "expired-input",
+    delivery: "queue",
+    payload: { content: [{ type: "text", text: "cancel across lease expiry" }] },
+  });
+  const expired = store.acquireRunnerLease("expired-stop", "old-runner", 250);
+  store.claimInput(fenceOf(expired), "expired-input");
+  clock.advance(251);
+
+  assert.equal(
+    store.cancelInput("expired-input", {
+      sessionId: "expired-stop",
+      expectedGeneration: expired.generation,
+      reason: { code: "USER_CANCELLED" },
+    }).state,
+    "cancelled",
+  );
+  const replacement = store.acquireRunnerLease("expired-stop", "replacement", 250);
+  assert.equal(replacement.generation, expired.generation + 1);
+  assert.equal(store.getInput("expired-input")?.state, "cancelled");
+  assert.equal(store.claimNextInput(fenceOf(replacement)), null);
+  store.releaseRunnerLease(fenceOf(replacement), {
+    executionState: "idle",
+    workOutcome: "not_applicable",
+  });
+  store.close();
+});
+
 test("detached input delivery atomically consumes once or remains runnable", () => {
   const store = inMemoryStore();
   store.createSession({ id: "detached-result" });
@@ -451,6 +529,58 @@ test("tool transitions reject illegal and stale optimistic updates", () => {
   assert.equal(tool.verificationState, "verified");
   assert.throws(() => store.setToolVerification(fence, tool.id, "blocked"), InvalidStateTransitionError);
   store.releaseRunnerLease(fence, { executionState: "completed", workOutcome: "verified" });
+  store.close();
+});
+
+test("restart projection normalizes complete parallel tool results into assistant tool_use order", () => {
+  const store = inMemoryStore();
+  const sessionId = "ordered-parallel-results";
+  store.createSession({ id: sessionId });
+  const fence = fenceOf(store.acquireRunnerLease(sessionId, "runner", 5_000));
+
+  store.appendMessage(fence, {
+    id: "assistant-tools",
+    role: "assistant",
+    parts: [
+      { type: "tool_use", data: { type: "tool_use", id: "use-a", name: "ReadA", input: {} } },
+      { type: "tool_use", data: { type: "tool_use", id: "use-b", name: "ReadB", input: {} } },
+    ],
+  });
+  for (const [id, name] of [["use-a", "ReadA"], ["use-b", "ReadB"]] as const) {
+    let run = store.beginToolRun(fence, {
+      id: `run-${id}`,
+      callKey: `${fence.generation}:${id}`,
+      toolName: name,
+      arguments: {},
+      effectKind: "read-only",
+    });
+    run = store.transitionToolRun(fence, run.id, "executing");
+    store.transitionToolRun(fence, run.id, "succeeded", { result: { id } });
+  }
+
+  // Parallel completion order is intentionally the reverse of proposal order.
+  store.appendMessage(fence, {
+    id: "tool-b",
+    role: "tool",
+    parts: [{ type: "tool_result", data: { type: "tool_result", tool_use_id: "use-b", content: "B" } }],
+  });
+  store.appendMessage(fence, {
+    id: "tool-a",
+    role: "tool",
+    parts: [{ type: "tool_result", data: { type: "tool_result", tool_use_id: "use-a", content: "A" } }],
+  });
+
+  const projection = projectMessagesFromKernel(store, sessionId);
+  const resultMessage = projection.find((message) =>
+    message.role === "user" && message.content.some((block) => block.type === "tool_result"),
+  );
+  assert.deepEqual(
+    resultMessage?.content
+      .filter((block) => block.type === "tool_result")
+      .map((block) => block.tool_use_id),
+    ["use-a", "use-b"],
+  );
+  store.releaseRunnerLease(fence, { executionState: "completed", workOutcome: "not_applicable" });
   store.close();
 });
 

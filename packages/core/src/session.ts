@@ -7,7 +7,7 @@
 //
 // Full DAG fork/diff/rollback come in M4; M1 provides linear rollout.
 
-import { mkdir, appendFile, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, appendFile, open, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import { createInterface } from "node:readline";
 import { createHash, randomUUID } from "node:crypto";
@@ -40,7 +40,7 @@ import { createWorkspaceCheckpoint, diffWorkspaceCheckpointUnified, isUnsnapshot
 import { FrictionRecorder } from "./frictionLog.js";
 import { WorkspaceMutationService } from "./workspaceMutation.js";
 import { planArtifactRelativePath, renderApprovedPlanBuildHandoff, writePlanArtifact } from "./planArtifact.js";
-import { PlanConflictError } from "./sessionKernel/errors.js";
+import { PlanConflictError, StaleGenerationError } from "./sessionKernel/errors.js";
 import { RunLeaseCoordinator, type CoordinatedRunLease } from "./sessionKernel/coordinator.js";
 import { openWorkspaceSessionKernel, workspaceSessionKernelPath } from "./sessionKernel/workspace.js";
 import type { AdmittedInputRecord, ExecutionState, JsonValue, MessageRecord, PlanRevisionRecord, RunFence, SessionKernelStore, SessionRecord, WorkOutcome } from "./sessionKernel/index.js";
@@ -240,8 +240,11 @@ export interface SessionOptions {
   fileReadStamps?: NonNullable<QueryEngineConfig["fileReadStamps"]>;
   /** See QueryEngineConfig.onHistoryTrimmed — read-stamp invalidation on trim. */
   onHistoryTrimmed?: (dropped: readonly Message[]) => void;
+  /** See QueryEngineConfig.environmentArtifactSignals — supplied by the host's
+   * live, extensible environment-provider registry. */
+  environmentArtifactSignals?: QueryEngineConfig["environmentArtifactSignals"];
   /** See QueryEngineConfig.summarizeSpan — smart compaction summarizer. */
-  summarizeSpan?: (messages: readonly Message[]) => Promise<string>;
+  summarizeSpan?: QueryEngineConfig["summarizeSpan"];
   /** See QueryEngineConfig.compactionThresholdTokens. */
   compactionThresholdTokens?: number;
   /** Hash/version manifest for every host-composed context source. Captured in
@@ -262,6 +265,11 @@ export interface SessionOptions {
   /** Lease renewal cadence. Defaults to ARES_SESSION_LEASE_HEARTBEAT_MS or one
    * third of TTL; clamped to 50ms..min(60s, TTL/3). */
   sessionLeaseHeartbeatMs?: number;
+  /** Run pre-existing durable inputs from a detached constructor task. This is
+   * enabled by default for standalone Session hosts. Evented hosts such as the
+   * desktop daemon disable it and recover through their ordinary visible send
+   * pipeline after transport observers are ready. */
+  detachedStartupRecovery?: boolean;
 }
 
 export class Session {
@@ -294,6 +302,12 @@ export class Session {
   private kernelFence: RunFence | null = null;
   private kernelLease: CoordinatedRunLease | null = null;
   private readonly kernelToolRuns = new Map<string, string>();
+  /** Durable identity of the request currently owning provider/tool execution.
+   * Stop is bound to this id (and, for kernel runs, its generation fence). */
+  private activeInputId: string | null = null;
+  /** Exact input ids cancelled before admission/provider arming. Unlike the old
+   * engine-wide pending bit, these requests can never affect a later input. */
+  private readonly pendingInputCancellations = new Set<string>();
   private startupRecoveryPromise: Promise<void> = Promise.resolve();
   private startupRecoveryError: unknown;
   /** Work truth from the most recent turn, used by post-turn learning. */
@@ -460,9 +474,11 @@ export class Session {
         fileReadStamps: opts.fileReadStamps ?? new Map(),
         repositoryInstructions,
         workflowMode: () => this.kernel?.getSession(sessionId)?.workflowMode ?? "build",
+        environmentArtifactSignals: opts.environmentArtifactSignals,
         onHistoryTrimmed: opts.onHistoryTrimmed,
         summarizeSpan: opts.summarizeSpan,
         compactionThresholdTokens: opts.compactionThresholdTokens,
+        includeCompactionProjectionInEvents: !this.kernel,
         beforeToolUseCheckpoint: async ({ toolUseId, toolName, targetFiles }) => {
           // A home-directory (or root) workspace is unsnapshotable: hashing the
           // user's entire digital life per Write is minutes of dead time and a
@@ -490,7 +506,7 @@ export class Session {
     if (opts.initialTodos) this.engine.hydrateTodos(opts.initialTodos);
     if (opts.initialSeq) this.seq = opts.initialSeq;
     if (opts.sessionMeta) this.metaWritten = true;
-    this.scheduleStartupOrphanDrain();
+    if (opts.detachedStartupRecovery !== false) this.scheduleStartupOrphanDrain();
   }
 
   /** Change the reasoning dial mid-session — applies to the next turn. */
@@ -567,9 +583,68 @@ export class Session {
     await this.flush();
   }
 
-  /** Stop the in-flight turn; the session stays alive for the next message. */
-  interrupt(): void {
-    this.engine.interrupt();
+  /** Stop exactly one in-flight/admitted request. Returns true only when a live
+   * or not-yet-admitted input accepted cancellation. Idle and duplicate Stop
+   * calls are no-ops and can never poison the next turn. */
+  interrupt(inputId?: string): boolean {
+    const targetInputId = inputId || this.activeInputId;
+    if (!targetInputId) return false;
+
+    if (this.kernel) {
+      const input = this.kernel.getInput(targetInputId);
+      if (input) {
+        if (input.sessionId !== this.meta.id) return false;
+        if (input.state === "cancelled" || input.state === "consumed") return false;
+        if (input.state === "claimed") {
+          const fence = this.kernelFence;
+          if (
+            !fence ||
+            this.activeInputId !== targetInputId ||
+            input.claimedGeneration !== fence.generation
+          ) {
+            // A steer claimed by the active owner is already past its durable
+            // acceptance boundary: its stable canonical message may already be
+            // installed in provider history. Cancelling only the inbox row at
+            // that point would leave a "cancelled" correction that still
+            // affects recovery, or make the acknowledgement throw and fail the
+            // owner generation. Queued/admitted steers remain cancellable; once
+            // claimed they settle exactly once with their owner.
+            return false;
+          }
+          try {
+            this.kernel.cancelInput(targetInputId, {
+              sessionId: this.meta.id,
+              expectedGeneration: fence.generation,
+              reason: { code: "USER_CANCELLED", message: "The user stopped this turn" },
+            });
+          } catch (error) {
+            if (!(error instanceof StaleGenerationError)) throw error;
+            // A replacement generation won the CAS. Revoke this stale host's
+            // provider/tool signal, but never cancel the replacement's claim.
+            this.engine.interrupt();
+            return false;
+          }
+        } else {
+          this.kernel.cancelInput(targetInputId, {
+            sessionId: this.meta.id,
+            reason: { code: "USER_CANCELLED", message: "The user stopped this turn before execution" },
+          });
+        }
+        this.pendingInputCancellations.delete(targetInputId);
+      } else {
+        // The daemon can own a request id while it is still routing/preparing
+        // content. Bind Stop to that exact future admission rather than arming a
+        // session-global interrupt that could hit the following message.
+        if (this.pendingInputCancellations.has(targetInputId)) return false;
+        this.pendingInputCancellations.add(targetInputId);
+      }
+    } else {
+      if (this.pendingInputCancellations.has(targetInputId)) return false;
+      this.pendingInputCancellations.add(targetInputId);
+    }
+
+    if (this.activeInputId === targetInputId) this.engine.interrupt();
+    return true;
   }
 
   /** Wait for any inputs that were already pending when this Session host was
@@ -578,6 +653,64 @@ export class Session {
   async waitForStartupRecovery(): Promise<void> {
     await this.startupRecoveryPromise;
     if (this.startupRecoveryError !== undefined) throw this.startupRecoveryError;
+  }
+
+  /** Snapshot the exact non-control inputs a host-managed recovery will own.
+   * This is intentionally synchronous so an evented host can expose a Stop
+   * target before waiting for a crashed runner lease to expire. */
+  pendingHostManagedStartupRecovery(): AdmittedInputRecord[] {
+    if (!this.kernel) return [];
+    return this.kernel
+      .listInputs(this.meta.id)
+      .filter((input) =>
+        (input.state === "admitted" || input.state === "claimed") && !isAttachedControlInput(input),
+      );
+  }
+
+  /** Normalize a crashed runner generation without executing its inputs.
+   *
+   * Evented hosts call this only after their command transport and observers
+   * are ready, then feed the returned canonical IDs through their normal send
+   * path. Acquiring the replacement fence performs the same expired-lease and
+   * unknown-effect reconciliation as an ordinary run; releasing it immediately
+   * leaves every non-control input admitted and provider execution untouched. */
+  async prepareHostManagedStartupRecovery(): Promise<AdmittedInputRecord[]> {
+    if (!this.kernel) return [];
+    if (this.opts.detachedStartupRecovery !== false) {
+      throw new Error("host-managed startup recovery requires detachedStartupRecovery: false");
+    }
+    const pending = () => this.pendingHostManagedStartupRecovery();
+    if (pending().length === 0) return [];
+
+    // Reserve the process-local runner while the durable coordinator waits for
+    // a crashed owner's lease to expire. No caller in this Session can overtake
+    // the recovery fence and block forever behind a still-claimed input.
+    const release = await this.acquireRunLease();
+    let executionState: Exclude<ExecutionState, "running"> = "idle";
+    let workOutcome: WorkOutcome = "not_applicable";
+    let kernelError: JsonValue | null = null;
+    try {
+      await this.ensureSessionDir();
+      await this.beginKernelRun();
+      return pending();
+    } catch (error) {
+      executionState = "failed";
+      workOutcome = "unverified";
+      kernelError = errorToKernelJson(error);
+      throw error;
+    } finally {
+      // beginKernelRun installs the fence before unknown-effect reconciliation;
+      // release it even when that reconciliation throws.
+      try {
+        if (this.kernelFence && this.kernelLease) {
+          this.finishKernelRun(executionState, workOutcome, kernelError);
+        }
+      } finally {
+        // Process-local FIFO release is unconditional even if durable/plan
+        // settlement itself throws.
+        release();
+      }
+    }
   }
 
   /** Append a user message and stream the turn. Events persist to rollout. */
@@ -592,26 +725,55 @@ export class Session {
       inputId?: string;
       delivery?: "queue" | "steer";
       source?: "user-input" | "work-item";
+      /** Stop after durable steer admission + live routing. The active engine
+       * claims the correction from its durable inbox; if the owner has already
+       * crossed its terminal fence, the host can later run the same input ID
+       * through its full ordinary preparation/routing pipeline. */
+      admitOnlySteer?: boolean;
+      /** Host-managed crash recovery for this exact pre-existing input. Lets an
+       * orphaned queue owner reclaim its generation ahead of later attached
+       * steers and rebuilds the canonical resume boundary before execution. */
+      recoverExistingInput?: boolean;
     } = {},
   ): AsyncGenerator<TurnEvent> {
+    const inputKey = admission.inputId ?? `input_${randomUUID()}`;
     // Legacy/non-kernel sessions retain their historical whole-call FIFO.
     // Kernel sessions admit first so an input is durable and observable even
     // while another turn owns provider/tool execution. They reserve admission
     // order synchronously, but wait for execution only after the audit barrier.
     let release: (() => void) | undefined;
     let runLeaseReservation: Promise<() => void> | undefined;
-    if (!this.kernel) release = await this.acquireRunLease();
+    let ownsActiveInput = false;
+    let ownsKernelRun = false;
+    let attemptedKernelRun = false;
+    if (!this.kernel) {
+      release = await this.acquireRunLease();
+      this.activeInputId = inputKey;
+      ownsActiveInput = true;
+    }
     let executionState: Exclude<ExecutionState, "running"> = "interrupted";
     let workOutcome: WorkOutcome = "unverified";
     let kernelError: JsonValue | null = null;
     try {
       await this.ensureSessionDir();
-      const inputKey = admission.inputId ?? `input_${randomUUID()}`;
       const delivery = admission.delivery ?? "queue";
       let userMessage: Message;
       let admittedInput: AdmittedInputRecord | null = null;
+      let restoreExistingInput = false;
+      if (admission.recoverExistingInput && !this.kernel) {
+        throw new Error("recoverExistingInput requires a durable session kernel");
+      }
 
       if (this.kernel) {
+        if (admission.recoverExistingInput) {
+          if (this.opts.detachedStartupRecovery !== false) {
+            throw new Error("recoverExistingInput requires host-managed startup recovery");
+          }
+          const existing = this.kernel.getInput(inputKey);
+          if (!existing || existing.sessionId !== this.meta.id) {
+            throw new Error(`startup recovery input ${inputKey} does not exist in this session`);
+          }
+        }
         const result = this.kernel.admitInput({
           id: inputKey,
           sessionId: this.meta.id,
@@ -627,6 +789,20 @@ export class Session {
             : { content }),
         });
         admittedInput = result.record;
+        if (admission.recoverExistingInput && result.inserted) {
+          throw new Error(`startup recovery input ${inputKey} did not already exist`);
+        }
+        restoreExistingInput = admission.recoverExistingInput === true && !result.inserted;
+        if (
+          this.pendingInputCancellations.delete(inputKey) &&
+          admittedInput.state !== "cancelled" &&
+          admittedInput.state !== "consumed"
+        ) {
+          admittedInput = this.kernel.cancelInput(inputKey, {
+            sessionId: this.meta.id,
+            reason: { code: "USER_CANCELLED", message: "The user stopped this turn before execution" },
+          });
+        }
         userMessage = messageForKernelInput(this.meta.id, admittedInput);
       } else {
         userMessage = this.engine.appendUserMessageContent(content);
@@ -647,13 +823,55 @@ export class Session {
       // execution. Do not WAIT for the ticket until the portable audit flushes.
       if (
         this.kernel &&
+        !admission.admitOnlySteer &&
         admittedInput?.state !== "consumed" &&
         admittedInput?.state !== "cancelled"
       ) {
         runLeaseReservation = this.acquireRunLease();
       }
+      // SQLite admission is the canonical crash-recoverable boundary. Route a
+      // live correction in this same synchronous continuation so the owner
+      // cannot launch a stale tool while the compatibility JSONL append is
+      // flushing. Publication still waits for that audit barrier below.
+      let routedSteer: Extract<TurnEvent, { type: "steer_routed" }> | null = null;
+      if (
+        this.kernel &&
+        delivery === "steer" &&
+        admittedInput &&
+        !isAttachedControlInput(admittedInput) &&
+        this.kernel.getInput(admittedInput.id)?.state === "admitted"
+      ) {
+        routedSteer = {
+          type: "steer_routed",
+          inputId: admittedInput.id,
+          disposition: this.engine.requestSteeringPreemption(),
+        };
+      }
       await this.flush();
+
+      // Steering is an in-band correction to the generation that is already
+      // running, not a second turn waiting behind it. QueryEngine already saw
+      // the canonical SQLite admission above; now that the portable audit is
+      // durable too, expose the exact synchronous routing decision to surfaces.
+      if (routedSteer) {
+        this.persistEvent(routedSteer);
+        this.notifyEvent(routedSteer);
+      }
+      // Admission-only callers never enter run settlement, even when this is an
+      // idempotent replay of a claimed/consumed/cancelled row. In particular,
+      // they cannot append a synthetic turn_end against the active owner's
+      // kernel fence or acquire/release any run lease.
+      if (admission.admitOnlySteer) return;
+
       if (!this.kernel) {
+        if (this.pendingInputCancellations.delete(inputKey)) {
+          executionState = "interrupted";
+          workOutcome = "not_applicable";
+          const terminal = immediateInterruptedTurnEnd();
+          await this.persistImmediateTurnEnd(terminal);
+          yield terminal;
+          return;
+        }
         for await (const event of this.streamAndPersist()) {
           if (event.type === "turn_end") {
             executionState = event.status;
@@ -666,7 +884,15 @@ export class Session {
 
       // Re-sending an idempotency key acknowledges the original admission but
       // never creates a second logical request after it has settled.
-      if (admittedInput?.state === "consumed" || admittedInput?.state === "cancelled") {
+      if (admittedInput?.state === "cancelled") {
+        executionState = "interrupted";
+        workOutcome = "not_applicable";
+        const terminal = immediateInterruptedTurnEnd();
+        await this.persistImmediateTurnEnd(terminal);
+        yield terminal;
+        return;
+      }
+      if (admittedInput?.state === "consumed") {
         executionState = "completed";
         workOutcome = this.kernel.getSession(this.meta.id)?.workOutcome ?? "not_applicable";
         return;
@@ -677,20 +903,50 @@ export class Session {
       // have settled while this caller waited behind its predecessor (for
       // example, a concurrent retry of the same idempotency key).
       const currentInput = this.kernel.getInput(admittedInput!.id);
-      if (currentInput?.state === "consumed" || currentInput?.state === "cancelled") {
+      if (currentInput?.state === "cancelled") {
+        executionState = "interrupted";
+        workOutcome = "not_applicable";
+        const terminal = immediateInterruptedTurnEnd();
+        await this.persistImmediateTurnEnd(terminal);
+        yield terminal;
+        return;
+      }
+      if (currentInput?.state === "consumed") {
         executionState = "completed";
         workOutcome = this.kernel.getSession(this.meta.id)?.workOutcome ?? "not_applicable";
         return;
       }
 
-      if (!(await this.waitUntilKernelInputHead(admittedInput!.id))) {
-        executionState = "completed";
-        workOutcome = this.kernel.getSession(this.meta.id)?.workOutcome ?? "not_applicable";
+      if (!(await this.waitUntilKernelInputHead(admittedInput!.id, restoreExistingInput))) {
+        const settled = this.kernel.getInput(admittedInput!.id);
+        if (settled?.state === "cancelled") {
+          executionState = "interrupted";
+          workOutcome = "not_applicable";
+          const terminal = immediateInterruptedTurnEnd();
+          await this.persistImmediateTurnEnd(terminal);
+          yield terminal;
+        } else {
+          executionState = "completed";
+          workOutcome = this.kernel.getSession(this.meta.id)?.workOutcome ?? "not_applicable";
+        }
         return;
       }
+      // beginKernelRun installs the durable lease/fence before effect
+      // reconciliation. Remember entry before awaiting so a reconciliation
+      // throw still releases that newly installed authority in finally.
+      attemptedKernelRun = true;
       const fence = await this.beginKernelRun();
+      ownsKernelRun = true;
       const claimable = this.kernel.getInput(admittedInput!.id);
-      if (claimable?.state === "consumed" || claimable?.state === "cancelled") {
+      if (claimable?.state === "cancelled") {
+        executionState = "interrupted";
+        workOutcome = "not_applicable";
+        const terminal = immediateInterruptedTurnEnd();
+        await this.persistImmediateTurnEnd(terminal);
+        yield terminal;
+        return;
+      }
+      if (claimable?.state === "consumed") {
         executionState = "completed";
         workOutcome = this.kernel.getSession(this.meta.id)?.workOutcome ?? "not_applicable";
         return;
@@ -700,25 +956,43 @@ export class Session {
       // can change local FIFO registration order, but must never let caller B
       // execute or stream caller A's request.
       const claimed = this.kernel.claimInput(fence, admittedInput!.id);
-      const canonicalProjection = projectMessagesFromKernel(this.kernel, this.meta.id);
-      if (canonicalProjection.length > 0) this.engine.hydrate(canonicalProjection);
-      const queuedMessage = messageForKernelInput(this.meta.id, claimed);
-      if (!this.engine.history().some((message) => message.id === queuedMessage.id)) {
-        this.engine.appendUserMessageContent(queuedMessage.content, {
-          id: queuedMessage.id,
-          createdAt: queuedMessage.createdAt,
-          metadata: queuedMessage.metadata,
-        });
+      this.activeInputId = claimed.id;
+      ownsActiveInput = true;
+      if (restoreExistingInput) {
+        this.restoreKernelResumeBoundary(fence, claimed);
+      } else {
+        const canonicalProjection = projectMessagesFromKernel(this.kernel, this.meta.id);
+        if (canonicalProjection.length > 0) this.engine.hydrate(canonicalProjection);
+        const queuedMessage = messageForKernelInput(this.meta.id, claimed);
+        if (!this.engine.history().some((message) => message.id === queuedMessage.id)) {
+          this.engine.appendUserMessageContent(queuedMessage.content, {
+            id: queuedMessage.id,
+            createdAt: queuedMessage.createdAt,
+            metadata: queuedMessage.metadata,
+          });
+        }
+        if (!this.kernel.getMessage(queuedMessage.id)) {
+          this.kernel.appendMessage(fence, {
+            id: queuedMessage.id,
+            inputId: claimed.id,
+            role: "user",
+            metadata: toKernelJson(queuedMessage.metadata ?? {}),
+            parts: queuedMessage.content.map((block) => ({ type: block.type, data: toKernelJson(block) })),
+            createdAtMs: protocolMessageCreatedAtMs(queuedMessage.createdAt),
+          });
+        }
       }
-      if (!this.kernel.getMessage(queuedMessage.id)) {
-        this.kernel.appendMessage(fence, {
-          id: queuedMessage.id,
-          inputId: claimed.id,
-          role: "user",
-          metadata: toKernelJson(queuedMessage.metadata ?? {}),
-          parts: queuedMessage.content.map((block) => ({ type: block.type, data: toKernelJson(block) })),
-          createdAtMs: protocolMessageCreatedAtMs(queuedMessage.createdAt),
-        });
+
+      // A Stop can land after the generation claims its input but before the
+      // engine generator arms its controller. The durable cancelled state is
+      // authoritative and prevents provider/tool execution in that narrow gap.
+      if (this.kernel.getInput(claimed.id)?.state === "cancelled") {
+        executionState = "interrupted";
+        workOutcome = "not_applicable";
+        const cancelled = immediateInterruptedTurnEnd();
+        await this.persistImmediateTurnEnd(cancelled);
+        yield cancelled;
+        return;
       }
 
       let terminal: Extract<TurnEvent, { type: "turn_end" }> | null = null;
@@ -727,10 +1001,12 @@ export class Session {
           terminal = event;
           executionState = event.status;
           workOutcome = event.workStatus ?? "not_applicable";
-          // Consume synchronously before exposing the terminal event. Most UI
+          // Settle synchronously before exposing the terminal event. Most UI
           // consumers stop at turn_end; requiring one more generator advance
-          // left completed work claimed and therefore runnable after release.
-          if (event.status === "completed") this.kernel.consumeInput(fence, claimed.id);
+          // left terminal work claimed and therefore runnable after release.
+          // Failed provider runs deliberately remain claimed here so lease
+          // release can requeue them for resume.
+          this.settleOwnedInputAtTerminal(fence, claimed.id, event);
         }
         yield event;
       }
@@ -741,14 +1017,22 @@ export class Session {
       kernelError = errorToKernelJson(error);
       throw error;
     } finally {
-      this.finishKernelRun(executionState, workOutcome, kernelError);
-      // A failed audit barrier still has a reserved FIFO ticket. Release it
-      // when its predecessor completes without delaying the admission failure
-      // or permanently wedging every later sender behind an abandoned ticket.
-      if (!release && runLeaseReservation) {
-        void runLeaseReservation.then((reservedRelease) => reservedRelease(), () => undefined);
+      if (ownsActiveInput && this.activeInputId === inputKey) this.activeInputId = null;
+      try {
+        if (ownsKernelRun || attemptedKernelRun) {
+          this.finishKernelRun(executionState, workOutcome, kernelError);
+        }
+      } finally {
+        // A failed audit barrier still has a reserved FIFO ticket. Release it
+        // when its predecessor completes without delaying the admission failure
+        // or permanently wedging every later sender behind an abandoned ticket.
+        // This local FIFO release is unconditional even if durable/plan
+        // settlement itself throws.
+        if (!release && runLeaseReservation) {
+          void runLeaseReservation.then((reservedRelease) => reservedRelease(), () => undefined);
+        }
+        release?.();
       }
-      release?.();
     }
   }
 
@@ -759,20 +1043,43 @@ export class Session {
    */
   async *resumeTurn(): AsyncGenerator<TurnEvent> {
     const release = await this.acquireRunLease();
+    let ownedInputId: string | null = null;
     let executionState: Exclude<ExecutionState, "running"> = "interrupted";
     let workOutcome: WorkOutcome = "unverified";
     let kernelError: JsonValue | null = null;
     try {
       await this.ensureSessionDir();
+      const resumeCandidateId = this.kernel
+        ?.listInputs(this.meta.id)
+        .find((input) => input.state === "admitted" && !isAttachedControlInput(input))
+        ?.id;
       const fence = this.kernel ? await this.beginKernelRun() : null;
       const claimed = fence ? this.kernel!.claimNextInput(fence) : null;
       if (fence && !claimed) {
-        executionState = "idle";
-        workOutcome = "not_applicable";
+        if (resumeCandidateId && this.kernel!.getInput(resumeCandidateId)?.state === "cancelled") {
+          executionState = "interrupted";
+          workOutcome = "not_applicable";
+          const cancelled = immediateInterruptedTurnEnd();
+          await this.persistImmediateTurnEnd(cancelled);
+          yield cancelled;
+        } else {
+          executionState = "idle";
+          workOutcome = "not_applicable";
+        }
         return;
       }
       if (claimed && fence) {
+        this.activeInputId = claimed.id;
+        ownedInputId = claimed.id;
         this.restoreKernelResumeBoundary(fence, claimed);
+        if (this.kernel!.getInput(claimed.id)?.state === "cancelled") {
+          executionState = "interrupted";
+          workOutcome = "not_applicable";
+          const cancelled = immediateInterruptedTurnEnd();
+          await this.persistImmediateTurnEnd(cancelled);
+          yield cancelled;
+          return;
+        }
       }
       let terminal: Extract<TurnEvent, { type: "turn_end" }> | null = null;
       for await (const event of this.streamAndPersist()) {
@@ -780,9 +1087,7 @@ export class Session {
           terminal = event;
           executionState = event.status;
           workOutcome = event.workStatus ?? "not_applicable";
-          if (claimed && fence && event.status === "completed") {
-            this.kernel!.consumeInput(fence, claimed.id);
-          }
+          if (claimed && fence) this.settleOwnedInputAtTerminal(fence, claimed.id, event);
         }
         yield event;
       }
@@ -793,8 +1098,12 @@ export class Session {
       kernelError = errorToKernelJson(error);
       throw error;
     } finally {
-      this.finishKernelRun(executionState, workOutcome, kernelError);
-      release();
+      if (ownedInputId && this.activeInputId === ownedInputId) this.activeInputId = null;
+      try {
+        this.finishKernelRun(executionState, workOutcome, kernelError);
+      } finally {
+        release();
+      }
     }
   }
 
@@ -1114,6 +1423,7 @@ export class Session {
       let workOutcome: WorkOutcome = "unverified";
       let kernelError: JsonValue | null = null;
       let fence: RunFence | null = null;
+      let ownsActiveInput = false;
       try {
         fence = await this.beginKernelRun();
         const current = this.kernel.getInput(inputId);
@@ -1130,8 +1440,16 @@ export class Session {
         }
 
         const claimed = this.kernel.claimInput(fence, inputId);
+        this.activeInputId = claimed.id;
+        ownsActiveInput = true;
         this.kernel.appendEvent(fence, "input.detached_recovery_started", toKernelJson({ inputId }));
         this.restoreKernelResumeBoundary(fence, claimed);
+        if (this.kernel.getInput(claimed.id)?.state === "cancelled") {
+          executionState = "interrupted";
+          workOutcome = "not_applicable";
+          await this.persistImmediateTurnEnd(immediateInterruptedTurnEnd());
+          continue;
+        }
         let terminal: Extract<TurnEvent, { type: "turn_end" }> | null = null;
         let outputMessageId: string | null = null;
         for await (const event of this.streamAndPersist()) {
@@ -1168,6 +1486,7 @@ export class Session {
         }
         throw error;
       } finally {
+        if (ownsActiveInput && this.activeInputId === inputId) this.activeInputId = null;
         this.finishKernelRun(executionState, workOutcome, kernelError);
       }
     }
@@ -1355,7 +1674,10 @@ export class Session {
   /** Caller-bound generators wait until their own durable admission reaches
    * the queue head. This preserves admission order across Session instances
    * and processes without ever streaming another caller's input. */
-  private async waitUntilKernelInputHead(inputId: string): Promise<boolean> {
+  private async waitUntilKernelInputHead(
+    inputId: string,
+    recoverExistingOwner = false,
+  ): Promise<boolean> {
     if (!this.kernel) return true;
     while (true) {
       const own = this.kernel.getInput(inputId);
@@ -1377,7 +1699,9 @@ export class Session {
       // Normal queue work yields to an admitted steer, then remains FIFO within
       // its own lane. Active-turn steers are usually consumed by the current
       // generation before their caller reaches this boundary.
-      const head = own.delivery === "steer"
+      const head = recoverExistingOwner && own.delivery === "queue"
+        ? runnablePending.find((input) => input.delivery === "queue")
+        : own.delivery === "steer"
         ? runnablePending.find((input) => input.delivery === "steer")
         : runnablePending.find((input) => input.delivery === "steer") ??
           runnablePending.find((input) => input.delivery === "queue");
@@ -1436,6 +1760,40 @@ export class Session {
       throw planError;
     }
     lease.release({ executionState, workOutcome, error });
+  }
+
+  /** Settle the exact input owned by one explicit terminal boundary.
+   *
+   * A completed turn is consumed. An interrupted turn is terminal too: Stop
+   * already cancelled its row, while permission denial and other engine-owned
+   * interruptions arrive here with the row still claimed and must be cancelled
+   * before releaseRunnerLease can requeue it ahead of the next user message.
+   * Failed turns intentionally remain claimed so lease release makes them
+   * resumable. Steering preemption never calls this with `interrupted`; it
+   * wakes the same QueryEngine turn and continues to a later terminal boundary.
+   */
+  private settleOwnedInputAtTerminal(
+    fence: RunFence,
+    inputId: string,
+    event: Extract<TurnEvent, { type: "turn_end" }>,
+  ): void {
+    if (!this.kernel) return;
+    const input = this.kernel.getInput(inputId);
+    if (input?.state !== "claimed") return;
+    if (event.status === "completed") {
+      this.kernel.consumeInput(fence, inputId);
+      return;
+    }
+    if (event.status === "interrupted") {
+      this.kernel.cancelInput(inputId, {
+        sessionId: this.meta.id,
+        fence,
+        reason: {
+          code: "TURN_INTERRUPTED",
+          message: "The active turn reached an explicit interrupted terminal boundary",
+        },
+      });
+    }
   }
 
   private async beginKernelTool(
@@ -1699,6 +2057,12 @@ export class Session {
           };
         }
 
+        // QueryEngine has already made its completion decision. Fence its
+        // terminal phase before persistence/yield so a steer admitted while the
+        // generator closes becomes the next FIFO input instead of a lost wake-up
+        // against the dead owner.
+        if (event.type === "turn_end") this.engine.markTurnTerminal();
+
         // SQLite is the canonical projection and is committed synchronously at
         // each settled boundary. JSONL below remains the readable audit stream.
         this.persistKernelEvent(event);
@@ -1738,11 +2102,25 @@ export class Session {
         }
       }
     } finally {
-      // The turn's generator is done (completed, returned, or the consumer broke
-      // out) — drop the engine's live abort controller so a Stop pressed before the
-      // next turn arms its own is honored rather than swallowed (interrupt leak fix).
+      // The turn's generator is done (completed, returned, or the consumer
+      // broke out). Drop its controller so later idle Stop calls cannot target a
+      // stale generation or leak into the next request.
       this.engine.markTurnEnded();
     }
+  }
+
+  /** Persist a terminal boundary for a request cancelled before QueryEngine
+   * starts streaming. This mirrors streamAndPersist's settlement tap so every
+   * observer, audit log, kernel generation, and friction record agrees. */
+  private async persistImmediateTurnEnd(
+    event: Extract<TurnEvent, { type: "turn_end" }>,
+  ): Promise<void> {
+    this.persistKernelEvent(event);
+    this.persistEvent(event);
+    this.notifyEvent(event);
+    this.lastWorkStatus = event.workStatus ?? "not_applicable";
+    this.friction.record(event);
+    await this.flush();
   }
 
   /** Read-only history snapshot. */
@@ -1784,7 +2162,14 @@ export class Session {
     const persistedEvent: TurnEvent =
       event.type === "turn_end"
         ? { ...event, provider: this.meta.provider.name, model: this.meta.provider.model }
-        : event;
+        : event.type === "compaction" && this.kernel
+          // SQLite is canonical for kernel-backed sessions and already stores
+          // the exact projection. Duplicating the entire message history into
+          // every JSONL audit event made microcompaction O(history × epochs) and
+          // accounted for 290 MiB in one two-hour session. Keep only the small
+          // audit facts here; legacy/kernel-less sessions retain the projection.
+          ? { ...event, messages: undefined }
+          : event;
     const entry: RolloutEntry = {
       ts: new Date().toISOString(),
       seq: this.seq++,
@@ -1820,6 +2205,28 @@ export class Session {
   private persistKernelEvent(event: TurnEvent): void {
     if (!this.kernel || !this.kernelFence) return;
     const fence = this.kernelFence;
+    if (event.type === "provider_attempt_superseded") {
+      // Provider deltas are disposable UI telemetry, but the decision to
+      // abandon an attempt for owner steering is part of canonical execution
+      // history. Together with the adjacent input.claimed/input.consumed rows,
+      // this proves restart never treated the obsolete draft as authoritative.
+      this.kernel.appendEvent(fence, "provider.attempt_superseded", toKernelJson({
+        attemptId: event.attemptId,
+        reason: event.reason,
+      }));
+      return;
+    }
+    if (event.type === "provider_attempt_effects_skipped") {
+      // message_done is already canonical in this case. Persist only the audit
+      // fact that these never-started proposals were paired and skipped; unlike
+      // provider.attempt_superseded, restart must retain the assistant Message.
+      this.kernel.appendEvent(fence, "provider.attempt_effects_skipped", toKernelJson({
+        attemptId: event.attemptId,
+        reason: event.reason,
+        toolUseIds: event.toolUseIds,
+      }));
+      return;
+    }
     if (event.type === "message_done") {
       const storedMessageId = kernelStoredMessageId(this.meta.id, event.message.id);
       if (!this.kernel.getMessage(storedMessageId)) {
@@ -1854,6 +2261,7 @@ export class Session {
           lastMessageOrdinal: storedMessages.at(-1)?.ordinal ?? 0,
         },
         tokenCount: event.tokensAfter,
+        coalesceLatest: event.method === "micro",
       });
       return;
     }
@@ -1968,6 +2376,16 @@ function errorToKernelJson(error: unknown): JsonValue {
   return { message: String(error) };
 }
 
+function immediateInterruptedTurnEnd(): Extract<TurnEvent, { type: "turn_end" }> {
+  return {
+    type: "turn_end",
+    status: "interrupted",
+    workStatus: "not_applicable",
+    usage: { inputTokens: 0, outputTokens: 0, modelCalls: 0 },
+    durationMs: 0,
+  };
+}
+
 function messageForKernelInput(sessionId: string, input: AdmittedInputRecord): Message {
   const payload = input.payload && typeof input.payload === "object" && !Array.isArray(input.payload)
     ? input.payload as Record<string, JsonValue>
@@ -1998,6 +2416,9 @@ export interface SessionSummary {
   updatedAt: string;
   eventCount: number;
   preview: string;
+  /** Persisted workflow mode so every client can render the real authority
+   * after restart instead of guessing from a transient tool card. */
+  workflowMode?: "plan" | "build";
   /** Owner-set custom name (meta.label). Falls back to the preview in the UI. */
   label?: string;
 }
@@ -2062,6 +2483,7 @@ export async function listSessions(workspace: string, limit = 20): Promise<Sessi
           updatedAt: updated?.mtime.toISOString() ?? meta.createdAt,
           eventCount: scan.eventCount,
           preview: scan.preview,
+          workflowMode: meta.workflowMode ?? "build",
           label: meta.label,
         };
       }),
@@ -2087,10 +2509,12 @@ export async function loadSessionSnapshot(
   // JSONL is only an audit sidecar once a canonical row exists. Resume must
   // remain available when that sidecar is missing or unreadable; legacy-only
   // sessions still require a readable rollout.
-  const eventsText = canonical
-    ? await readFile(eventsPath, "utf8").catch(() => "")
-    : await readOptionalFile(eventsPath);
-  const entries = parseRolloutEntries(eventsText);
+  // Canonical sessions reconstruct from SQLite. Parsing a legacy audit sidecar
+  // here used to load hundreds of megabytes (mostly duplicated compaction
+  // projections) merely to discover its last sequence number.
+  const entries = canonical
+    ? []
+    : parseRolloutEntries(await readOptionalFile(eventsPath));
 
   let meta: SessionMeta;
   let rawMessages: Message[];
@@ -2117,7 +2541,14 @@ export async function loadSessionSnapshot(
     eventCount = entries.length;
   }
   const replay = compactReplayMessages(rawMessages, sessionId, opts.maxMessages);
-  const nextSeq = entries.length > 0 ? Math.max(...entries.map((entry) => entry.seq)) + 1 : 0;
+  const auditNextSeq = canonical ? await nextRolloutSequenceFromTail(eventsPath) : undefined;
+  const nextSeq = canonical
+    ? auditNextSeq === undefined
+      ? 0
+      : auditNextSeq ?? kernel!.countEvents(sessionId)
+    : entries.length > 0
+      ? Math.max(...entries.map((entry) => entry.seq)) + 1
+      : 0;
   return {
     meta,
     messages: replay.messages,
@@ -2161,6 +2592,7 @@ function canonicalSessionSummary(
     updatedAt: new Date(session.updatedAtMs).toISOString(),
     eventCount: kernel.countEvents(session.id),
     preview: previewFromMessages(messages),
+    workflowMode: session.workflowMode,
     ...(session.title ? { label: session.title } : {}),
   };
 }
@@ -2189,6 +2621,7 @@ function sessionMetaFromKernel(
     workspace: session.workspaceKey ?? path.resolve(workspace),
     provider: { name: provider, model },
     createdAt,
+    workflowMode: session.workflowMode,
     ...(session.title ? { label: session.title } : {}),
   };
 }
@@ -2205,6 +2638,46 @@ async function readOptionalFile(filename: string): Promise<string> {
   } catch (error) {
     if (nodeErrorCode(error) === "ENOENT") return "";
     throw error;
+  }
+}
+
+/** Read only the tail of the portable JSONL audit to recover its sequence.
+ * SQLite-backed resume never needs the event bodies. If an old gigantic final
+ * line exceeds the bounded window, callers fall back to the monotonic kernel
+ * event sequence instead of allocating the whole file. */
+async function nextRolloutSequenceFromTail(filename: string): Promise<number | null | undefined> {
+  let handle;
+  try {
+    handle = await open(filename, "r");
+  } catch (error) {
+    if (nodeErrorCode(error) === "ENOENT") return undefined;
+    throw error;
+  }
+  try {
+    const info = await handle.stat();
+    if (info.size <= 0) return 0;
+    const length = Math.min(info.size, 256 * 1024);
+    const buffer = Buffer.allocUnsafe(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, info.size - length);
+    let text = buffer.subarray(0, bytesRead).toString("utf8");
+    if (info.size > length) {
+      const firstNewline = text.indexOf("\n");
+      text = firstNewline >= 0 ? text.slice(firstNewline + 1) : "";
+    }
+    const lines = text.split(/\r?\n/).filter((line) => line.trim().length > 0);
+    for (let i = lines.length - 1; i >= 0; i--) {
+      try {
+        const entry = JSON.parse(lines[i]) as { seq?: unknown };
+        if (typeof entry.seq === "number" && Number.isFinite(entry.seq)) {
+          return Math.max(0, Math.floor(entry.seq) + 1);
+        }
+      } catch {
+        // A torn final line is expected after a crash; inspect the one before it.
+      }
+    }
+    return null;
+  } finally {
+    await handle.close();
   }
 }
 
@@ -2293,21 +2766,23 @@ function repairSettledToolPairs(
         if (block.type === "tool_result") existing.set(block.tool_use_id, block);
       }
     }
-    let repaired = false;
     for (const use of uses) {
       if (existing.has(use.id)) continue;
       const run = runsByUseId.get(use.id);
       existing.set(use.id, recoveredToolResult(use.id, use.name, run));
-      repaired = true;
     }
-    if (!repaired) continue;
 
-    // Preserve provider-required ordering: every result for an assistant tool
-    // batch is emitted together and in the same order as its tool_use blocks.
+    // Normalize even a complete projection. Parallel tool settlements are
+    // persisted in completion order, but providers require the result batch to
+    // follow the assistant's tool_use order on every live and restart path.
     const ordered = uses.map((use) => existing.get(use.id)!).filter(Boolean);
     if (nextIsToolResults) {
+      const useIds = new Set(uses.map((use) => use.id));
+      const extraToolResults = next.content.filter(
+        (block): block is ToolResultBlock => block.type === "tool_result" && !useIds.has(block.tool_use_id),
+      );
       const nonToolBlocks = next.content.filter((block) => block.type !== "tool_result");
-      messages[index + 1] = { ...next, content: [...ordered, ...nonToolBlocks] };
+      messages[index + 1] = { ...next, content: [...ordered, ...extraToolResults, ...nonToolBlocks] };
     } else {
       messages.splice(index + 1, 0, {
         id: `kernel_recovered_tools_${sessionId}_${index}`,

@@ -9,7 +9,7 @@ import { mkdtempSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { QueryEngine, Session, chooseCompactionSplit, loadSessionSnapshot, openWorkspaceSessionKernel } from "../packages/core/dist/index.js";
+import { QueryEngine, Session, buildContextLedger, chooseCompactionSplit, loadSessionSnapshot, openWorkspaceSessionKernel } from "../packages/core/dist/index.js";
 
 function bigMsg(role, tag, chars = 20_000) {
   return { id: `m_${tag}`, role, content: [{ type: "text", text: "x".repeat(chars) }], createdAt: new Date().toISOString() };
@@ -58,6 +58,43 @@ test("chooseCompactionSplit keeps recent messages and summarizes the rest", () =
 test("chooseCompactionSplit refuses to split a tiny history", () => {
   const msgs = Array.from({ length: 3 }, (_, i) => bigMsg("user", `${i}`));
   assert.equal(chooseCompactionSplit(msgs, 4_000), 0);
+});
+
+test("fallback ledger preserves the prior mission and the latest corrections/files", () => {
+  const messages = [
+    {
+      id: "prior",
+      role: "user",
+      content: [{
+        type: "system_reminder",
+        text: "Compacted memory — established.\n\nGOAL: ship the FPS controller\nCONSTRAINTS: do not replace the input system\nSTATE: gun mount remains wrong\n\nThe files you were working in, re-read AFTER compaction:\nold bytes",
+      }],
+      createdAt: "now",
+    },
+    ...Array.from({ length: 10 }, (_, i) => ({
+      id: `ask_${i}`,
+      role: "user",
+      content: [{ type: "text", text: `direction ${i}${i === 9 ? " — rotate the gun down, not right" : ""}` }],
+      createdAt: "now",
+    })),
+    {
+      id: "tools",
+      role: "assistant",
+      content: [
+        { type: "tool_use", id: "early", name: "Read", input: { file_path: "old.cs" } },
+        { type: "tool_use", id: "late", name: "Edit", input: { file_path: "GunMount.cs" } },
+      ],
+      createdAt: "now",
+    },
+  ];
+
+  const ledger = buildContextLedger(messages);
+  assert.match(ledger, /GOAL: ship the FPS controller/);
+  assert.match(ledger, /CONSTRAINTS: do not replace the input system/);
+  assert.doesNotMatch(ledger, /old bytes/, "stale file pins are not recursively retained");
+  assert.doesNotMatch(ledger, /direction 0\b/, "early directions are displaced by newer corrections");
+  assert.match(ledger, /direction 9 — rotate the gun down, not right/);
+  assert.ok(ledger.indexOf("GunMount.cs") < ledger.indexOf("old.cs"), "recent files are listed first");
 });
 
 test("chooseCompactionSplit never opens the kept window on an orphan tool_result", () => {
@@ -202,6 +239,91 @@ test("compaction: falls back to the deterministic ledger when the summarizer fai
   assert.equal(compaction.method, "ledger", "fell back to the ledger");
   const recap = session.engine.history()[0];
   assert.match(recap.content[0].text, /Context ledger/);
+});
+
+test("compaction: Stop aborts maintenance without rewriting history or calling the provider", async () => {
+  const workspace = mkdtempSync(path.join(os.tmpdir(), "ares-v14-cancel-"));
+  let summarizeStarted;
+  const started = new Promise((resolve) => { summarizeStarted = resolve; });
+  let providerCalls = 0;
+  const engine = QueryEngine.forTesting({
+    workspace,
+    provider: okProvider(() => { providerCalls++; }),
+    model: "m",
+    systemPrompt: "s",
+    tools: [],
+    compactionThresholdTokens: 3_000,
+    summarizeSpan: async (_messages, signal) => {
+      summarizeStarted();
+      await new Promise((resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(signal.reason ?? new Error("aborted")), { once: true });
+      });
+      return "unreachable";
+    },
+  }, "sess_compaction_cancel");
+  const original = Array.from({ length: 8 }, (_, i) => bigMsg(i % 2 ? "assistant" : "user", `cancel_${i}`));
+  engine.hydrate(original);
+  engine.appendUserMessage("continue");
+
+  const events = [];
+  const running = (async () => { for await (const event of engine.streamTurn()) events.push(event); })();
+  await started;
+  assert.equal(engine.interrupt(), true, "the active maintenance turn accepts Stop");
+  await running;
+
+  assert.equal(providerCalls, 0, "no obsolete provider request starts after cancellation");
+  assert.equal(events.some((event) => event.type === "compaction"), false, "cancelled maintenance is not reported as completed");
+  assert.equal(events.at(-1)?.type, "turn_end");
+  assert.equal(events.at(-1)?.status, "interrupted");
+  assert.equal(engine.history()[0].id, original[0].id, "the old span was not replaced by a fallback ledger");
+});
+
+test("compaction: a steer arriving during maintenance reaches the very next provider call", async () => {
+  const workspace = mkdtempSync(path.join(os.tmpdir(), "ares-v14-steer-"));
+  let summarizeStarted;
+  let releaseSummary;
+  const started = new Promise((resolve) => { summarizeStarted = resolve; });
+  const gate = new Promise((resolve) => { releaseSummary = resolve; });
+  let steerReady = false;
+  let consumed = false;
+  let request;
+  const steerMessage = {
+    id: "steer_during_compaction",
+    role: "user",
+    content: [{ type: "text", text: "STEER: rotate the gun down, never to the right" }],
+    createdAt: "now",
+  };
+  const engine = QueryEngine.forTesting({
+    workspace,
+    provider: okProvider((req) => { request = req; }),
+    model: "m",
+    systemPrompt: "s",
+    tools: [],
+    compactionThresholdTokens: 3_000,
+    summarizeSpan: async () => {
+      summarizeStarted();
+      await gate;
+      return "GOAL: fix the gun mount\nSTATE: awaiting correction";
+    },
+    claimSteeringMessages: async () => steerReady && !consumed
+      ? [{ inputId: "input_steer_during_compaction", message: steerMessage }]
+      : [],
+    consumeSteeringInputs: async (inputIds) => {
+      assert.deepEqual(inputIds, ["input_steer_during_compaction"]);
+      consumed = true;
+    },
+  }, "sess_compaction_steer");
+  engine.hydrate(Array.from({ length: 8 }, (_, i) => bigMsg(i % 2 ? "assistant" : "user", `steer_${i}`)));
+  engine.appendUserMessage("continue the build");
+
+  const running = (async () => { for await (const _event of engine.streamTurn()) void _event; })();
+  await started;
+  steerReady = true;
+  releaseSummary();
+  await running;
+
+  assert.equal(consumed, true, "the durable steer was acknowledged");
+  assert.match(JSON.stringify(request.messages), /rotate the gun down, never to the right/);
 });
 
 test("compaction: does NOT fire below the threshold", async () => {

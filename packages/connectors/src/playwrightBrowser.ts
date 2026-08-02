@@ -526,6 +526,11 @@ export async function createPlaywrightBrowser(opts: PlaywrightOptions = {}): Pro
     async navigate(url) {
       // Bounded waits — a stock 30s default means every miss is a half-minute hang.
       await page.goto(url, { timeout: 15_000, waitUntil: "domcontentloaded" });
+      // Visible preview/human handoff must actually surface the controllable
+      // browser window. Without this, Ares announced a sign-in prompt while its
+      // persistent browser sat behind the desktop shell and the Forge showed a
+      // site-blocked iframe instead.
+      await page.bringToFront().catch(() => undefined);
       await maybeHandleChallenge();
       await ensureCursor();
       // park the pointer mid-screen so it's visible before the first move

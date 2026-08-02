@@ -388,6 +388,22 @@ a:hover { border-bottom-color: var(--bronze-hi); }
 .pill[data-state="running"] { animation: onlineBreath 3.2s ease-in-out infinite; }
 .pill[data-state="error"], .pill[data-state="stopped"] { color: var(--crimson); border-color: rgba(194, 80, 72, 0.5); }
 .pill[data-state="starting"] { color: var(--bronze-hi); animation: pulse 1.2s ease-in-out infinite; }
+.workflowPill {
+  font: 750 9px/1 var(--mono);
+  letter-spacing: 0.16em;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(127, 166, 163, 0.3);
+  color: var(--steel);
+  background: rgba(127, 166, 163, 0.06);
+  transition: color 180ms ease, border-color 180ms ease, background 180ms ease, box-shadow 180ms ease;
+}
+.workflowPill[data-mode="plan"] {
+  color: var(--bronze-hi);
+  border-color: rgba(var(--accent-rgb), 0.58);
+  background: rgba(var(--accent-rgb), 0.12);
+  box-shadow: 0 0 16px rgba(var(--accent-rgb), 0.1);
+}
 
 .winControls { display: flex; align-self: stretch; }
 .winControls button {
@@ -858,6 +874,8 @@ a:hover { border-bottom-color: var(--bronze-hi); }
 .turn.user.steer { opacity: 0.9; }
 .turn.user.steer .bubble { background: rgba(127, 166, 163, 0.1); border-color: rgba(127, 166, 163, 0.3); border-style: dashed; }
 .turn.user.steer[data-landed="1"] .bubble { border-style: solid; opacity: 0.7; }
+.turn.user.steer[data-status="rejected"] .bubble,
+.turn.user.steer[data-status="cancelled"] .bubble { border-color: rgba(197, 126, 73, 0.5); opacity: 0.68; }
 .steerTag { display: block; font: 600 9px/1.4 var(--mono); letter-spacing: 0.14em; text-transform: uppercase; color: var(--steel); margin-bottom: 4px; }
 .chip.steerChip { color: var(--steel); border-color: rgba(127, 166, 163, 0.35); animation: pulse 1.4s ease-in-out infinite; }
 
@@ -1855,6 +1873,15 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .gateActions .gateAlways:hover { color: var(--bronze-hi); border-color: var(--bronze); background: rgba(var(--accent-rgb), 0.1); }
 .gateActions .gateDeny { color: var(--crimson); border-color: rgba(194, 80, 72, 0.4); }
 .gateActions .gateDeny:hover { background: rgba(194, 80, 72, 0.12); }
+.planHandoff { flex-direction: column; align-items: stretch; width: min(680px, 92%); }
+.planHandoff .gateTop { display: flex; align-items: center; gap: 12px; }
+.planHandoff .gateBody { flex: 1; }
+.planHandoffReason { margin: 0; color: var(--muted); font: 500 12px/1.5 var(--sans); }
+.planHandoffBody { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.planHandoffBody summary { cursor: pointer; padding: 8px 11px; color: var(--text); font: 650 11px/1.3 var(--mono); }
+.planHandoffBody pre { max-height: 280px; overflow: auto; margin: 0; padding: 11px; border-top: 1px solid var(--line); color: var(--muted); white-space: pre-wrap; font: 500 11px/1.55 var(--mono); }
+.planHandoff .gateActions { margin-left: 0; }
+.planHandoff[data-approved="1"] { border-color: rgba(127, 166, 163, 0.45); }
 
 /* â”€â”€ The delegation choice popup: Claude Code / Codex / Ares â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 .cbOffer {
@@ -3430,6 +3457,15 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
   opacity: .34; border: 1px solid var(--line-strong); border-radius: 5px; transition: 160ms ease;
 }
 .liveTelemetry:hover { width: 220px; max-height: 140px; opacity: 1; }
+.liveBrowser .liveStage.externalTarget { padding: 10px; place-items: center; background: #090708; }
+.liveTelemetryMain {
+  width: 100%; height: 100%; max-width: 100%; max-height: 100%; object-fit: contain;
+  border: 1px solid var(--line-strong); border-radius: 6px; background: #050405;
+  box-shadow: 0 0 30px rgba(var(--accent-rgb), 0.18);
+}
+.externalPreviewNotice { max-width: 360px; padding: 22px; text-align: center; color: var(--text); }
+.externalPreviewNotice strong { color: var(--ember-hi); font-size: 13px; letter-spacing: .03em; }
+.externalPreviewNotice p { margin: 10px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
 .embeddedBrowserFrame { width: 100%; height: 100%; border: none; background: #fff; color-scheme: light; border-radius: 0; }
 .liveDot { width: 8px; height: 8px; border-radius: 50%; background: var(--ember); box-shadow: 0 0 8px var(--ember); animation: livePulse 1s ease-in-out infinite; }
 

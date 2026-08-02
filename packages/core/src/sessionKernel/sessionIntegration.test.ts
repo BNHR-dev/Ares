@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import type { Message, StreamEvent, TurnEvent } from "@ares/protocol";
+import { HookManager } from "../hooks.js";
 import { QueryEngine, type EngineTool, type Provider, type ProviderRequest } from "../queryEngine.js";
 import { projectMessagesFromKernel, Session } from "../session.js";
 import { SessionKernelStore, type BetterSqlite3Constructor } from "./index.js";
@@ -344,6 +346,1061 @@ test("an idle steering input behaves as the next queued turn", async () => {
   }
 });
 
+test("admission-only steering cannot release or settle the active owner's kernel run", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "ares-kernel-admit-only-steer-"));
+  const { store } = createKernel();
+  let releaseProvider = (): void => {};
+  let ownerTurn: Promise<TurnEvent[]> | undefined;
+  try {
+    let signalProviderStarted!: () => void;
+    const providerStarted = new Promise<void>((resolve) => { signalProviderStarted = resolve; });
+    const providerGate = new Promise<void>((resolve) => { releaseProvider = resolve; });
+    let providerCalls = 0;
+    const provider: Provider = {
+      name: "admit-only-owner-fence",
+      async *stream(): AsyncGenerator<StreamEvent> {
+        providerCalls += 1;
+        if (providerCalls === 1) {
+          signalProviderStarted();
+          // Deliberately ignore the steering abort so the owner fence remains
+          // observably live while the admission-only sender returns.
+          await providerGate;
+        }
+        yield {
+          type: "message_done",
+          message: assistant(`wire-admit-only-${providerCalls}`),
+          usage: { inputTokens: 1, outputTokens: 1 },
+          stopReason: "end_turn",
+        };
+      },
+    };
+    const sessionId = "admit-only-owner-session";
+    const session = new Session({
+      sessionId,
+      workspace,
+      provider,
+      model: "fixed",
+      systemPrompt: "test",
+      tools: [],
+      sessionKernel: store,
+      contextBudgetTokens: 0,
+    });
+    ownerTurn = collect(session.sendContent(
+      [{ type: "text", text: "owner request" }],
+      { inputId: "admit-only-owner" },
+    ));
+    await providerStarted;
+
+    const internals = session as unknown as {
+      kernelFence: unknown;
+      kernelLease: unknown;
+      activeInputId: string | null;
+    };
+    const ownerFence = internals.kernelFence;
+    const ownerLease = internals.kernelLease;
+    assert.ok(ownerFence, "owner run fence must be active before steering admission");
+    assert.ok(ownerLease, "owner run lease must be active before steering admission");
+    assert.equal(store.getRun(sessionId, 1)?.executionState, "running");
+
+    const steerEvents = await collect(session.sendContent(
+      [{ type: "text", text: "admit this correction only" }],
+      { inputId: "admit-only-steer", delivery: "steer", admitOnlySteer: true },
+    ));
+    assert.deepEqual(steerEvents, []);
+    assert.ok(
+      store.getInput("admit-only-steer")?.state === "admitted" ||
+      store.getInput("admit-only-steer")?.state === "consumed",
+      "the correction is durable and may already be consumed by the still-owning generation",
+    );
+    assert.strictEqual(internals.kernelFence, ownerFence, "steer sender cannot clear/replace the owner's fence");
+    assert.strictEqual(internals.kernelLease, ownerLease, "steer sender cannot release the owner's lease");
+    assert.equal(internals.activeInputId, "admit-only-owner");
+    assert.equal(store.getRun(sessionId, 1)?.executionState, "running");
+    assert.equal(store.getRun(sessionId, 2), null, "admission-only steering never creates a runner generation");
+
+    releaseProvider();
+    const ownerEvents = await ownerTurn;
+    assert.equal(ownerEvents.at(-1)?.type, "turn_end");
+    assert.equal(store.getInput("admit-only-steer")?.state, "consumed");
+    assert.equal(providerCalls, 2, "the owner restarts once with the durable correction");
+  } finally {
+    releaseProvider();
+    if (ownerTurn) await Promise.allSettled([ownerTurn]);
+    store.close();
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("active provider steering preempts only the speculative attempt and continues in one generation", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "ares-kernel-provider-steer-"));
+  const { store } = createKernel();
+  let ownerTurn: Promise<TurnEvent[]> | undefined;
+  let steeringTurn: Promise<TurnEvent[]> | undefined;
+  try {
+    let signalFirstProviderStarted!: () => void;
+    const firstProviderStarted = new Promise<void>((resolve) => {
+      signalFirstProviderStarted = resolve;
+    });
+    const requests: ProviderRequest[] = [];
+    let providerCalls = 0;
+    let steerAuditWasDurableBeforeAbort = false;
+    let steerAuditAtAbort = "";
+    let steerAuditReadSettled = false;
+    let stopAfterSteerInstall: boolean | undefined;
+    const sessionId = "provider-steer-session";
+    const provider: Provider = {
+      name: "steer-preemptible-provider",
+      async *stream(request): AsyncGenerator<StreamEvent> {
+        requests.push({
+          ...request,
+          messages: request.messages.map((message) => ({
+            ...message,
+            content: message.content.map((block) => ({ ...block })),
+          })),
+        });
+        const call = ++providerCalls;
+        if (call === 1) {
+          signalFirstProviderStarted();
+          await new Promise<void>((_resolve, reject) => {
+            const aborted = () => {
+              void readFile(
+                path.join(workspace, ".ares", "sessions", sessionId, "events.jsonl"),
+                "utf8",
+              ).then((audit) => {
+                steerAuditAtAbort = audit;
+                steerAuditWasDurableBeforeAbort = audit.includes("provider-steer");
+              }).catch((error: unknown) => {
+                steerAuditAtAbort = `READ FAILED: ${error instanceof Error ? error.message : String(error)}`;
+              }).finally(() => {
+                steerAuditReadSettled = true;
+                const error = new Error("speculative provider attempt superseded by steering");
+                error.name = "AbortError";
+                reject(error);
+              });
+            };
+            if (request.signal?.aborted) aborted();
+            else request.signal?.addEventListener("abort", aborted, { once: true });
+          });
+          return;
+        }
+        yield {
+          type: "message_done",
+          message: assistant("wire-after-provider-steer", "corrected response"),
+          usage: { inputTokens: 1, outputTokens: 1 },
+          stopReason: "end_turn",
+        };
+      },
+    };
+    const session = new Session({
+      sessionId,
+      workspace,
+      provider,
+      model: "fixed",
+      systemPrompt: "test",
+      tools: [],
+      sessionKernel: store,
+      contextBudgetTokens: 0,
+    });
+    const originalConsumeInput = store.consumeInput.bind(store);
+    store.consumeInput = ((fence, inputId) => {
+      if (inputId === "provider-steer") {
+        assert.equal(store.getInput(inputId)?.state, "claimed");
+        assert.equal(
+          session.history().filter((message) => message.metadata?.source === "steer").length,
+          1,
+          "steering history installation precedes acknowledgement",
+        );
+        stopAfterSteerInstall = session.interrupt(inputId);
+      }
+      return originalConsumeInput(fence, inputId);
+    }) as SessionKernelStore["consumeInput"];
+
+    ownerTurn = collect(
+      session.sendContent(
+        [{ type: "text", text: "continue the original implementation" }],
+        { inputId: "provider-owner" },
+      ),
+    );
+    await firstProviderStarted;
+    steeringTurn = collect(
+      session.sendContent(
+        [{ type: "text", text: "correction: preserve the public API" }],
+        { inputId: "provider-steer", delivery: "steer" },
+      ),
+    );
+
+    const [ownerEvents, steerEvents] = await Promise.all([ownerTurn, steeringTurn]);
+    await waitFor(() => steerAuditReadSettled, "the preempted provider did not observe its abort signal");
+    assert.equal(
+      steerAuditWasDurableBeforeAbort,
+      true,
+      `provider abort cannot race ahead of durable steer audit: ${steerAuditAtAbort.slice(-500)}`,
+    );
+    assert.equal(providerCalls, 2, "the obsolete attempt is replaced immediately");
+    assert.equal(ownerEvents.filter((event) => event.type === "turn_start").length, 1);
+    assert.equal(ownerEvents.filter((event) => event.type === "turn_end").length, 1);
+    assert.equal(ownerEvents.find((event) => event.type === "turn_end")?.status, "completed");
+    assert.deepEqual(steerEvents, [], "the correction is acknowledged by the active owner generation");
+    assert.equal(
+      stopAfterSteerInstall,
+      false,
+      "a steer cannot become cancelled after its canonical/model-history acceptance boundary",
+    );
+    assert.equal(store.getInput("provider-owner")?.state, "consumed");
+    assert.equal(store.getInput("provider-steer")?.state, "consumed");
+    assert.equal(store.getRun(sessionId, 1)?.executionState, "completed");
+    assert.equal(store.getRun(sessionId, 2), null, "steering never creates a replacement generation");
+    assert.equal(store.listMessages(sessionId).filter((message) => message.inputId === "provider-steer").length, 1);
+    assert.equal(
+      store.listEvents(sessionId).filter((event) => event.type === "provider.attempt_superseded").length,
+      1,
+      "the discarded provider attempt is canonical restart evidence",
+    );
+
+    const correctionMessages = requests[1]?.messages.filter(
+      (message) => message.metadata?.source === "steer",
+    ) ?? [];
+    assert.equal(correctionMessages.length, 1);
+    assert.match(JSON.stringify(correctionMessages[0]), /preserve the public API/);
+  } finally {
+    await Promise.allSettled(
+      [ownerTurn, steeringTurn].filter((turn): turn is Promise<TurnEvent[]> => Boolean(turn)),
+    );
+    store.close();
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("steering detaches a non-cooperative provider and leaves no partial tool blocks in canonical history", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "ares-kernel-stubborn-provider-steer-"));
+  const { store } = createKernel();
+  let ownerTurn: Promise<TurnEvent[]> | undefined;
+  let steeringTurn: Promise<TurnEvent[]> | undefined;
+  try {
+    let signalFirstAttemptBlocked!: () => void;
+    const firstAttemptBlocked = new Promise<void>((resolve) => {
+      signalFirstAttemptBlocked = resolve;
+    });
+    const requests: ProviderRequest[] = [];
+    let providerCalls = 0;
+    const provider: Provider = {
+      name: "signal-ignoring-provider",
+      async *stream(request): AsyncGenerator<StreamEvent> {
+        requests.push({ ...request, messages: request.messages.map((message) => ({
+          ...message,
+          content: message.content.map((block) => ({ ...block })),
+        })) });
+        providerCalls += 1;
+        if (providerCalls === 1) {
+          yield { type: "text_delta", text: "obsolete partial" };
+          yield { type: "tool_use_start", id: "orphan-draft", name: "NeverRun" };
+          yield { type: "tool_use_input_delta", id: "orphan-draft", deltaJson: "{\"x\":" };
+          signalFirstAttemptBlocked();
+          // Intentionally ignore request.signal forever. guardStreamStalls must
+          // race the steering signal directly rather than trust this adapter.
+          await new Promise<void>(() => undefined);
+          return;
+        }
+        yield {
+          type: "message_done",
+          message: assistant("wire-after-stubborn-steer", "replacement response"),
+          usage: { inputTokens: 1, outputTokens: 1 },
+          stopReason: "end_turn",
+        };
+      },
+    };
+    const sessionId = "stubborn-provider-steer-session";
+    const session = new Session({
+      sessionId,
+      workspace,
+      provider,
+      model: "fixed",
+      systemPrompt: "test",
+      tools: [],
+      sessionKernel: store,
+      contextBudgetTokens: 0,
+    });
+
+    ownerTurn = collect(
+      session.sendContent([{ type: "text", text: "start" }], { inputId: "stubborn-owner" }),
+    );
+    await firstAttemptBlocked;
+    steeringTurn = collect(
+      session.sendContent(
+        [{ type: "text", text: "correction: abandon that draft" }],
+        { inputId: "stubborn-steer", delivery: "steer" },
+      ),
+    );
+    const timeout = new Promise<never>((_resolve, reject) => {
+      setTimeout(() => reject(new Error("steering did not detach the non-cooperative provider")), 1_000);
+    });
+    const [ownerEvents, steerEvents] = await Promise.race([
+      Promise.all([ownerTurn, steeringTurn]),
+      timeout,
+    ]);
+
+    assert.equal(providerCalls, 2);
+    assert.deepEqual(steerEvents, []);
+    assert.ok(ownerEvents.some((event) => event.type === "text_delta" && /obsolete/.test(event.text)));
+    assert.ok(ownerEvents.some((event) => event.type === "tool_use_start" && event.id === "orphan-draft"));
+    assert.equal(ownerEvents.filter((event) => event.type === "provider_attempt_superseded").length, 1);
+    assert.equal(
+      store.listMessages(sessionId).some((message) => JSON.stringify(message).includes("orphan-draft")),
+      false,
+      "speculative tool drafts never enter canonical message history",
+    );
+    const correctionMessages = requests[1]?.messages.filter((message) => message.metadata?.source === "steer") ?? [];
+    assert.equal(correctionMessages.length, 1);
+    assert.equal(store.getRun(sessionId, 2), null);
+  } finally {
+    await Promise.allSettled(
+      [ownerTurn, steeringTurn].filter((turn): turn is Promise<TurnEvent[]> => Boolean(turn)),
+    );
+    store.close();
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("steering at message commit skips proposed tools, pairs their results, and never executes effects", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "ares-kernel-pre-effect-steer-"));
+  const { store } = createKernel();
+  let steeringTurn: Promise<TurnEvent[]> | undefined;
+  try {
+    let toolCalls = 0;
+    const proposedTool: EngineTool = {
+      schema: {
+        name: "ProposedEffect",
+        description: "A proposal that steering must suppress before entry",
+        inputJsonSchema: { type: "object", additionalProperties: false },
+        safety: "read-only",
+        concurrency: "parallel-safe",
+      },
+      call: async () => {
+        toolCalls += 1;
+        return { output: "must not run" };
+      },
+    };
+    const requests: ProviderRequest[] = [];
+    let providerCalls = 0;
+    const provider: Provider = {
+      name: "pre-effect-steer-provider",
+      async *stream(request): AsyncGenerator<StreamEvent> {
+        requests.push({
+          ...request,
+          messages: request.messages.map((message) => ({
+            ...message,
+            content: message.content.map((block) => ({ ...block })),
+          })),
+        });
+        providerCalls += 1;
+        if (providerCalls === 1) {
+          yield { type: "tool_use_start", id: "proposed-1", name: "ProposedEffect" };
+          yield { type: "tool_use_input_done", id: "proposed-1", input: {} };
+          yield {
+            type: "message_done",
+            message: {
+              ...assistant("wire-proposed-effect", ""),
+              content: [{ type: "tool_use", id: "proposed-1", name: "ProposedEffect", input: {} }],
+            },
+            usage: { inputTokens: 1, outputTokens: 1 },
+            stopReason: "tool_use",
+          };
+          return;
+        }
+        yield {
+          type: "message_done",
+          message: assistant("wire-after-pre-effect-steer", "followed correction"),
+          usage: { inputTokens: 1, outputTokens: 1 },
+          stopReason: "end_turn",
+        };
+      },
+    };
+    const sessionId = "pre-effect-steer-session";
+    const session = new Session({
+      sessionId,
+      workspace,
+      provider,
+      model: "fixed",
+      systemPrompt: "test",
+      tools: [proposedTool],
+      sessionKernel: store,
+      contextBudgetTokens: 0,
+      maxTurns: 1,
+    });
+
+    // Pull exactly through message_done. QueryEngine has committed the assistant
+    // proposal, while its pre-effect window remains paused at the caller yield.
+    const ownerStream = session.sendContent(
+      [{ type: "text", text: "prepare the change" }],
+      { inputId: "pre-effect-owner" },
+    );
+    const ownerEvents: TurnEvent[] = [];
+    while (true) {
+      const next = await ownerStream.next();
+      assert.equal(next.done, false, "owner turn ended before its proposal boundary");
+      ownerEvents.push(next.value);
+      if (next.value.type === "message_done") break;
+    }
+
+    steeringTurn = collect(
+      session.sendContent(
+        [{ type: "text", text: "correction: do not execute that proposed call" }],
+        { inputId: "pre-effect-steer", delivery: "steer" },
+      ),
+    );
+    await waitFor(
+      () => store.getInput("pre-effect-steer")?.state === "admitted",
+      "pre-effect steer was not durably admitted",
+    );
+    for await (const event of ownerStream) ownerEvents.push(event);
+    const steerEvents = await steeringTurn;
+
+    assert.equal(toolCalls, 0, "a correction before tool_start prevents implementation entry");
+    assert.equal(providerCalls, 2);
+    assert.deepEqual(steerEvents, []);
+    assert.equal(ownerEvents.filter((event) => event.type === "provider_attempt_superseded").length, 0);
+    const effectsSkipped = ownerEvents.filter((event) => event.type === "provider_attempt_effects_skipped");
+    assert.equal(effectsSkipped.length, 1);
+    assert.deepEqual(effectsSkipped[0]?.toolUseIds, ["proposed-1"]);
+    assert.ok(
+      ownerEvents.some((event) => event.type === "tool_error" && /skipped because the user steered/.test(event.error)),
+      "the committed tool_use receives an explicit paired skipped result",
+    );
+
+    const secondRequest = requests[1]?.messages ?? [];
+    const proposedAssistant = secondRequest.findIndex((message) =>
+      message.content.some((block) => block.type === "tool_use" && block.id === "proposed-1"),
+    );
+    const pairedResult = secondRequest.findIndex((message) =>
+      message.content.some((block) => block.type === "tool_result" && block.tool_use_id === "proposed-1"),
+    );
+    const correction = secondRequest.findIndex((message) => message.metadata?.source === "steer");
+    assert.ok(proposedAssistant >= 0 && proposedAssistant < pairedResult, "tool proposal precedes its result");
+    assert.ok(pairedResult < correction, "the skipped result is paired before correction injection");
+    assert.match(JSON.stringify(secondRequest[pairedResult]), /skipped because the user steered/);
+    assert.match(JSON.stringify(secondRequest[correction]), /do not execute/);
+    assert.equal(store.getInput("pre-effect-steer")?.state, "consumed");
+    assert.equal(store.getRun(sessionId, 2), null, "pre-effect steering stays in the owner generation");
+    assert.ok(
+      store.listMessages(sessionId).some((message) => JSON.stringify(message).includes("wire-proposed-effect")),
+      "message_done remains canonical when only its effects are skipped",
+    );
+    assert.equal(
+      store.listEvents(sessionId).filter((event) => event.type === "provider.attempt_effects_skipped").length,
+      1,
+    );
+  } finally {
+    if (steeringTurn) await Promise.allSettled([steeringTurn]);
+    store.close();
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("steering fences queued worker calls and every later dependency batch", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "ares-kernel-steer-batch-fence-"));
+  const { store } = createKernel();
+  const previousConcurrency = process.env.ARES_MAX_TOOL_CONCURRENCY;
+  process.env.ARES_MAX_TOOL_CONCURRENCY = "1";
+  let releaseHold = (): void => {};
+  let ownerTurn: Promise<TurnEvent[]> | undefined;
+  let steeringTurn: Promise<TurnEvent[]> | undefined;
+  try {
+    let signalHoldStarted!: () => void;
+    const holdStarted = new Promise<void>((resolve) => {
+      signalHoldStarted = resolve;
+    });
+    const holdGate = new Promise<void>((resolve) => {
+      releaseHold = resolve;
+    });
+    let holdCalls = 0;
+    let readCalls = 0;
+    let editCalls = 0;
+    let holdSignal: AbortSignal | undefined;
+    const tools: EngineTool[] = [
+      {
+        schema: {
+          name: "Hold",
+          description: "Keep the first worker occupied",
+          inputJsonSchema: { type: "object", additionalProperties: false },
+          safety: "read-only",
+          concurrency: "parallel-safe",
+        },
+        call: async (_input, ctx) => {
+          holdCalls += 1;
+          holdSignal = ctx.signal;
+          signalHoldStarted();
+          await holdGate;
+          return { output: "settled original call" };
+        },
+      },
+      {
+        schema: {
+          name: "Read",
+          description: "A queued same-batch read",
+          inputJsonSchema: { type: "object", additionalProperties: true },
+          safety: "read-only",
+          concurrency: "parallel-safe",
+        },
+        call: async () => {
+          readCalls += 1;
+          return { output: "must not read" };
+        },
+      },
+      {
+        schema: {
+          name: "Edit",
+          description: "A later conflicting dependency batch",
+          inputJsonSchema: { type: "object", additionalProperties: true },
+          safety: "workspace-write",
+          concurrency: "exclusive",
+        },
+        call: async () => {
+          editCalls += 1;
+          return { output: "must not edit" };
+        },
+      },
+    ];
+    const requests: ProviderRequest[] = [];
+    let providerCalls = 0;
+    const provider: Provider = {
+      name: "queued-effect-steer-provider",
+      async *stream(request): AsyncGenerator<StreamEvent> {
+        requests.push({
+          ...request,
+          messages: request.messages.map((message) => ({
+            ...message,
+            content: message.content.map((block) => ({ ...block })),
+          })),
+        });
+        providerCalls += 1;
+        if (providerCalls === 1) {
+          const proposed = [
+            { id: "running-hold", name: "Hold", input: {} },
+            { id: "queued-read", name: "Read", input: { file_path: "target.txt" } },
+            {
+              id: "later-edit",
+              name: "Edit",
+              input: { file_path: "target.txt", old_string: "before", new_string: "after" },
+            },
+          ];
+          for (const use of proposed) {
+            yield { type: "tool_use_start", id: use.id, name: use.name };
+            yield { type: "tool_use_input_done", id: use.id, input: use.input };
+          }
+          yield {
+            type: "message_done",
+            message: {
+              ...assistant("wire-queued-effects", ""),
+              content: proposed.map((use) => ({ type: "tool_use" as const, ...use })),
+            },
+            usage: { inputTokens: 1, outputTokens: 1 },
+            stopReason: "tool_use",
+          };
+          return;
+        }
+        yield {
+          type: "message_done",
+          message: assistant("wire-after-queued-effect-steer", "correction applied"),
+          usage: { inputTokens: 1, outputTokens: 1 },
+          stopReason: "end_turn",
+        };
+      },
+    };
+    const sessionId = "queued-effect-steer-session";
+    const session = new Session({
+      sessionId,
+      workspace,
+      provider,
+      model: "fixed",
+      systemPrompt: "test",
+      tools,
+      sessionKernel: store,
+      contextBudgetTokens: 0,
+      maxTurns: 1,
+    });
+
+    ownerTurn = collect(
+      session.sendContent([{ type: "text", text: "inspect then edit target.txt" }], { inputId: "batch-owner" }),
+    );
+    await holdStarted;
+    steeringTurn = collect(
+      session.sendContent(
+        [{ type: "text", text: "correction: leave target.txt unchanged" }],
+        { inputId: "batch-steer", delivery: "steer" },
+      ),
+    );
+    await waitFor(
+      () => store.getInput("batch-steer")?.state === "admitted",
+      "batch steer was not durably admitted while the first call was running",
+    );
+    assert.equal(holdSignal?.aborted, false, "the already-running call settles instead of being aborted");
+    releaseHold();
+    const [ownerEvents, steerEvents] = await Promise.all([ownerTurn, steeringTurn]);
+
+    assert.deepEqual(steerEvents, []);
+    assert.equal(providerCalls, 2);
+    assert.equal(holdCalls, 1);
+    assert.equal(readCalls, 0, "a worker dequeue after the steering epoch is fenced");
+    assert.equal(editCalls, 0, "a later dependency batch inherits the same steering fence");
+    assert.deepEqual(
+      ownerEvents
+        .filter((event) => event.type === "provider_attempt_effects_skipped")
+        .flatMap((event) => event.toolUseIds),
+      ["queued-read", "later-edit"],
+      "the audit event preserves provider proposal order across batches",
+    );
+    assert.equal(
+      ownerEvents.filter((event) => event.type === "tool_start").map((event) => event.id).join(","),
+      "running-hold",
+      "fenced calls never claim implementation entry",
+    );
+    const secondRequest = requests[1]?.messages ?? [];
+    for (const toolUseId of ["running-hold", "queued-read", "later-edit"]) {
+      assert.ok(
+        secondRequest.some((message) =>
+          message.content.some((block) => block.type === "tool_result" && block.tool_use_id === toolUseId)
+        ),
+        `${toolUseId} has a paired result before the correction response`,
+      );
+    }
+    assert.match(JSON.stringify(secondRequest), /leave target\.txt unchanged/);
+    assert.equal(store.getInput("batch-steer")?.state, "consumed");
+    assert.equal(store.getRun(sessionId, 2), null, "replacement response remains in the owner generation");
+  } finally {
+    releaseHold();
+    await Promise.allSettled(
+      [ownerTurn, steeringTurn].filter((turn): turn is Promise<TurnEvent[]> => Boolean(turn)),
+    );
+    if (previousConcurrency === undefined) delete process.env.ARES_MAX_TOOL_CONCURRENCY;
+    else process.env.ARES_MAX_TOOL_CONCURRENCY = previousConcurrency;
+    store.close();
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("steering during a slow PreToolUse hook settles uncertainty and never enters the primary tool", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "ares-kernel-steer-prehook-fence-"));
+  const { store } = createKernel();
+  let releaseHook = (): void => {};
+  let ownerTurn: Promise<TurnEvent[]> | undefined;
+  let steeringTurn: Promise<TurnEvent[]> | undefined;
+  try {
+    let signalHookStarted!: () => void;
+    const hookStarted = new Promise<void>((resolve) => {
+      signalHookStarted = resolve;
+    });
+    const hookGate = new Promise<void>((resolve) => {
+      releaseHook = resolve;
+    });
+    const hookManager = new HookManager([]);
+    hookManager.run = async () => {
+      signalHookStarted();
+      await hookGate;
+      return { blocked: false, reminders: [], executed: 1 };
+    };
+
+    let toolCalls = 0;
+    const hookedTool: EngineTool = {
+      schema: {
+        name: "HookedEffect",
+        description: "A primary effect behind a slow pre-tool hook",
+        inputJsonSchema: { type: "object", additionalProperties: true },
+        safety: "workspace-write",
+        concurrency: "exclusive",
+      },
+      call: async () => {
+        toolCalls += 1;
+        return { output: "must not enter" };
+      },
+    };
+    let providerCalls = 0;
+    const provider: Provider = {
+      name: "prehook-steer-provider",
+      async *stream(): AsyncGenerator<StreamEvent> {
+        providerCalls += 1;
+        if (providerCalls === 1) {
+          const input = { file_path: "hooked.txt" };
+          yield { type: "tool_use_start", id: "hooked-1", name: "HookedEffect" };
+          yield { type: "tool_use_input_done", id: "hooked-1", input };
+          yield {
+            type: "message_done",
+            message: {
+              ...assistant("wire-hooked-effect", ""),
+              content: [{ type: "tool_use", id: "hooked-1", name: "HookedEffect", input }],
+            },
+            usage: { inputTokens: 1, outputTokens: 1 },
+            stopReason: "tool_use",
+          };
+          return;
+        }
+        yield {
+          type: "message_done",
+          message: assistant("wire-after-prehook-steer", "correction applied after hook settlement"),
+          usage: { inputTokens: 1, outputTokens: 1 },
+          stopReason: "end_turn",
+        };
+      },
+    };
+    const sessionId = "prehook-steer-session";
+    const session = new Session({
+      sessionId,
+      workspace,
+      provider,
+      model: "fixed",
+      systemPrompt: "test",
+      tools: [hookedTool],
+      hookManager,
+      sessionKernel: store,
+      contextBudgetTokens: 0,
+      maxTurns: 1,
+    });
+
+    ownerTurn = collect(
+      session.sendContent([{ type: "text", text: "run the hooked effect" }], { inputId: "prehook-owner" }),
+    );
+    await hookStarted;
+    steeringTurn = collect(
+      session.sendContent(
+        [{ type: "text", text: "correction: do not run the primary effect" }],
+        { inputId: "prehook-steer", delivery: "steer" },
+      ),
+    );
+    await waitFor(
+      () => store.getInput("prehook-steer")?.state === "admitted",
+      "prehook steer was not admitted while host code was paused",
+    );
+    releaseHook();
+    const [ownerEvents, steerEvents] = await Promise.all([ownerTurn, steeringTurn]);
+
+    assert.deepEqual(steerEvents, []);
+    assert.equal(providerCalls, 2);
+    assert.equal(toolCalls, 0, "the primary implementation is fenced after the awaited hook");
+    assert.equal(
+      ownerEvents.some((event) => event.type === "tool_start" && event.id === "hooked-1"),
+      false,
+      "tool_start is implementation-entry authority and must not be emitted",
+    );
+    const skipped = ownerEvents.find((event) => event.type === "provider_attempt_effects_skipped");
+    assert.deepEqual(skipped?.toolUseIds, ["hooked-1"]);
+    const hookError = ownerEvents.find(
+      (event): event is Extract<TurnEvent, { type: "tool_error" }> =>
+        event.type === "tool_error" && event.id === "hooked-1",
+    );
+    assert.match(hookError?.error ?? "", /primary tool implementation did not run/i);
+    assert.match(hookError?.error ?? "", /hook's effect status is unknown/i);
+    assert.equal(store.listToolRuns(sessionId)[0]?.executionState, "effect_unknown");
+    assert.equal(store.getInput("prehook-steer")?.state, "consumed");
+  } finally {
+    releaseHook();
+    await Promise.allSettled(
+      [ownerTurn, steeringTurn].filter((turn): turn is Promise<TurnEvent[]> => Boolean(turn)),
+    );
+    store.close();
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("steering wakes a pending permission prompt and skips the unapproved effect without interrupting the turn", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "ares-kernel-steer-permission-wake-"));
+  const { store } = createKernel();
+  let resolvePermission = (_decision: "deny" | "allow_once"): void => {};
+  let ownerTurn: Promise<TurnEvent[]> | undefined;
+  let steeringTurn: Promise<TurnEvent[]> | undefined;
+  try {
+    let signalPermissionRequested!: () => void;
+    const permissionRequested = new Promise<void>((resolve) => {
+      signalPermissionRequested = resolve;
+    });
+    const ownerDecision = new Promise<"deny" | "allow_once">((resolve) => {
+      resolvePermission = resolve;
+    });
+    let adapterEntries = 0;
+    let effects = 0;
+    let hostPermissionSignal: AbortSignal | undefined;
+    const permissionTool: EngineTool = {
+      schema: {
+        name: "PermissionEffect",
+        description: "Wait for owner authority before changing external state",
+        inputJsonSchema: { type: "object", additionalProperties: false },
+        safety: "external-state",
+        concurrency: "exclusive",
+      },
+      call: async (_input, context) => {
+        adapterEntries += 1;
+        const decision = await context.requestPermission?.({
+          toolName: "PermissionEffect",
+          input: {},
+          reason: "test pending authority",
+          suggestion: "allow_once",
+        });
+        if (decision !== "allow_once") {
+          const error = new Error("owner denied permission");
+          error.name = "PermissionDeniedError";
+          throw error;
+        }
+        effects += 1;
+        return { output: "effect entered" };
+      },
+    };
+    const requests: ProviderRequest[] = [];
+    let providerCalls = 0;
+    const provider: Provider = {
+      name: "permission-steer-provider",
+      async *stream(request): AsyncGenerator<StreamEvent> {
+        requests.push({
+          ...request,
+          messages: request.messages.map((message) => ({
+            ...message,
+            content: message.content.map((block) => ({ ...block })),
+          })),
+        });
+        providerCalls += 1;
+        if (providerCalls === 1) {
+          yield { type: "tool_use_start", id: "permission-1", name: "PermissionEffect" };
+          yield { type: "tool_use_input_done", id: "permission-1", input: {} };
+          yield {
+            type: "message_done",
+            message: {
+              ...assistant("wire-permission-effect", ""),
+              content: [{ type: "tool_use", id: "permission-1", name: "PermissionEffect", input: {} }],
+            },
+            usage: { inputTokens: 1, outputTokens: 1 },
+            stopReason: "tool_use",
+          };
+          return;
+        }
+        yield {
+          type: "message_done",
+          message: assistant("wire-after-permission-steer", "continued from the correction"),
+          usage: { inputTokens: 1, outputTokens: 1 },
+          stopReason: "end_turn",
+        };
+      },
+    };
+    const sessionId = "permission-steer-session";
+    const session = new Session({
+      sessionId,
+      workspace,
+      provider,
+      model: "fixed",
+      systemPrompt: "test",
+      tools: [permissionTool],
+      sessionKernel: store,
+      requestPermission: async (request) => {
+        assert.equal(request.toolName, "PermissionEffect");
+        hostPermissionSignal = request.signal;
+        signalPermissionRequested();
+        return await new Promise<"deny" | "allow_once">((resolve, reject) => {
+          let settled = false;
+          const finish = (decision: "deny" | "allow_once") => {
+            if (settled) return;
+            settled = true;
+            request.signal?.removeEventListener("abort", onAbort);
+            resolve(decision);
+          };
+          const onAbort = () => {
+            if (settled) return;
+            settled = true;
+            const error = new Error("host permission waiter aborted");
+            error.name = "AbortError";
+            reject(error);
+          };
+          request.signal?.addEventListener("abort", onAbort, { once: true });
+          if (request.signal?.aborted) onAbort();
+          else void ownerDecision.then(finish, reject);
+        });
+      },
+      permissionDenialInterrupts: true,
+      contextBudgetTokens: 0,
+      maxTurns: 1,
+    });
+
+    ownerTurn = collect(
+      session.sendContent([{ type: "text", text: "attempt the permission effect" }], { inputId: "permission-owner" }),
+    );
+    await permissionRequested;
+    steeringTurn = collect(
+      session.sendContent(
+        [{ type: "text", text: "correction: do not request or perform that effect" }],
+        { inputId: "permission-steer", delivery: "steer" },
+      ),
+    );
+    await waitFor(
+      () => store.getInput("permission-steer") !== null,
+      "permission steer was not durably recorded",
+    );
+    const timeout = new Promise<never>((_resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("steering did not wake the pending permission prompt")), 1_000);
+      timer.unref?.();
+    });
+    const [ownerEvents, steerEvents] = await Promise.race([
+      Promise.all([ownerTurn, steeringTurn]),
+      timeout,
+    ]);
+
+    assert.deepEqual(steerEvents, []);
+    assert.equal(providerCalls, 2);
+    assert.equal(adapterEntries, 1, "the adapter entered only to request authority");
+    assert.equal(effects, 0, "no owner-approved effect began");
+    assert.equal(hostPermissionSignal?.aborted, true, "steering cancels the host-side approval waiter");
+    assert.ok(
+      ownerEvents.some((event) => event.type === "permission_response" && event.decision === "deny"),
+      "the pending surface prompt receives a synthetic deny settlement",
+    );
+    assert.deepEqual(
+      ownerEvents.find((event) => event.type === "provider_attempt_effects_skipped")?.toolUseIds,
+      ["permission-1"],
+    );
+    assert.equal(
+      ownerEvents.find((event) => event.type === "turn_end")?.status,
+      "completed",
+      "a steering wake is not misclassified as a user permission denial interrupt",
+    );
+    assert.equal(store.listToolRuns(sessionId)[0]?.executionState, "failed");
+    assert.equal(store.getInput("permission-steer")?.state, "consumed");
+    assert.match(JSON.stringify(requests[1]?.messages), /do not request or perform/);
+  } finally {
+    resolvePermission("deny");
+    await Promise.allSettled(
+      [ownerTurn, steeringTurn].filter((turn): turn is Promise<TurnEvent[]> => Boolean(turn)),
+    );
+    store.close();
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("permission denial terminally cancels its owner so the immediate next input can run", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "ares-kernel-permission-deny-terminal-"));
+  const { store } = createKernel();
+  try {
+    const sessionId = "permission-deny-terminal-session";
+    let providerCalls = 0;
+    let effectCalls = 0;
+    const provider: Provider = {
+      name: "permission-deny-then-final",
+      async *stream(): AsyncGenerator<StreamEvent> {
+        providerCalls += 1;
+        if (providerCalls === 1) {
+          yield { type: "tool_use_start", id: "denied-effect-1", name: "PermissionEffect" };
+          yield { type: "tool_use_input_done", id: "denied-effect-1", input: {} };
+          yield {
+            type: "message_done",
+            message: {
+              ...assistant("wire-denied-effect", ""),
+              content: [{ type: "tool_use", id: "denied-effect-1", name: "PermissionEffect", input: {} }],
+            },
+            usage: { inputTokens: 1, outputTokens: 1 },
+            stopReason: "tool_use",
+          };
+          return;
+        }
+        yield {
+          type: "message_done",
+          message: assistant("wire-after-denial", "the next message ran"),
+          usage: { inputTokens: 1, outputTokens: 1 },
+          stopReason: "end_turn",
+        };
+      },
+    };
+    const permissionTool: EngineTool = {
+      schema: {
+        name: "PermissionEffect",
+        description: "Require explicit owner approval",
+        inputJsonSchema: { type: "object", additionalProperties: false },
+        safety: "external-state",
+        concurrency: "exclusive",
+      },
+      call: async (_input, context) => {
+        const decision = await context.requestPermission?.({
+          toolName: "PermissionEffect",
+          input: {},
+          reason: "test denial terminal settlement",
+          suggestion: "allow_once",
+        });
+        if (decision !== "allow_once") {
+          const error = new Error("owner denied permission");
+          error.name = "PermissionDeniedError";
+          throw error;
+        }
+        effectCalls += 1;
+        return { output: "effect entered" };
+      },
+    };
+    const session = new Session({
+      sessionId,
+      workspace,
+      provider,
+      model: "fixed",
+      systemPrompt: "test",
+      tools: [permissionTool],
+      sessionKernel: store,
+      requestPermission: async () => "deny",
+      permissionDenialInterrupts: true,
+      contextBudgetTokens: 0,
+    });
+
+    const denied = await collect(
+      session.sendContent(
+        [{ type: "text", text: "attempt the denied effect" }],
+        { inputId: "permission-denied-owner" },
+      ),
+    );
+    const deniedEnd = [...denied].reverse().find(
+      (event): event is Extract<TurnEvent, { type: "turn_end" }> => event.type === "turn_end",
+    );
+    assert.equal(deniedEnd?.status, "interrupted");
+    assert.ok(
+      denied.some((event) => event.type === "permission_response" && event.decision === "deny"),
+      "the denial remains visible on the event stream",
+    );
+    assert.equal(effectCalls, 0);
+    assert.equal(
+      store.getInput("permission-denied-owner")?.state,
+      "cancelled",
+      "an explicit interrupted boundary is terminal and cannot be requeued by lease release",
+    );
+    const ownerEvents = store.listEvents(sessionId).filter((event) => {
+      const payload = event.payload as Record<string, unknown>;
+      return payload.inputId === "permission-denied-owner";
+    });
+    assert.equal(ownerEvents.filter((event) => event.type === "input.cancelled").length, 1);
+    const cancellation = ownerEvents.find((event) => event.type === "input.cancelled");
+    assert.equal(
+      ((cancellation?.payload as Record<string, unknown>)?.reason as Record<string, unknown>)?.code,
+      "TURN_INTERRUPTED",
+    );
+    assert.equal(store.listEvents(sessionId).some((event) => event.type === "input.requeued"), false);
+    assert.equal(store.getRun(sessionId, 1)?.executionState, "interrupted");
+
+    const immediateNext = collect(
+      session.sendContent(
+        [{ type: "text", text: "run immediately after denial" }],
+        { inputId: "after-permission-denial" },
+      ),
+    );
+    const next = await Promise.race([
+      immediateNext,
+      new Promise<never>((_resolve, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error("the next input remained blocked behind the denied owner")),
+          2_000,
+        );
+        timer.unref?.();
+      }),
+    ]);
+    const nextEnd = [...next].reverse().find(
+      (event): event is Extract<TurnEvent, { type: "turn_end" }> => event.type === "turn_end",
+    );
+    assert.equal(nextEnd?.status, "completed");
+    assert.equal(store.getInput("after-permission-denial")?.state, "consumed");
+    assert.equal(store.getRun(sessionId, 2)?.executionState, "completed");
+    assert.equal(providerCalls, 2);
+  } finally {
+    store.close();
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test("active steering waits for a settled tool boundary and is injected exactly once", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "ares-kernel-active-steer-"));
   const { store } = createKernel();
@@ -361,6 +1418,7 @@ test("active steering waits for a settled tool boundary and is injected exactly 
     });
     let toolActive = false;
     let toolCalls = 0;
+    let toolSignal: AbortSignal | undefined;
     const holdTool: EngineTool = {
       schema: {
         name: "Hold",
@@ -369,9 +1427,10 @@ test("active steering waits for a settled tool boundary and is injected exactly 
         safety: "read-only",
         concurrency: "parallel-safe",
       },
-      call: async () => {
+      call: async (_input, ctx) => {
         toolCalls += 1;
         toolActive = true;
+        toolSignal = ctx.signal;
         signalToolStarted();
         try {
           await toolGate;
@@ -449,6 +1508,7 @@ test("active steering waits for a settled tool boundary and is injected exactly 
       "steering input was not durably admitted while the tool was active",
     );
     assert.equal(toolActive, true);
+    assert.equal(toolSignal?.aborted, false, "steering cannot abort a tool effect before settlement");
     assert.equal(providerCalls, 1);
     assert.equal(store.listMessages(sessionId).some((message) => message.inputId === "steer-once"), false);
 
@@ -580,8 +1640,11 @@ test("steering acknowledgement failure requeues and replays one stable correctio
       ),
     );
     await waitFor(
-      () => store.getInput("fault-steer")?.state === "admitted",
-      "fault steering input was not admitted",
+      () => store.listEvents(sessionId).some((event) => {
+        const payload = event.payload as Record<string, unknown>;
+        return event.type === "input.claimed" && payload.inputId === "fault-steer";
+      }),
+      "fault steering input was not claimed by the preempted owner generation",
     );
 
     releaseFirstProvider();
@@ -676,6 +1739,237 @@ test("failed provider generation releases and requeues its claim for resume", as
     assert.equal(store.listMessages("requeue-session").filter((message) => message.role === "user").length, 1);
     assert.equal(store.getRun("requeue-session", 2)?.executionState, "completed");
   } finally {
+    store.close();
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("Stop before admission is input-bound, idempotent, and cannot poison the next turn", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "ares-kernel-pre-admission-cancel-"));
+  const { store } = createKernel();
+  try {
+    let providerCalls = 0;
+    const session = new Session({
+      sessionId: "pre-admission-cancel",
+      workspace,
+      provider: finalProvider("wire-after-idle-stop", () => {
+        providerCalls += 1;
+      }),
+      model: "fixed",
+      systemPrompt: "test",
+      tools: [],
+      sessionKernel: store,
+      contextBudgetTokens: 0,
+    });
+
+    assert.equal(session.interrupt(), false, "idle Stop has no target");
+    assert.equal(session.interrupt("future-request"), true, "routing-stage Stop binds to the future input id");
+    assert.equal(session.interrupt("future-request"), false, "duplicate Stop is a no-op");
+    const cancelledEvents = await collect(
+      session.sendContent([{ type: "text", text: "never run this" }], { inputId: "future-request" }),
+    );
+    const cancelledEnd = cancelledEvents.find(
+      (event): event is Extract<TurnEvent, { type: "turn_end" }> => event.type === "turn_end",
+    );
+    assert.equal(cancelledEnd?.status, "interrupted");
+    assert.equal(providerCalls, 0);
+    assert.equal(store.getInput("future-request")?.state, "cancelled");
+    assert.equal(store.requireSession("pre-admission-cancel").executionState, "idle");
+    assert.equal(session.interrupt(), false, "settled cancellation leaves the session idle");
+
+    const nextEvents = await collect(
+      session.sendContent([{ type: "text", text: "run the next request" }], { inputId: "next-request" }),
+    );
+    assert.equal(
+      nextEvents.find((event) => event.type === "turn_end")?.status,
+      "completed",
+      "the next input receives a fresh, unpoisoned abort controller",
+    );
+    assert.equal(providerCalls, 1);
+    assert.equal(store.getInput("next-request")?.state, "consumed");
+  } finally {
+    store.close();
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("active Stop cancels the owning generation and restart never replays it", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "ares-kernel-active-cancel-"));
+  const { store } = createKernel();
+  let releaseProvider = (): void => {};
+  try {
+    let providerCalls = 0;
+    let signalProviderStarted!: () => void;
+    const providerStarted = new Promise<void>((resolve) => {
+      signalProviderStarted = resolve;
+    });
+    const provider: Provider = {
+      name: "abort-aware",
+      async *stream(request): AsyncGenerator<StreamEvent> {
+        providerCalls += 1;
+        if (providerCalls === 1) {
+          signalProviderStarted();
+          await new Promise<void>((resolve, reject) => {
+            releaseProvider = resolve;
+            const aborted = () => {
+              const error = new Error("provider aborted by Stop");
+              error.name = "AbortError";
+              reject(error);
+            };
+            if (request.signal?.aborted) aborted();
+            else request.signal?.addEventListener("abort", aborted, { once: true });
+          });
+          return;
+        }
+        yield {
+          type: "message_done",
+          message: assistant("wire-after-cancel-restart"),
+          usage: { inputTokens: 1, outputTokens: 1 },
+          stopReason: "end_turn",
+        };
+      },
+    };
+    const options = {
+      sessionId: "active-cancel",
+      workspace,
+      provider,
+      model: "fixed",
+      systemPrompt: "test",
+      tools: [],
+      sessionKernel: store,
+      contextBudgetTokens: 0,
+    } as const;
+    const session = new Session(options);
+    const activeTurn = collect(
+      session.sendContent([{ type: "text", text: "stop while running" }], { inputId: "active-request" }),
+    );
+    await providerStarted;
+    assert.equal(store.getInput("active-request")?.state, "claimed");
+    assert.equal(session.interrupt("active-request"), true);
+    assert.equal(session.interrupt("active-request"), false, "double Stop cannot target terminal input state");
+
+    const interruptedEvents = await activeTurn;
+    assert.equal(
+      interruptedEvents.find((event) => event.type === "turn_end")?.status,
+      "interrupted",
+    );
+    assert.equal(store.getInput("active-request")?.state, "cancelled");
+    assert.equal(
+      store.listEvents("active-cancel").filter((event) => event.type === "input.requeued").length,
+      0,
+      "lease release must not resurrect a cancelled claim",
+    );
+
+    const restarted = new Session(options);
+    await restarted.waitForStartupRecovery();
+    assert.equal(providerCalls, 1, "startup recovery ignores terminal cancelled inputs");
+    const nextEvents = await collect(
+      restarted.sendContent([{ type: "text", text: "fresh work" }], { inputId: "fresh-request" }),
+    );
+    assert.equal(nextEvents.find((event) => event.type === "turn_end")?.status, "completed");
+    assert.equal(providerCalls, 2);
+    assert.equal(store.getInput("fresh-request")?.state, "consumed");
+  } finally {
+    releaseProvider();
+    store.close();
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("canonical steering routes before audit flush and cannot be independently cancelled", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "ares-kernel-cancel-steer-"));
+  const { store } = createKernel();
+  let releaseProvider = (): void => {};
+  let releaseSteerAudit = (): void => {};
+  try {
+    let signalProviderStarted!: () => void;
+    const providerStarted = new Promise<void>((resolve) => {
+      signalProviderStarted = resolve;
+    });
+    let providerCalls = 0;
+    const provider: Provider = {
+      name: "queued-steer-cancel",
+      async *stream(request): AsyncGenerator<StreamEvent> {
+        providerCalls += 1;
+        signalProviderStarted();
+        await new Promise<void>((resolve, reject) => {
+          releaseProvider = resolve;
+          const aborted = () => {
+            const error = new Error("stopped with queued steer");
+            error.name = "AbortError";
+            reject(error);
+          };
+          if (request.signal?.aborted) aborted();
+          else request.signal?.addEventListener("abort", aborted, { once: true });
+        });
+      },
+    };
+    const sessionId = "cancel-queued-steer";
+    const session = new Session({
+      sessionId,
+      workspace,
+      provider,
+      model: "fixed",
+      systemPrompt: "test",
+      tools: [],
+      sessionKernel: store,
+      contextBudgetTokens: 0,
+    });
+    const ownerTurn = collect(
+      session.sendContent([{ type: "text", text: "owner work" }], { inputId: "steer-owner" }),
+    );
+    await providerStarted;
+
+    // Pause the portable audit acknowledgement. Canonical SQLite admission now
+    // wakes the owner synchronously before this await, so no stale provider/tool
+    // work can start merely because JSONL is slow.
+    let signalSteerAuditFlushed!: () => void;
+    const steerAuditFlushed = new Promise<void>((resolve) => {
+      signalSteerAuditFlushed = resolve;
+    });
+    const steerAuditGate = new Promise<void>((resolve) => {
+      releaseSteerAudit = resolve;
+    });
+    const internals = session as unknown as { flush: () => Promise<void> };
+    const originalFlush = internals.flush.bind(session);
+    internals.flush = async () => {
+      await originalFlush();
+      signalSteerAuditFlushed();
+      await steerAuditGate;
+    };
+    const steerTurn = collect(
+      session.sendContent(
+        [{ type: "text", text: "correction that belongs to this turn" }],
+        { inputId: "queued-correction", delivery: "steer" },
+      ),
+    );
+    await steerAuditFlushed;
+    await waitFor(
+      () => store.getInput("queued-correction")?.state === "consumed" && providerCalls === 2,
+      "the owner did not apply canonical steering while the audit acknowledgement was paused",
+    );
+
+    assert.equal(session.interrupt("steer-owner"), true);
+    assert.equal(
+      session.interrupt("queued-correction"),
+      false,
+      "history accepted by the owner generation cannot be retracted independently",
+    );
+    releaseSteerAudit();
+    const [ownerEvents, steerEvents] = await Promise.all([ownerTurn, steerTurn]);
+    assert.equal(ownerEvents.find((event) => event.type === "turn_end")?.status, "interrupted");
+    assert.deepEqual(steerEvents, []);
+    assert.equal(store.getInput("steer-owner")?.state, "cancelled");
+    assert.equal(store.getInput("queued-correction")?.state, "consumed");
+    assert.equal(providerCalls, 2, "the corrected provider attempt starts before audit acknowledgement");
+    assert.equal(store.listInputs(sessionId, "admitted").length, 0);
+    assert.equal(
+      store.listEvents(sessionId).filter((event) => event.type === "input.requeued").length,
+      0,
+    );
+  } finally {
+    releaseProvider();
+    releaseSteerAudit();
     store.close();
     await rm(workspace, { recursive: true, force: true });
   }
@@ -784,6 +2078,119 @@ test("startup coordinator takes over an expired claimed input without duplicatin
     assert.equal(inputEvents.filter((event) => event.type === "input.claimed").length, 2);
     assert.equal(inputEvents.filter((event) => event.type === "input.consumed").length, 1);
     assert.equal(inputEvents.filter((event) => event.type === "input.detached_result").length, 1);
+  } finally {
+    store.close();
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("host-managed startup recovery reunites a queue owner, assistant tail, and later steer in one provider generation", async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "ares-kernel-host-recovery-owner-steer-"));
+  let now = 40_000;
+  const store = new SessionKernelStore(new BetterSqlite3(":memory:"), { now: () => now });
+  try {
+    const sessionId = "host-recovery-owner-steer";
+    const ownerInputId = "recovered-owner";
+    const steerInputId = "recovered-owner-steer";
+    const ownerText = "finish the renderer repair";
+    const steerText = "correction: keep the original camera transform";
+    store.createSession({ id: sessionId, workspaceKey: workspace });
+    store.admitInput({
+      id: ownerInputId,
+      sessionId,
+      idempotencyKey: ownerInputId,
+      delivery: "queue",
+      payload: { content: [{ type: "text", text: ownerText }] },
+    });
+    store.admitInput({
+      id: steerInputId,
+      sessionId,
+      idempotencyKey: steerInputId,
+      delivery: "steer",
+      payload: { content: [{ type: "text", text: steerText }] },
+    });
+    const crashed = store.acquireRunnerLease(sessionId, "crashed-daemon", 250);
+    const crashedFence = {
+      sessionId,
+      generation: crashed.generation,
+      leaseToken: crashed.leaseToken,
+    };
+    store.claimInput(crashedFence, ownerInputId);
+
+    // The provider response crossed SQLite, but the enclosing turn_end did not.
+    // Recovery must not leave an assistant tail or replay the original request.
+    const ownerMessageId = `msg_${createHash("sha256")
+      .update(`${sessionId}\0${ownerInputId}`)
+      .digest("hex")
+      .slice(0, 32)}`;
+    store.appendMessage(crashedFence, {
+      id: ownerMessageId,
+      inputId: ownerInputId,
+      role: "user",
+      metadata: { source: "user-input" },
+      parts: [{ type: "text", data: { type: "text", text: ownerText } }],
+      createdAtMs: now,
+    });
+    store.appendMessage(crashedFence, {
+      id: "crashed-assistant-tail",
+      inputId: ownerInputId,
+      role: "assistant",
+      metadata: {},
+      parts: [{ type: "text", data: { type: "text", text: "partial response survived" } }],
+      createdAtMs: now,
+    });
+
+    const requests: ProviderRequest[] = [];
+    let providerCalls = 0;
+    const session = new Session({
+      sessionId,
+      workspace,
+      provider: finalProvider("wire-host-recovery", (request) => {
+        providerCalls += 1;
+        requests.push(request);
+      }),
+      model: "fixed",
+      systemPrompt: "test",
+      tools: [],
+      sessionKernel: store,
+      sessionLeaseTtlMs: 250,
+      sessionLeaseHeartbeatMs: 50,
+      contextBudgetTokens: 0,
+      detachedStartupRecovery: false,
+    });
+
+    assert.equal(providerCalls, 0, "construction cannot run daemon-owned recovery");
+    assert.deepEqual(
+      session.pendingHostManagedStartupRecovery().map((input) => input.id),
+      [ownerInputId, steerInputId],
+    );
+    now += 251;
+    const recovered = await session.prepareHostManagedStartupRecovery();
+    assert.deepEqual(recovered.map((input) => input.id), [ownerInputId, steerInputId]);
+    assert.equal(providerCalls, 0, "lease takeover reconciles but never invokes the provider");
+
+    const events = await collect(session.sendContent(
+      [{ type: "text", text: ownerText }],
+      { inputId: ownerInputId, delivery: "queue", recoverExistingInput: true },
+    ));
+    assert.equal(events.at(-1)?.type, "turn_end");
+    assert.equal(events.find((event) => event.type === "turn_end")?.status, "completed");
+    assert.equal(providerCalls, 1, "owner and correction share one recovered provider generation");
+    assert.equal(store.getInput(ownerInputId)?.state, "consumed");
+    assert.equal(store.getInput(steerInputId)?.state, "consumed");
+    assert.equal(store.getRun(sessionId, 4), null, "no second execution generation is created for the steer");
+    assert.equal(store.listDetachedInputResults(sessionId).length, 0);
+    assert.match(JSON.stringify(requests[0]?.messages), /partial response survived/);
+    assert.match(JSON.stringify(requests[0]?.messages), /RECOVERY BOUNDARY/);
+    assert.match(JSON.stringify(requests[0]?.messages), /keep the original camera transform/);
+    assert.ok(
+      store.listMessages(sessionId).some((message) =>
+        message.metadata &&
+        typeof message.metadata === "object" &&
+        !Array.isArray(message.metadata) &&
+        message.metadata.source === "session-kernel-recovery"),
+      "assistant-tail recovery appends an explicit user-role boundary",
+    );
   } finally {
     store.close();
     await rm(workspace, { recursive: true, force: true });

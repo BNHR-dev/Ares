@@ -519,7 +519,7 @@ export interface SttHandle {
  */
 export function sidecarListen(
   onStatus?: (s: "connecting" | "listening" | "transcribing") => void,
-  opts?: { auto?: boolean },
+  opts?: { auto?: boolean; silenceMs?: number },
 ): Promise<SttHandle> {
   return new Promise((resolve, reject) => {
     let ws: WebSocket;
@@ -545,7 +545,11 @@ export function sidecarListen(
 
     ws.onopen = () => {
       onStatus?.("connecting");
-      ws.send(JSON.stringify({ type: "listen_start", auto: opts?.auto === true }));
+      ws.send(JSON.stringify({
+        type: "listen_start",
+        auto: opts?.auto === true,
+        silence_ms: opts?.silenceMs,
+      }));
     };
     ws.onmessage = (e) => {
       let m: { type: string; text?: string; available?: boolean };

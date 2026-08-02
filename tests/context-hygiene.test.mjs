@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { selectToolsForTurn } from "../packages/core/dist/queryEngine.js";
+import { semanticUserMessage } from "../packages/cli/dist/entry/turnPipeline.js";
 
 const tool = (name) => ({
   schema: { name, description: `${name} tool`, inputJsonSchema: { type: "object", properties: {} }, safety: "read-only" },
@@ -12,6 +13,7 @@ const tools = [
   "WebSearch", "WebFetch", "ImageSearch", "Memory", "RequestUserAction", "ComputerUse",
   "Stripe", "Email", "Gmail", "McpCallTool", "GoogleCalendar", "Spotify", "Weather", "Remind",
   "Task", "Conductor", "CodingBackend", "Deploy", "SkillHub", "SkillsList", "SkillRead",
+  "Capability",
 ].map(tool);
 const user = (text) => [{ id: "u", role: "user", content: [{ type: "text", text }], createdAt: new Date(0).toISOString() }];
 const names = (selected) => selected.map((entry) => entry.schema.name);
@@ -46,6 +48,14 @@ test("dynamic tool working set gives coding turns code tools without unrelated i
   assert.ok(!selected.includes("Gmail"));
 });
 
+test("generic Capability is always visible for ordinary editor work and remains inspectable in plan mode", () => {
+  const prompt = user("Adjust the weapon pose in this Godot scene, then verify it visually");
+  const build = names(selectToolsForTurn(tools, prompt, { workflowMode: "build", providerName: "openai", model: "gpt-5" }));
+  const plan = names(selectToolsForTurn(tools, prompt, { workflowMode: "plan", providerName: "openai", model: "gpt-5" }));
+  assert.ok(build.includes("Capability"));
+  assert.ok(plan.includes("Capability"));
+});
+
 test("recently used tool schemas survive terse follow-ups", () => {
   const history = [
     ...user("Create an invoice in Stripe"),
@@ -64,6 +74,13 @@ test("desktop transport keeps voice instructions out of the user goal", async ()
   // Retries re-use the already-canonical payload. Re-injecting the reminder on
   // those retries would change its byte/shape identity and defeat idempotency.
   assert.match(daemon, /voiceMode && !canonicalTurnContent\) turnContent\.unshift\(\{ type: "system_reminder", text: "<voice-mode\/>" \}\)/);
+});
+
+test("semantic turn preparation never mirrors inline image bytes into memory or lifecycle telemetry", () => {
+  const payload = "A".repeat(20_000);
+  const semantic = semanticUserMessage(`move the gun down\ndata:image/png;name="weapon frame.png";base64,${payload}\nthen verify it`);
+  assert.equal(semantic, "move the gun down\n[attached image]\nthen verify it");
+  assert.doesNotMatch(semantic, /base64|A{100}/);
 });
 
 test("desktop transcript hides internal reminders and labels fresh input", async () => {

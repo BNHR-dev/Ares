@@ -28,6 +28,7 @@ import type {
   AppendContextEpochInput,
   AppendMessageInput,
   BeginToolRunInput,
+  CancelInputInput,
   ContextEpochRecord,
   CreateChildSessionInput,
   CreateBackgroundJobInput,
@@ -1237,6 +1238,96 @@ export class SessionKernelStore {
     });
   }
 
+  /** Cancel exactly one durable input. Claimed inputs use a generation fence or
+   * exact generation CAS so Stop can never cancel a replacement runner's work. The
+   * terminal `cancelled` state is deliberately outside release/recovery's
+   * `claimed -> admitted` requeue predicate. */
+  cancelInput(inputId: string, input: CancelInputInput): AdmittedInputRecord {
+    assertIdentifier(inputId, "input id");
+    const now = this.now();
+    return this.immediate(() => {
+      const row = this.requireInputRow(inputId);
+      if (row.session_id !== input.sessionId) throw invalidArgument("Input belongs to another session");
+      if (row.state === "cancelled" || row.state === "consumed") return mapInput(row);
+
+      let generation: number | null = null;
+      if (row.state === "claimed") {
+        const fence = input.fence;
+        if (fence && fence.sessionId !== input.sessionId) {
+          throw invalidArgument("Cancellation fence belongs to another session");
+        }
+        if (fence) this.assertFenceTx(fence, now);
+        const expectedGeneration = fence?.generation ?? input.expectedGeneration;
+        if (expectedGeneration === undefined) {
+          throw new InvalidStateTransitionError(
+            "input",
+            inputId,
+            row.state,
+            "cancelled without an expected generation",
+          );
+        }
+        if (row.claimed_generation !== expectedGeneration) {
+          throw new StaleGenerationError(input.sessionId, expectedGeneration, "input belongs to another generation");
+        }
+        generation = expectedGeneration;
+      } else if (row.state === "admitted") {
+        if (input.fence) {
+          if (input.fence.sessionId !== input.sessionId) {
+            throw invalidArgument("Cancellation fence belongs to another session");
+          }
+          this.assertFenceTx(input.fence, now);
+          generation = input.fence.generation;
+        }
+      } else {
+        throw new InvalidStateTransitionError("input", inputId, row.state, "cancelled");
+      }
+
+      const changed = row.state === "claimed"
+        ? this.db
+            .prepare(
+              `UPDATE admitted_inputs
+               SET state = 'cancelled', claimed_generation = NULL,
+                   claimed_at_ms = NULL, consumed_at_ms = ?
+               WHERE id = ? AND state = 'claimed' AND claimed_generation = ?`,
+            )
+            .run(now, inputId, generation).changes
+        : this.db
+            .prepare(
+              `UPDATE admitted_inputs
+               SET state = 'cancelled', claimed_generation = NULL,
+                   claimed_at_ms = NULL, consumed_at_ms = ?
+               WHERE id = ? AND state = 'admitted'`,
+            )
+            .run(now, inputId).changes;
+      if (changed !== 1) {
+        throw new StaleGenerationError(input.sessionId, generation ?? 0, "input cancellation raced");
+      }
+
+      this.appendEventTx(input.sessionId, generation, "input.cancelled", {
+        inputId,
+        reason: input.reason ?? null,
+      }, now);
+
+      const pending = this.db
+        .prepare(
+          `SELECT COUNT(*) AS count FROM admitted_inputs
+           WHERE session_id = ? AND state IN ('admitted', 'claimed')`,
+        )
+        .get<{ count: number }>(input.sessionId)?.count ?? 0;
+      const session = this.requireSessionRow(input.sessionId);
+      if (pending === 0 && session.execution_state === "admitted") {
+        this.db
+          .prepare(
+            `UPDATE sessions
+             SET execution_state = 'idle', work_outcome = 'not_applicable', updated_at_ms = ?
+             WHERE id = ? AND execution_state = 'admitted'`,
+          )
+          .run(now, input.sessionId);
+      }
+      return mapInput(this.requireInputRow(inputId));
+    });
+  }
+
   /** Consume an orphaned caller input and publish its detached terminal result
    * in the same transaction. A restart can therefore observe either a runnable
    * input or its result acknowledgement, never a consumed input with no result. */
@@ -1847,10 +1938,40 @@ export class SessionKernelStore {
     return this.immediate(() => {
       this.assertFenceTx(fence, now);
       const session = this.requireSessionRow(fence.sessionId);
+      const latest = this.db
+        .prepare("SELECT * FROM context_epochs WHERE session_id = ? ORDER BY epoch DESC LIMIT 1")
+        .get<EpochRow>(fence.sessionId);
+      if (
+        input.coalesceLatest === true &&
+        input.id === undefined &&
+        latest?.reason === input.reason &&
+        latest.generation === fence.generation
+      ) {
+        // A microcompaction is a refreshed model-view checkpoint, not a new
+        // semantic boundary. Replacing only the latest same-generation row is
+        // safe because no later epoch can reference its previous projection.
+        this.db
+          .prepare(
+            `UPDATE context_epochs
+             SET summary_json = ?, projection_json = ?, source_versions_json = ?,
+                 base_event_sequence = ?, token_count = ?, created_at_ms = ?
+             WHERE id = ?`,
+          )
+          .run(
+            canonicalJson(input.summary),
+            canonicalJson(input.projection),
+            canonicalJson(input.sourceVersions ?? {}),
+            input.baseEventSequence ?? null,
+            input.tokenCount ?? null,
+            now,
+            latest.id,
+          );
+        this.db
+          .prepare("UPDATE sessions SET updated_at_ms = ? WHERE id = ?")
+          .run(now, fence.sessionId);
+        return mapEpoch(this.requireEpochRow(latest.id));
+      }
       const epoch = session.current_context_epoch + 1;
-      const previous = this.db
-        .prepare("SELECT id FROM context_epochs WHERE session_id = ? ORDER BY epoch DESC LIMIT 1")
-        .get<{ id: string }>(fence.sessionId);
       const id = input.id ?? this.makeId("ctx");
       assertIdentifier(id, "context epoch id");
       this.db
@@ -1864,7 +1985,7 @@ export class SessionKernelStore {
           id,
           fence.sessionId,
           epoch,
-          previous?.id ?? null,
+          latest?.id ?? null,
           fence.generation,
           input.reason,
           canonicalJson(input.summary),
@@ -1880,7 +2001,7 @@ export class SessionKernelStore {
       this.appendEventTx(fence.sessionId, fence.generation, "context.epoch_created", {
         contextEpochId: id,
         epoch,
-        previousEpochId: previous?.id ?? null,
+        previousEpochId: latest?.id ?? null,
         reason: input.reason,
       }, now);
       return mapEpoch(this.requireEpochRow(id));

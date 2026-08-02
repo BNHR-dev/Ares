@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 import os from "node:os";
 import path from "node:path";
 
-import { QueryEngine, Session, MockEchoProvider, loadSessionSnapshot } from "../packages/core/dist/index.js";
+import { QueryEngine, Session, MockEchoProvider, loadSessionSnapshot, openWorkspaceSessionKernel } from "../packages/core/dist/index.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // A throwaway workspace: these tests persist REAL session rollouts, and using
@@ -107,7 +107,14 @@ test("M0: saved sessions can be listed and replayed into messages", async () => 
 
   const events = r.stdout.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
   const snapshot = await loadSessionSnapshot(workspaceRoot, sessionId);
-  assert.equal(snapshot.eventCount, events.length + 1, "includes the durable input admission boundary");
+  // Canonical SQLite and the portable rollout intentionally project different
+  // event sets, so event counts are not a proxy for input admission. Inspect the
+  // canonical inbox directly and prove the request crossed its terminal fence.
+  const kernel = await openWorkspaceSessionKernel(workspaceRoot);
+  const inputs = kernel.listInputs(sessionId);
+  assert.equal(inputs.length, 1);
+  assert.equal(inputs[0]?.state, "consumed");
+  assert.ok(snapshot.eventCount > 0);
   assert.equal(snapshot.nextSeq, events.length + 1);
   assert.equal(snapshot.compacted, false);
   assert.equal(snapshot.replayedMessageCount, 2);

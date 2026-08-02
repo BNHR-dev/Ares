@@ -110,11 +110,16 @@ export async function chatCommand(args: ParsedArgs, resumeSessionId?: string): P
   // question nobody can see. The TUI registers an in-frame card handler here;
   // until (or unless) it does, fall back to the classic prompt.
   let inkPermissionHandler:
-    | ((req: { toolName: string; reason: string; suggestion?: string }) => Promise<PermissionPromptDecision>)
+    | ((req: { toolName: string; reason: string; suggestion?: string; signal?: AbortSignal }) => Promise<PermissionPromptDecision>)
     | null = null;
   const requestPermission = (req: ToolPermissionRequest): Promise<PermissionPromptDecision> =>
     inkPermissionHandler
-      ? inkPermissionHandler({ toolName: req.toolName, reason: req.reason, suggestion: req.suggestion })
+      ? inkPermissionHandler({
+          toolName: req.toolName,
+          reason: req.reason,
+          suggestion: req.suggestion,
+          signal: req.signal,
+        })
       : promptPermission(req);
 
   let live: LiveSession;

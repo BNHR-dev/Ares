@@ -43,17 +43,40 @@ export async function sideQuery(opts: SideQueryOptions): Promise<string> {
   ];
 
   const parts: string[] = [];
+  // Provider output ceilings are advisory: some OpenAI-compatible endpoints
+  // ignore or reject the wire field entirely. Auxiliary calls must still be
+  // bounded because they run on the critical path (compaction, reflection,
+  // watcher phrasing). Enforce a conservative local character ceiling too and
+  // abort the stream once it is reached.
+  const outputTokens = opts.maxOutputTokens ?? 1024;
+  const outputChars = Math.max(256, outputTokens * 4);
+  const outputAbort = new AbortController();
+  const signal = opts.signal
+    ? AbortSignal.any([opts.signal, outputAbort.signal])
+    : outputAbort.signal;
+  let chars = 0;
   for await (const ev of opts.provider.stream({
     model: opts.model,
     system: opts.system,
     messages,
     tools: [],
-    signal: opts.signal,
+    signal,
     reasoningLevel: opts.reasoningLevel,
     maxOutputTokens: opts.maxOutputTokens ?? 1024,
   })) {
     if (ev.type === "text_delta") {
-      parts.push(ev.text);
+      const remaining = outputChars - chars;
+      if (remaining <= 0) {
+        outputAbort.abort(new Error("sideQuery output ceiling reached"));
+        break;
+      }
+      const text = ev.text.length > remaining ? ev.text.slice(0, remaining) : ev.text;
+      parts.push(text);
+      chars += text.length;
+      if (chars >= outputChars) {
+        outputAbort.abort(new Error("sideQuery output ceiling reached"));
+        break;
+      }
     } else if (ev.type === "error") {
       throw new Error(`sideQuery(${opts.provider.name}): ${ev.error.message}`);
     } else if (ev.type === "message_done") {

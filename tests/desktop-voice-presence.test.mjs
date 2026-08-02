@@ -32,7 +32,8 @@ test("hands-free capture defaults favor prompt wake and end-of-utterance respons
   assert.match(app, /\}, 32\);/);
   assert.doesNotMatch(app, /const acks = \[/);
   assert.match(app, /voiceEngine\.phase === "running"/);
-  assert.match(app, /heardSpeech && now - lastVoice >= 650/);
+  assert.match(app, /heardSpeech && now - lastVoice >= 3_000/);
+  assert.match(app, /silenceMs: 3_000/);
   assert.match(rust, /Voice engine restarted automatically/);
   assert.match(rust, /set_ignore_cursor_events\(true\)/);
 });

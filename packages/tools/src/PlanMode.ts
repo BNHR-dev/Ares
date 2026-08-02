@@ -123,7 +123,7 @@ export function makeExitPlanModeTool(source: PlanModeStateSource) {
   return buildTool({
     name: "ExitPlanMode",
     description:
-      "Present the completed markdown plan and switch back to normal workspace-write mode. Use after plan-mode investigation is ready for approval.",
+      "Present the completed markdown plan for owner approval. This does not restore build authority by itself; only an explicit approval switches the session to build mode.",
     safety: "read-only",
     concurrency: "exclusive",
     inputZod: exitSchema,
@@ -158,7 +158,7 @@ export function makeExitPlanModeTool(source: PlanModeStateSource) {
       const decision = await ctx.requestPermission({
         toolName: "ExitPlanMode",
         input: { plan },
-        reason: "Approve this plan to leave plan mode and allow edits.",
+        reason: "Ready to build? Approve this exact plan to enter build mode and allow execution.",
         suggestion: "allow_once",
       });
       if (decision === "deny") {

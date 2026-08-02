@@ -348,6 +348,9 @@ export function LivingSurface({ sessionId }: { sessionId: string }) {
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
   busyRef.current = busy;
+  const [cancelling, setCancelling] = useState(false);
+  const cancellingRef = useRef(false);
+  cancellingRef.current = cancelling;
   const [activity, setActivity] = useState("waiting for intent");
   const [input, setInput] = useState("");
   const [lines, setLines] = useState<SurfaceLine[]>([]);
@@ -501,6 +504,8 @@ export function LivingSurface({ sessionId }: { sessionId: string }) {
         turnText.current = "";
         busyRef.current = true;
         setBusy(true);
+        cancellingRef.current = false;
+        setCancelling(false);
         setActivity("Ares is imagining the next form");
       } else if (type === "text_delta" && typeof event.text === "string") {
         turnText.current += event.text;
@@ -514,18 +519,34 @@ export function LivingSurface({ sessionId }: { sessionId: string }) {
           tool: String(event.toolName ?? event.name ?? "Ares tool"),
           reason: String(event.reason ?? "Ares needs permission to continue."),
         });
-      } else if (type === "turn_end") {
+      } else if (type === "interrupt_requested" || type === "interrupt_pending") {
+        cancellingRef.current = true;
+        setCancelling(true);
+        busyRef.current = true;
+        setBusy(true);
+        setActivity("stopping safely");
+      } else if (type === "interrupt_settled" || type === "interrupted_by_user" || type === "interrupt_idle") {
+        cancellingRef.current = false;
+        setCancelling(false);
         busyRef.current = false;
         setBusy(false);
-        applyResponse(turnText.current);
+      } else if (type === "turn_end") {
+        busyRef.current = cancellingRef.current;
+        setBusy(cancellingRef.current);
+        if (event.status === "completed") {
+          applyResponse(turnText.current);
+        } else if (event.status === "interrupted") {
+          addLine("system", "Turn stopped. The current surface was left unchanged.");
+          setActivity(cancellingRef.current ? "stopping safely" : "waiting for intent");
+        }
         turnText.current = "";
       } else if (type === "error") {
         const detail = event.error && typeof event.error === "object" ? JSON.stringify(event.error) : String(event.error ?? "Surface turn failed");
         addLine("system", detail);
         // A terminal fault may never be followed by turn_end; never strand
         // the composer in a disabled state.
-        busyRef.current = false;
-        setBusy(false);
+        busyRef.current = cancellingRef.current;
+        setBusy(cancellingRef.current);
         setActivity("the last turn faulted");
       }
     }).then((un) => { if (disposed) un(); else unlisten = un; });
@@ -613,6 +634,20 @@ export function LivingSurface({ sessionId }: { sessionId: string }) {
     addLine("system", "The void restored. The previous surface remains available through Undo.");
   }, [addLine, persist]);
 
+  const stopTurn = useCallback(() => {
+    if (!busyRef.current || cancellingRef.current) return;
+    cancellingRef.current = true;
+    setCancelling(true);
+    setActivity("stopping safely");
+    void invoke("ares_interrupt", { sessionId }).catch((error) => {
+      cancellingRef.current = false;
+      setCancelling(false);
+      busyRef.current = false;
+      setBusy(false);
+      addLine("system", `Could not stop Ares: ${String(error)}`);
+    });
+  }, [addLine, sessionId]);
+
   return (
     <div className="livingHost" data-busy={busy ? "1" : "0"}>
       {!entered ? <GenesisSplash onEnter={() => setEntered(true)} /> : null}
@@ -657,7 +692,7 @@ export function LivingSurface({ sessionId }: { sessionId: string }) {
         <span className="livingComposerIndex">INTENT</span>
         <input value={input} onChange={(event) => setInput(event.target.value)} placeholder={busy ? activity : "Tell Ares what this world should become…"} disabled={busy} autoFocus />
         <button type="button" className="livingMic" data-state={micState} onClick={() => void toggleMic()} aria-label="Speak to Ares"><i /><i /><i /></button>
-        {busy ? <button type="button" className="livingStop" onClick={() => void invoke("ares_interrupt", { sessionId })}>STOP</button> : <button type="submit" className="livingSend" disabled={!input.trim()}>EVOLVE ↗</button>}
+        {busy ? <button type="button" className="livingStop" onClick={stopTurn} disabled={cancelling}>{cancelling ? "STOPPING" : "STOP"}</button> : <button type="submit" className="livingSend" disabled={!input.trim()}>EVOLVE ↗</button>}
       </form>
 
       {permission ? (

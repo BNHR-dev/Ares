@@ -191,6 +191,10 @@ export interface ToolPermissionRequest {
   input: unknown;
   reason: string;
   suggestion?: PermissionPromptSuggestion;
+  /** Host waiters must detach when this unanswered request loses authority.
+   * The signal never aborts an effect after approval; it scopes only the
+   * pending prompt. */
+  signal?: AbortSignal;
 }
 
 export interface EngineToolResult {
@@ -225,6 +229,18 @@ export interface ClaimedSteeringMessage {
   message: Message;
 }
 
+/** Result of asking the live engine to notice a newly durable steering input.
+ * Provider attempts and optional maintenance are disposable; they can be
+ * cancelled without ending the owner turn. An entered effect is never cut in
+ * half, while queued/pre-effect work is paired as skipped before the correction
+ * is installed. `idle` is deliberately non-latching: terminal steers inherit
+ * the next FIFO generation rather than poisoning the dying one. */
+export type SteeringPreemptionDisposition =
+  | "provider_preempting"
+  | "effect_settling"
+  | "boundary_pending"
+  | "idle";
+
 // ─── Engine config ─────────────────────────────────────────────────────
 
 export interface QueryEngineConfig {
@@ -250,6 +266,15 @@ export interface QueryEngineConfig {
   /** Canonical workflow posture used to pin plan-transition tools and suppress
    * write protocols during long planning conversations. */
   workflowMode?: () => "plan" | "build";
+  /** Host-discovered environment-provider matchers. Core deliberately knows no
+   * editor or engine names: providers declare file/command signals in their
+   * manifests, and the host maps concrete outcomes to stable provider ids. */
+  environmentArtifactSignals?(event: {
+    toolName: string;
+    input: unknown;
+    output?: unknown;
+    touchedFiles?: readonly string[];
+  }): readonly string[] | Promise<readonly string[]>;
   /** If > 0, the engine trims the OLDEST conversation history to keep the
    *  estimated input (system + tools + messages) under this many tokens, so a
    *  long thread can never hard-fail with context_length_exceeded. The pending
@@ -403,6 +428,10 @@ export interface QueryEngineConfig {
    * contextBudgetTokens cap). Defaults to 80% of contextBudgetTokens.
    */
   compactionThresholdTokens?: number;
+  /** Include the complete post-compaction message projection on the public turn
+   * event. Kernel-backed Session hosts persist directly from engine.history(),
+   * so they disable this to avoid cloning and streaming megabytes of history. */
+  includeCompactionProjectionInEvents?: boolean;
 }
 
 const DURABLE_EFFECT_HOST = Symbol("ares.query-engine.durable-effect-host");
@@ -463,6 +492,7 @@ export function selectToolsForTurn(
     "read", ...primaryEditors, "glob", "grep", "bash", "powershell",
     "todowrite", "requestuseraction", "memory", "browser", "websearch",
     "webfetch", "imagesearch", "skillhub", "skillslist", "skillread",
+    "capability",
   ]);
   if (!intentPruning) {
     wanted.clear();
@@ -549,7 +579,7 @@ export function selectToolsForTurn(
     for (const name of ["write", "edit", "applypatch", "applyintent", "findandedit", "codemode"]) {
       wanted.delete(name);
     }
-    add("read", "glob", "grep", "codebasesearch", "lsp", "websearch", "webfetch", "imagesearch", "browser", "task", "updateplandraft", "exitplanmode");
+    add("read", "glob", "grep", "codebasesearch", "lsp", "websearch", "webfetch", "imagesearch", "browser", "task", "capability", "updateplandraft", "exitplanmode");
   }
   const planMixedTools = new Set(["webfetch", "browser", "task", "updateplandraft", "exitplanmode"]);
   const selected = tools.filter((tool) => {
@@ -595,15 +625,17 @@ const MAX_IMAGE_PAYLOAD_BYTES = (() => {
   return Number.isFinite(raw) && raw > 0 ? raw : 3 * 1024 * 1024;
 })();
 
-// Microcompact rung: cheaply clear OLD tool-output bodies (no model call) before
-// the heavy summarizer fires, keeping the last N at full fidelity. Only bulky,
+// Microcompact rung: cheaply clear OLD read-only tool-output bodies (no model
+// call) before the heavy summarizer fires, keeping the last N at full fidelity.
 // re-derivable tool output (a Read can be re-Read, a Grep re-run) — assistant
 // reasoning and user intent are never touched.
 const MICROCOMPACT_TOOLS = new Set<string>([
-  "Read", "Bash", "PowerShell", "Grep", "Glob", "WebSearch", "WebFetch",
-  "CodebaseSearch", "Edit", "Write", "FindAndEdit",
+  "Read", "Grep", "Glob", "WebSearch", "WebFetch", "CodebaseSearch",
 ]);
 const MICROCOMPACT_KEEP_RECENT = 6;
+const MICROCOMPACT_TRIGGER_RATIO = 0.72;
+const MICROCOMPACT_MIN_RESULTS = 8;
+const MICROCOMPACT_MIN_SAVED_TOKENS = 8_000;
 const MICROCOMPACT_PLACEHOLDER =
   "[old tool output cleared to save context — re-run the tool or Read the file if you need it again]";
 
@@ -860,33 +892,73 @@ export function buildContextLedger(dropped: readonly Message[]): string {
   if (dropped.length === 0) return "";
   const asks: string[] = [];
   const toolCounts = new Map<string, number>();
-  const files = new Set<string>();
+  let priorAnchor = "";
 
   for (const message of dropped) {
     for (const block of message.content) {
       if (block.type === "text" && message.role === "user") {
-        const firstLine = block.text.trim().split("\n")[0]?.trim();
-        if (firstLine && asks.length < 6) asks.push(firstLine.length > 120 ? `${firstLine.slice(0, 120)}…` : firstLine);
+        const direction = block.text.replace(/\s+/g, " ").trim();
+        if (direction) asks.push(direction.length > 360 ? `${direction.slice(0, 360)}…` : direction);
+      } else if (
+        block.type === "system_reminder" &&
+        /^Compacted memory\b/i.test(block.text.trim())
+      ) {
+        // A failed later summarizer must never erase the durable mission/state
+        // produced by an earlier successful compaction. Preserve the previous
+        // recap's semantic body, but discard live file pins (they are re-read
+        // below) and cap it so repeated fallback cannot grow recursively.
+        const bodyStart = block.text.indexOf("\n\n");
+        let body = bodyStart >= 0 ? block.text.slice(bodyStart + 2) : block.text;
+        for (const marker of [
+          "\n\nThe files you were working in, re-read AFTER compaction",
+          "\n\nRepository instructions re-pinned after compaction",
+        ]) {
+          const at = body.indexOf(marker);
+          if (at >= 0) body = body.slice(0, at);
+        }
+        priorAnchor = body.length > 24_000 ? `${body.slice(0, 24_000)}\n[prior anchor clipped]` : body;
       } else if (block.type === "tool_use") {
         toolCounts.set(block.name, (toolCounts.get(block.name) ?? 0) + 1);
-        const input = block.input as Record<string, unknown> | null;
-        // `file` alias too — see collectTrimmedFilePaths; raw tool_use inputs
-        // can carry the un-normalized key, so the ledger must list those files.
-        for (const key of ["file_path", "path", "notebook_path", "file"]) {
-          const value = input?.[key];
-          if (typeof value === "string" && value.trim() && files.size < 24) files.add(value.trim());
-        }
       }
     }
   }
 
+  // Files are recency-sensitive. The old implementation stopped after the
+  // first 24 paths, which retained abandoned early work and forgot the files
+  // being edited immediately before compaction.
+  const files: string[] = [];
+  const seenFiles = new Set<string>();
+  for (let i = dropped.length - 1; i >= 0 && files.length < 24; i--) {
+    const message = dropped[i];
+    for (let j = message.content.length - 1; j >= 0 && files.length < 24; j--) {
+      const block = message.content[j];
+      if (block.type !== "tool_use") continue;
+      const input = block.input as Record<string, unknown> | null;
+      for (const key of ["file_path", "path", "notebook_path", "file"]) {
+        const value = input?.[key];
+        if (typeof value !== "string") continue;
+        const normalized = value.trim();
+        if (!normalized || seenFiles.has(normalized)) continue;
+        seenFiles.add(normalized);
+        files.push(normalized);
+        if (files.length >= 24) break;
+      }
+    }
+  }
+
+  const latestAsks: string[] = [];
+  for (let i = asks.length - 1; i >= 0 && latestAsks.length < 8; i--) {
+    if (!latestAsks.includes(asks[i])) latestAsks.unshift(asks[i]);
+  }
+
   const lines = [`Context ledger — ${dropped.length} older message(s) were trimmed from your visible history to fit the model's context window. What that span contained:`];
-  if (asks.length > 0) lines.push(`- Earlier user asks: ${asks.join(" | ")}`);
+  if (priorAnchor.trim()) lines.push(`- Prior durable mission/state (preserved from the previous compaction):\n${priorAnchor.trim()}`);
+  if (latestAsks.length > 0) lines.push(`- Latest user directions and corrections: ${latestAsks.join(" | ")}`);
   if (toolCounts.size > 0) {
     const tools = [...toolCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([name, n]) => `${name}×${n}`);
     lines.push(`- Tools you already ran there: ${tools.join(", ")}`);
   }
-  if (files.size > 0) lines.push(`- Files you already touched/read there: ${[...files].join(", ")}`);
+  if (files.length > 0) lines.push(`- Most recent files you already touched/read there: ${files.join(", ")}`);
   lines.push("Anything you remember doing in that span really happened — re-read files only if you need their CURRENT content. Stay on the original mission.");
   return lines.join("\n");
 }
@@ -931,6 +1003,34 @@ export function chooseCompactionSplit(
 
 // ─── Implementation ────────────────────────────────────────────────────
 
+async function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) throw new DOMException("Operation aborted", "AbortError");
+  return await new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      cleanup();
+      reject(new DOMException("Operation aborted", "AbortError"));
+    };
+    const cleanup = () => signal.removeEventListener("abort", onAbort);
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        cleanup();
+        reject(error);
+      },
+    );
+  });
+}
+
+interface ActiveProviderAttempt {
+  id: string;
+  steeringAbort: AbortController;
+  supersededBySteering: boolean;
+}
+
 export class QueryEngine {
   private readonly messages: Message[] = [];
   private readonly cfg: QueryEngineConfig;
@@ -938,9 +1038,22 @@ export class QueryEngine {
   /** Per-turn abort controller — interrupt() stops the CURRENT turn without
    *  poisoning the session; the next turn gets a fresh controller. */
   private turnAbort: AbortController | null = null;
-  /** An interrupt that arrived before this turn's controller existed (during the
-   *  pre-stream preamble) — honored the instant the controller is created. */
-  private interruptPending = false;
+  /** Current execution phase, used only to route a durable steering wake-up.
+   * Provider attempts are speculative until their final Message is installed;
+   * tools, by contrast, must always reach their settlement boundary. */
+  private turnPhase: "idle" | "boundary" | "maintenance" | "provider" | "effect" | "terminal" = "idle";
+  /** Monotonic wake generation for durable steers. It closes the window where
+   * admission lands after an empty inbox poll but before provider/terminal
+   * authority is armed. */
+  private steeringWakeEpoch = 0;
+  /** Abortable edge for awaits that are still strictly pre-effect (notably an
+   * unanswered permission prompt). Replaced on every wake so already-settled
+   * effects never inherit cancellation from an older correction. */
+  private steeringWakeController = new AbortController();
+  private activeProviderAttempt: ActiveProviderAttempt | null = null;
+  /** Heavy compaction is speculative maintenance. A steer cancels it just like
+   * a stale provider attempt, without committing a fallback ledger rewrite. */
+  private activeMaintenanceAttempt: AbortController | null = null;
   /**
    * Live estimate→real token ratio, calibrated from the usage every provider
    * returns. The char-based estimator over-counts code/JSON and under-counts
@@ -1126,23 +1239,62 @@ export class QueryEngine {
     }
   }
 
-  /** Stop the in-flight turn (provider stream + running tools see the abort).
-   *  Safe to call when idle — the next turn is unaffected. */
-  interrupt(): void {
-    // A LIVE turn owns a controller — aborting it ends THIS turn, and that's all.
-    // Only when there is no live controller (a Stop pressed in the gap before the
-    // next turn arms its own, e.g. during the recall/compaction preamble) do we
-    // carry the interrupt forward. Arming the pending flag while a turn is live was
-    // the bug that let an interrupt leak into the FOLLOWING turn.
-    if (this.turnAbort) this.turnAbort.abort();
-    else this.interruptPending = true;
+  /** Stop the currently armed turn (provider stream + running tools see the
+   * abort). Idle and duplicate interrupts are strict no-ops; ownership of a
+   * pre-stream cancellation belongs to Session's input/generation state, never
+   * to an unbound flag that could poison the next turn. */
+  interrupt(): boolean {
+    if (!this.turnAbort || this.turnAbort.signal.aborted) return false;
+    this.turnAbort.abort();
+    return true;
   }
 
-  /** Called by the session the instant a turn's generator finishes (for any
-   *  reason). Drops the live controller so a Stop between turns correctly arms the
-   *  next turn instead of being swallowed by a stale, already-aborted controller. */
+  /** Wake the current turn after a steering input is DURABLY admitted.
+   *
+   * During provider generation, the request is speculative: cancel that one
+   * attempt, discard all of its uncommitted assistant/tool blocks, and let the
+   * same streamTurn continue with the correction. During tool execution we do
+   * not abort—the tool result must be paired and durably settled first. */
+  requestSteeringPreemption(): SteeringPreemptionDisposition {
+    if (!this.turnAbort) return "idle";
+    if (this.turnPhase === "terminal") return "idle";
+    this.steeringWakeEpoch++;
+    const priorWake = this.steeringWakeController;
+    this.steeringWakeController = new AbortController();
+    priorWake.abort();
+    if (this.turnPhase === "maintenance" && this.activeMaintenanceAttempt) {
+      if (!this.activeMaintenanceAttempt.signal.aborted) this.activeMaintenanceAttempt.abort();
+      return "boundary_pending";
+    }
+    const attempt = this.activeProviderAttempt;
+    if (this.turnPhase === "provider" && attempt) {
+      attempt.supersededBySteering = true;
+      if (!attempt.steeringAbort.signal.aborted) attempt.steeringAbort.abort();
+      return "provider_preempting";
+    }
+    if (this.turnPhase === "effect") return "effect_settling";
+    return "boundary_pending";
+  }
+
+  /** Called by Session the instant a turn generator finishes. Dropping the
+   * controller makes any later idle Stop a no-op instead of targeting a stale
+   * generation or leaking into the next request. */
   markTurnEnded(): void {
+    this.activeMaintenanceAttempt?.abort();
+    this.activeMaintenanceAttempt = null;
     this.turnAbort = null;
+    this.turnPhase = "idle";
+    this.activeProviderAttempt = null;
+  }
+
+  /** Fence terminal emission before Session exposes it. Inputs admitted after
+   * this point inherit the next FIFO generation; they cannot wake a dead owner
+   * while its async generator is closing. */
+  markTurnTerminal(): void {
+    this.activeMaintenanceAttempt?.abort();
+    this.activeMaintenanceAttempt = null;
+    if (this.turnAbort) this.turnPhase = "terminal";
+    this.activeProviderAttempt = null;
   }
 
   /** The live signal for the current turn: external config signal merged with
@@ -1273,6 +1425,57 @@ export class QueryEngine {
     return inputIds.size;
   }
 
+  /** Drain until no notification can have raced the inbox snapshot, then arm
+   * provider authority in the same synchronous continuation. `null` means a
+   * correction was installed and outbound context must be rebuilt. */
+  private async armProviderAttemptAtBoundary(): Promise<NonNullable<QueryEngine["activeProviderAttempt"]> | null> {
+    while (true) {
+      const observedEpoch = this.steeringWakeEpoch;
+      const applied = await this.applySteeringAtBoundary();
+      if (applied > 0) return null;
+      if (observedEpoch !== this.steeringWakeEpoch) continue;
+      const attempt = {
+        id: cryptoId("provider_attempt"),
+        steeringAbort: new AbortController(),
+        supersededBySteering: false,
+      };
+      // Keep this transition adjacent to the epoch comparison. A later wake
+      // sees provider authority and aborts this exact disposable attempt.
+      this.activeProviderAttempt = attempt;
+      this.turnPhase = "provider";
+      return attempt;
+    }
+  }
+
+  /** Read through a method boundary so control-flow analysis does not retain a
+   * stale property narrowing across awaited host/provider work. Those awaits
+   * can synchronously route steering and replace or clear the active attempt. */
+  private currentProviderAttempt(): ActiveProviderAttempt | null {
+    return this.activeProviderAttempt;
+  }
+
+  /** Linearize successful completion against a concurrently admitted steer. */
+  private async closeTurnAtBoundary(): Promise<boolean> {
+    while (true) {
+      const observedEpoch = this.steeringWakeEpoch;
+      const applied = await this.applySteeringAtBoundary();
+      if (applied > 0) return false;
+      if (observedEpoch !== this.steeringWakeEpoch) continue;
+      this.markTurnTerminal();
+      return true;
+    }
+  }
+
+  /** Construct the only externally visible terminal boundary. Calling this
+   * before yielding makes late durable inputs belong to the next generation,
+   * even while Session is still persisting the event. */
+  private terminalTurnEvent(
+    event: Extract<TurnEvent, { type: "turn_end" }>,
+  ): Extract<TurnEvent, { type: "turn_end" }> {
+    this.markTurnTerminal();
+    return event;
+  }
+
   /**
    * Seed a turn with a goal/work-item instead of a chat message. An autonomous
    * driver (operator step, subagent, Consciousness action) frames a directive
@@ -1303,7 +1506,7 @@ export class QueryEngine {
    */
   /**
    * Microcompact rung — the cheap layer beneath compactIfNeeded. When history
-   * passes ~60% of the heavy-compaction threshold, clear the BODIES of old
+   * passes the microcompaction watermark, clear a useful BATCH of old
    * compactable tool_result blocks (keeping the most recent N) in place, with NO
    * model call. Bulky, re-derivable output (file reads, greps, vision dumps) is
    * what dominates a coding session's tokens; clearing it here usually keeps the
@@ -1320,7 +1523,7 @@ export class QueryEngine {
       (this.cfg.contextBudgetTokens ? Math.floor(this.cfg.contextBudgetTokens * 0.8) : 0);
     if (threshold <= 0) return null;
     const estBefore = this.messages.reduce((s, m) => s + estimateMessageTokens(m), 0);
-    if (estBefore * this.tokenScale <= threshold * 0.6) return null;
+    if (estBefore * this.tokenScale <= threshold * MICROCOMPACT_TRIGGER_RATIO) return null;
 
     // tool_result blocks only carry a tool_use_id — map ids to names via the
     // assistant's tool_use blocks to know which results are compactable.
@@ -1342,9 +1545,7 @@ export class QueryEngine {
     }
     const keep = new Set(ordered.slice(-MICROCOMPACT_KEEP_RECENT));
 
-    let cleared = 0;
-    let savedChars = 0;
-    const clearedIds = new Set<string>();
+    const candidates: Array<{ block: ToolResultBlock; chars: number }> = [];
     for (const m of this.messages) {
       for (const b of m.content) {
         if (
@@ -1354,14 +1555,30 @@ export class QueryEngine {
           typeof b.content === "string" &&
           b.content !== MICROCOMPACT_PLACEHOLDER
         ) {
-          savedChars += b.content.length;
-          b.content = MICROCOMPACT_PLACEHOLDER;
-          clearedIds.add(b.tool_use_id);
-          cleared++;
+          candidates.push({ block: b, chars: b.content.length });
         }
       }
     }
-    if (cleared === 0) return null;
+    if (candidates.length === 0) return null;
+
+    const savedChars = candidates.reduce((sum, candidate) => sum + candidate.chars, 0);
+    const savedTokens = Math.round((savedChars / CHARS_PER_TOKEN) * this.tokenScale);
+    // Once above the watermark, wait for a useful batch instead of rewriting a
+    // full durable projection every time one additional result becomes old. A
+    // single enormous result still crosses the savings threshold immediately.
+    if (
+      candidates.length < MICROCOMPACT_MIN_RESULTS &&
+      savedTokens < MICROCOMPACT_MIN_SAVED_TOKENS
+    ) {
+      return null;
+    }
+
+    const clearedIds = new Set<string>();
+    for (const candidate of candidates) {
+      candidate.block.content = MICROCOMPACT_PLACEHOLDER;
+      clearedIds.add(candidate.block.tool_use_id);
+    }
+    const cleared = candidates.length;
 
     // The cleared Read/etc. bodies are GONE from the model's view — but their
     // read stamps survive. Without invalidating them, a recovery whole-file Read
@@ -1389,10 +1606,12 @@ export class QueryEngine {
         method: "micro",
         // Clone the array so later engine mutations cannot change the durable
         // projection object while Session is committing it to SQLite/JSONL.
-        messages: this.messages.map((message) => ({
-          ...message,
-          content: message.content.map((block) => ({ ...block })),
-        })),
+        messages: this.cfg.includeCompactionProjectionInEvents === false
+          ? undefined
+          : this.messages.map((message) => ({
+              ...message,
+              content: message.content.map((block) => ({ ...block })),
+            })),
       },
       reminder: {
         type: "system_reminder_injected",
@@ -1403,6 +1622,11 @@ export class QueryEngine {
   }
 
   private async compactIfNeeded(): Promise<Extract<TurnEvent, { type: "compaction" }> | null> {
+    // A just-installed owner correction gets the next provider request before
+    // optional maintenance. Provider budgeting still enforces the hard context
+    // limit, and a later settled boundary can compact after the correction has
+    // been answered or has produced tool results.
+    if (this.messages.at(-1)?.metadata?.source === "steer") return null;
     const threshold =
       this.cfg.compactionThresholdTokens ??
       (this.cfg.contextBudgetTokens ? Math.floor(this.cfg.contextBudgetTokens * 0.8) : 0);
@@ -1421,17 +1645,34 @@ export class QueryEngine {
 
     const older = this.messages.slice(0, split);
 
+    const maintenanceAttempt = new AbortController();
+    this.activeMaintenanceAttempt = maintenanceAttempt;
+    this.turnPhase = "maintenance";
+    const turnSignal = this.liveSignal();
+    const maintenanceSignal = turnSignal.aborted
+      ? turnSignal
+      : AbortSignal.any([turnSignal, maintenanceAttempt.signal]);
+
+    try {
+
     let summary = "";
     let method: "summary" | "ledger" = "summary";
     if (this.cfg.summarizeSpan) {
       try {
-        // Thread the turn's live signal so a Stop during compaction aborts the
-        // summarizer sub-model instead of letting it run to completion.
-        summary = (await this.cfg.summarizeSpan(older, this.liveSignal())).trim();
+        // Compaction is speculative maintenance. Stop or steer cancels the
+        // summarizer immediately, even if an adapter ignores its signal.
+        summary = (await awaitWithAbort(
+          this.cfg.summarizeSpan(older, maintenanceSignal),
+          maintenanceSignal,
+        )).trim();
       } catch {
         summary = "";
       }
     }
+    // An aborted summarizer is not a summarizer failure. In particular, a
+    // steer must not trigger a synchronous ledger fallback/rewrite before its
+    // correction reaches the provider.
+    if (maintenanceSignal.aborted) return null;
     if (!summary) {
       summary = buildContextLedger(older);
       method = "ledger";
@@ -1447,7 +1688,7 @@ export class QueryEngine {
     for (const rel of recentFilePathsFromSpan(older, 5)) {
       const full = path.resolve(this.cfg.workspace, rel);
       try {
-        const body = await fs.readFile(full, "utf8");
+        const body = await fs.readFile(full, { encoding: "utf8", signal: maintenanceSignal });
         if (body.length > 24_000) continue; // too big to re-pin — the model can Read it
         filePins += `\n\n=== CURRENT content of ${rel} (re-read after compaction) ===\n${body}`;
         if (filePins.length > 60_000) break;
@@ -1461,12 +1702,16 @@ export class QueryEngine {
     // compaction cannot erase it and an on-disk rule change takes effect.
     let instructionPins = "";
     try {
+      const activeInstructions = this.cfg.repositoryInstructions?.active();
       instructionPins = renderRepositoryInstructions(
-        await this.cfg.repositoryInstructions?.active() ?? [],
+        activeInstructions
+          ? await awaitWithAbort(activeInstructions, maintenanceSignal)
+          : [],
       );
     } catch {
       instructionPins = "";
     }
+    if (maintenanceSignal.aborted) return null;
 
     const recap: Message = {
       id: cryptoId("compact"),
@@ -1504,11 +1749,19 @@ export class QueryEngine {
       tokensBefore,
       tokensAfter,
       method,
-      messages: this.messages.map((message) => ({
-        ...message,
-        content: message.content.map((block) => ({ ...block })),
-      })),
+      messages: this.cfg.includeCompactionProjectionInEvents === false
+        ? undefined
+        : this.messages.map((message) => ({
+            ...message,
+            content: message.content.map((block) => ({ ...block })),
+          })),
     };
+    } finally {
+      if (this.activeMaintenanceAttempt === maintenanceAttempt) {
+        this.activeMaintenanceAttempt = null;
+        if (this.turnPhase === "maintenance") this.turnPhase = "boundary";
+      }
+    }
   }
 
   /** Compaction removed the model-visible bytes that justified every edit CAS.
@@ -1534,12 +1787,13 @@ export class QueryEngine {
     }
 
     // Arm the per-turn abort controller IMMEDIATELY — before turn_start, the
-    // reminder yields, and (critically) the compaction model call below — so a
-    // Stop pressed during the preamble actually aborts instead of no-opping.
-    // Honor an interrupt that landed in the gap before this generator ran.
+    // reminder yields, and (critically) the compaction model call below. Session
+    // owns cancellation before this point by durable input identity.
     this.turnAbort = new AbortController();
-    if (this.interruptPending) this.turnAbort.abort();
-    this.interruptPending = false;
+    this.turnPhase = "boundary";
+    this.steeringWakeEpoch = 0;
+    this.activeProviderAttempt = null;
+    this.activeMaintenanceAttempt = null;
 
     // Inject pending system-reminders into the user message before yielding
     // turn_start. The turn_start event remains first for stable rollout/daemon
@@ -1587,8 +1841,29 @@ export class QueryEngine {
     // grown past the threshold, summarize the old span into a recap and keep
     // recent turns whole — so a long session stays coherent instead of getting
     // its history bluntly trimmed mid-turn.
-    const compaction = await this.compactIfNeeded();
+    // Poll before arming maintenance as well as after it. The continuation from
+    // an empty poll to compactIfNeeded's synchronous maintenance transition has
+    // no await gap, while an already-admitted correction skips optional summary
+    // work and reaches generation immediately.
+    const steeringBeforeCompaction = await this.applySteeringAtBoundary();
+    const compaction = steeringBeforeCompaction > 0 ? null : await this.compactIfNeeded();
     if (compaction) yield compaction;
+
+    // A steer may arrive while the summarizer/file re-pin awaits. Fold it in
+    // before the first provider request instead of making the user wait through
+    // an obsolete model/tool batch. A Stop at the same point ends cleanly and
+    // never falls through into provider execution.
+    if (this.liveSignal().aborted) {
+      yield this.terminalTurnEvent({
+        type: "turn_end",
+        status: "interrupted",
+        workStatus: "not_applicable",
+        usage: { inputTokens: 0, outputTokens: 0, modelCalls: 0 },
+        durationMs: Date.now() - startedAt,
+      });
+      return;
+    }
+    await this.applySteeringAtBoundary();
 
     const totalUsage: Usage = { inputTokens: 0, outputTokens: 0, modelCalls: 0 };
     let stopReason: StopReason = "end_turn";
@@ -1653,10 +1928,8 @@ export class QueryEngine {
     let unverifiedSurfaced = false;
     // GUI ground truth. Headless/unit green does not prove a window renders:
     // the BeanBrawl failure shipped a grey screen behind "27/27 tests pass".
-    // When the turn touches a windowed-app artifact (Godot/Tauri/Electron/
-    // Unity scenes, desktop exports), completion additionally requires VISUAL
-    // evidence — a successful ComputerUse/Browser screenshot newer than the
-    // last mutation — before the work can resolve as verified.
+    // Environment providers declare their own artifact matchers and evidence
+    // operations; core only enforces that visual proof is newer than mutation.
     const guiSignals = new Set<string>();
     let guiGateFired = false;
     let guiUnverifiedSurfaced = false;
@@ -1732,13 +2005,13 @@ export class QueryEngine {
       return hasPostMutationProof() ? "verified" : "unverified";
     };
 
-    for (let iter = 0; iter < maxIters; iter++) {
+    turnLoop: for (let iter = 0; iter < maxIters; iter++) {
       // Honor a Stop at every iteration boundary — independent of provider
       // timing or whether a tool cooperated with its abort signal. Without this
       // an interrupt during/after a non-cooperative tool wouldn't be felt until
       // the next provider stream (many seconds), so Stop appeared dead.
       if (this.liveSignal().aborted) {
-        yield { type: "turn_end", status: "interrupted", workStatus: resolvedWorkStatus(), usage: totalUsage, durationMs: Date.now() - startedAt };
+        yield this.terminalTurnEvent({ type: "turn_end", status: "interrupted", workStatus: resolvedWorkStatus(), usage: totalUsage, durationMs: Date.now() - startedAt });
         return;
       }
       // The iteration edge is a safe steering boundary: the prior assistant
@@ -1759,15 +2032,21 @@ export class QueryEngine {
         const boundaryCompaction = await this.compactIfNeeded();
         if (boundaryCompaction) yield boundaryCompaction;
         if (this.liveSignal().aborted) {
-          yield { type: "turn_end", status: "interrupted", workStatus: resolvedWorkStatus(), usage: totalUsage, durationMs: Date.now() - startedAt };
+          yield this.terminalTurnEvent({ type: "turn_end", status: "interrupted", workStatus: resolvedWorkStatus(), usage: totalUsage, durationMs: Date.now() - startedAt });
           return;
         }
+        // Maintenance is an awaited boundary too. Steering admitted while the
+        // recap was being produced must reach the very next provider call.
+        await this.applySteeringAtBoundary();
       }
       // ─── Stream one assistant turn from the provider ─────────────────
       const pendingToolUses: Array<{ id: string; name: string; input: unknown }> = [];
       const toolNameById = new Map<string, string>();
       let assistantMessage: Message | null = null;
       let streamError: { code: string; message: string; retriable: boolean; retryAfterMs?: number } | null = null;
+      let terminalMessageEvent: Extract<StreamEvent, { type: "message_done" }> | null = null;
+      let completedProviderAttemptId: string | null = null;
+      let supersededProviderAttemptId: string | null = null;
 
       try {
         const activeTools = selectToolsForTurn(this.cfg.tools, this.messages, {
@@ -1805,6 +2084,8 @@ export class QueryEngine {
             toolNameById.clear();
             assistantMessage = null;
             streamError = null;
+            terminalMessageEvent = null;
+            completedProviderAttemptId = null;
             modelStarted = false;
 
             const budgeted = budgetMessages(this.messages, budgetAttempts[attempt], overheadTokens);
@@ -1847,69 +2128,112 @@ export class QueryEngine {
             const outboundMessages = fitImagesToBudget(budgeted.messages, budgetAttempts[attempt], overheadTokens);
             const estPromptTokens =
               overheadTokens + outboundMessages.reduce((s, m) => s + estimateMessageTokens(m), 0);
-            // Per-attempt abort: a stalled request is cut without killing the
-            // turn — the stall guard fires it, the retry loop recovers.
-            const attemptAbort = new AbortController();
-            const stream = this.cfg.provider.stream({
-              model: this.cfg.model,
-              system: this.cfg.systemPrompt,
-              messages: outboundMessages,
-              tools: toolDescriptors,
-              signal: AbortSignal.any([this.liveSignal(), attemptAbort.signal]),
-              reasoningLevel: this.tacticalReasoningLevel(iter),
-              maxOutputTokens: this.cfg.maxOutputTokens,
-              // Act first: the opening call of an autonomous goal must DO
-              // something (a tool call), not produce a plan-essay and stop.
-              toolChoice: iter === 0 && this.inGoalMode() ? "any" : undefined,
-              // Tactical phase for binary-dial reasoners: full think on the
-              // opening call + failure recovery, skip the reasoning pass on
-              // routine continuations. ARES_TACTICAL_REASONING=0 opts out.
-              reasoningPhase:
-                process.env.ARES_TACTICAL_REASONING !== "0" && iter > 0 && !this.lastRoundHadFailure
-                  ? "routine"
-                  : "deep",
-            });
+            // A boundary event above (for example a context-ledger notice) can
+            // yield long enough for a steer to be admitted before the request is
+            // armed. Re-snapshot the inbox and rebuild the prompt rather than
+            // launching one knowingly stale provider attempt.
+            const providerAttempt = await this.armProviderAttemptAtBoundary();
+            if (!providerAttempt) {
+              iter--;
+              continue turnLoop;
+            }
+            // A provider attempt is speculative until its terminal Message is
+            // installed. Steering owns a separate abort controller from Stop and
+            // the stall watchdog: cancelling it discards only this attempt and
+            // keeps the durable owner generation alive.
+            const stallAbort = new AbortController();
+            yield { type: "provider_attempt_started", attemptId: providerAttempt.id };
 
             let sawCommittedOutput = false;
-            for await (const ev of guardStreamStalls(stream, {
-              idleMs: streamIdleMs(),
-              activeIdleMs: streamActiveIdleMs(),
-              thinkCeilingMs: thinkCeilingMs(),
-              onStall: () => attemptAbort.abort(),
-            })) {
-              if (
-                ev.type === "error" &&
-                isContextLimitError(ev.error) &&
-                !modelStarted &&
-                attempt < budgetAttempts.length - 1
-              ) {
-                streamError = ev.error;
-                break;
-              }
+            try {
+              if (!providerAttempt.supersededBySteering) {
+                const providerInterrupt = AbortSignal.any([this.liveSignal(), providerAttempt.steeringAbort.signal]);
+                const stream = this.cfg.provider.stream({
+                  model: this.cfg.model,
+                  system: this.cfg.systemPrompt,
+                  messages: outboundMessages,
+                  tools: toolDescriptors,
+                  signal: AbortSignal.any([providerInterrupt, stallAbort.signal]),
+                  reasoningLevel: this.tacticalReasoningLevel(iter),
+                  maxOutputTokens: this.cfg.maxOutputTokens,
+                  // Act first: the opening call of an autonomous goal must DO
+                  // something (a tool call), not produce a plan-essay and stop.
+                  toolChoice: iter === 0 && this.inGoalMode() ? "any" : undefined,
+                  // Tactical phase for binary-dial reasoners: full think on the
+                  // opening call + failure recovery, skip the reasoning pass on
+                  // routine continuations. ARES_TACTICAL_REASONING=0 opts out.
+                  reasoningPhase:
+                    process.env.ARES_TACTICAL_REASONING !== "0" && iter > 0 && !this.lastRoundHadFailure
+                      ? "routine"
+                      : "deep",
+                });
 
-              // Forward every stream event to the consumer.
-              yield ev;
+                for await (const ev of guardStreamStalls(stream, {
+                  idleMs: streamIdleMs(),
+                  activeIdleMs: streamActiveIdleMs(),
+                  thinkCeilingMs: thinkCeilingMs(),
+                  onStall: () => stallAbort.abort(),
+                  interruptSignal: providerInterrupt,
+                })) {
+                  // requestSteeringPreemption() can win while the iterator has
+                  // already produced one more event. Never expose that losing
+                  // event or give it conversation authority.
+                  if (providerAttempt.supersededBySteering) break;
+                  if (
+                    ev.type === "error" &&
+                    isContextLimitError(ev.error) &&
+                    !modelStarted &&
+                    attempt < budgetAttempts.length - 1
+                  ) {
+                    streamError = ev.error;
+                    break;
+                  }
 
-              if (isModelOutputEvent(ev)) {
-                modelStarted = true;
-                if (ev.type !== "thinking_delta") sawCommittedOutput = true;
+                  if (isModelOutputEvent(ev)) {
+                    modelStarted = true;
+                    if (ev.type !== "thinking_delta") sawCommittedOutput = true;
+                  }
+                  if (ev.type === "tool_use_start") {
+                    toolNameById.set(ev.id, ev.name);
+                  }
+                  if (ev.type === "tool_use_input_done") {
+                    const name = toolNameById.get(ev.id);
+                    if (name) pendingToolUses.push({ id: ev.id, name, input: ev.input });
+                  }
+                  if (ev.type === "message_done") {
+                    assistantMessage = ev.message;
+                    terminalMessageEvent = ev;
+                    addUsageInto(totalUsage, ev.usage);
+                    stopReason = ev.stopReason;
+                    this.calibrateTokens(estPromptTokens, ev.usage);
+                    // message_done is the durable assistant commit boundary. Hold
+                    // it until the steering inbox has been checked below.
+                    continue;
+                  }
+                  if (ev.type === "error") streamError = ev.error;
+
+                  // Deltas are speculative UI output. The matching superseded
+                  // event rolls them back if steering cancels this attempt.
+                  yield ev;
+                }
               }
-              if (ev.type === "tool_use_start") {
-                toolNameById.set(ev.id, ev.name);
+            } finally {
+              if (providerAttempt.supersededBySteering) {
+                supersededProviderAttemptId = providerAttempt.id;
+              } else {
+                completedProviderAttemptId = providerAttempt.id;
               }
-              if (ev.type === "tool_use_input_done") {
-                const name = toolNameById.get(ev.id);
-                if (name) pendingToolUses.push({ id: ev.id, name, input: ev.input });
-              }
-              if (ev.type === "message_done") {
-                assistantMessage = ev.message;
-                addUsageInto(totalUsage, ev.usage);
-                stopReason = ev.stopReason;
-                this.calibrateTokens(estPromptTokens, ev.usage);
-              }
-              if (ev.type === "error") {
-                streamError = ev.error;
-              }
+            }
+
+            if (providerAttempt.supersededBySteering) {
+              pendingToolUses.length = 0;
+              toolNameById.clear();
+              assistantMessage = null;
+              terminalMessageEvent = null;
+              streamError = null;
+              if (this.activeProviderAttempt === providerAttempt) this.activeProviderAttempt = null;
+              this.turnPhase = "boundary";
+              break retryStream;
             }
 
             // Some gateways occasionally close an otherwise healthy HTTP/SSE
@@ -1963,6 +2287,18 @@ export class QueryEngine {
                     text: `Provider stalled ${transientRetry} times at this prompt size; retrying with a smaller recent-history window (${budgetAttempts[attempt + 1].toLocaleString()} tokens).`,
                     source: "compaction",
                   };
+                  if (providerAttempt.supersededBySteering) {
+                    supersededProviderAttemptId = providerAttempt.id;
+                    pendingToolUses.length = 0;
+                    assistantMessage = null;
+                    terminalMessageEvent = null;
+                    streamError = null;
+                    if (this.activeProviderAttempt === providerAttempt) this.activeProviderAttempt = null;
+                    this.turnPhase = "boundary";
+                    break retryStream;
+                  }
+                  if (this.activeProviderAttempt === providerAttempt) this.activeProviderAttempt = null;
+                  this.turnPhase = "boundary";
                   continue budgetLoop;
                 }
                 // The effort-dial cutoff: a stall already burned its wait — retry
@@ -1978,7 +2314,20 @@ export class QueryEngine {
                 }
               }
               yield { type: "system_reminder_injected", text: note, source: "instructions" };
-              await abortableDelay(waitMs, this.liveSignal());
+              await abortableDelay(
+                waitMs,
+                AbortSignal.any([this.liveSignal(), providerAttempt.steeringAbort.signal]),
+              );
+              if (providerAttempt.supersededBySteering) {
+                supersededProviderAttemptId = providerAttempt.id;
+                pendingToolUses.length = 0;
+                assistantMessage = null;
+                terminalMessageEvent = null;
+                streamError = null;
+                if (this.activeProviderAttempt === providerAttempt) this.activeProviderAttempt = null;
+                this.turnPhase = "boundary";
+                break retryStream;
+              }
               if (this.liveSignal().aborted) break retryStream;
               continue retryStream;
             }
@@ -1996,21 +2345,40 @@ export class QueryEngine {
               text: `Provider rejected the prompt as too large; retrying with a smaller recent-history window (${budgetAttempts[attempt + 1].toLocaleString()} tokens).`,
               source: "compaction",
             };
+            const activeAfterBudgetNotice = this.currentProviderAttempt();
+            if (activeAfterBudgetNotice?.supersededBySteering) {
+              supersededProviderAttemptId = activeAfterBudgetNotice.id;
+              pendingToolUses.length = 0;
+              assistantMessage = null;
+              terminalMessageEvent = null;
+              streamError = null;
+              this.activeProviderAttempt = null;
+              this.turnPhase = "boundary";
+              break;
+            }
+            this.activeProviderAttempt = null;
+            this.turnPhase = "boundary";
             continue;
           }
           break;
         }
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        yield { type: "error", error: { code: "provider_throw", message, retriable: false } };
-        yield {
-          type: "turn_end",
-          status: "failed",
-          workStatus: resolvedWorkStatus(),
-          usage: totalUsage,
-          durationMs: Date.now() - startedAt,
-        };
-        return;
+        // An adapter may throw while its steering signal is closing. That
+        // attempt has already lost authority; report no provider failure and
+        // continue through the durable correction boundary below.
+        if (!supersededProviderAttemptId) {
+          const message = err instanceof Error ? err.message : String(err);
+          this.markTurnTerminal();
+          yield { type: "error", error: { code: "provider_throw", message, retriable: false } };
+          yield this.terminalTurnEvent({
+            type: "turn_end",
+            status: "failed",
+            workStatus: resolvedWorkStatus(),
+            usage: totalUsage,
+            durationMs: Date.now() - startedAt,
+          });
+          return;
+        }
       }
 
       // guardStreamStalls intentionally swallows the AbortError raised while it
@@ -2018,24 +2386,82 @@ export class QueryEngine {
       // through to the missing-message guard and surfaced as a FAILED
       // `no_message_done` turn even though the abort worked.
       if (this.liveSignal().aborted) {
-        yield {
+        yield this.terminalTurnEvent({
           type: "turn_end",
           status: "interrupted",
           workStatus: resolvedWorkStatus(),
           usage: totalUsage,
           durationMs: Date.now() - startedAt,
-        };
+        });
         return;
       }
 
+      const activeAfterStream = this.currentProviderAttempt();
+      if (activeAfterStream?.supersededBySteering) {
+        supersededProviderAttemptId = activeAfterStream.id;
+      }
+
+      if (supersededProviderAttemptId) {
+        if (this.currentProviderAttempt()?.id === supersededProviderAttemptId) {
+          this.activeProviderAttempt = null;
+        }
+        this.turnPhase = "boundary";
+        yield {
+          type: "provider_attempt_superseded",
+          attemptId: supersededProviderAttemptId,
+          reason: "steering",
+        };
+        // The steer may have been cancelled after it woke us. The provider
+        // attempt is disposable either way: a missing claim is not authority to
+        // fail the owner's still-live turn, so simply regenerate from history.
+        await this.applySteeringAtBoundary();
+        // Same durable input, same runner generation, fresh provider attempt.
+        iter--;
+        continue;
+      }
+
+      // Close the race between the provider's terminal frame and committing its
+      // assistant Message. If a durable correction is already present, the old
+      // response (including every proposed tool call) remains speculative and
+      // is discarded without creating orphan tool_use blocks.
+      let steeringAtCommit = await this.applySteeringAtBoundary();
+      // applySteeringAtBoundary() awaits the host. A newly admitted steer can
+      // wake the attempt after that host call took its empty snapshot but before
+      // this continuation commits the Message. Re-check the attempt flag, then
+      // take one more durable inbox snapshot before making the decision.
+      const activeAtCommit = this.currentProviderAttempt();
+      const racedAttemptId: string | null = activeAtCommit?.supersededBySteering
+        ? activeAtCommit.id
+        : null;
+      if (racedAttemptId && steeringAtCommit === 0) {
+        steeringAtCommit = await this.applySteeringAtBoundary();
+      }
+      if (steeringAtCommit > 0 || racedAttemptId) {
+        const supersededAttemptId: string | null = racedAttemptId ?? this.currentProviderAttempt()?.id ?? completedProviderAttemptId;
+        if (this.currentProviderAttempt()?.id === supersededAttemptId) this.activeProviderAttempt = null;
+        this.turnPhase = "boundary";
+        if (supersededAttemptId) {
+          yield {
+            type: "provider_attempt_superseded",
+            attemptId: supersededAttemptId,
+            reason: "steering",
+          };
+        }
+        iter--;
+        continue;
+      }
+
       if (streamError) {
+        this.activeProviderAttempt = null;
+        this.turnPhase = "boundary";
         // Provider-emitted errors were already forwarded from the stream. The
         // premature-close error is synthesized locally, so surface it once only
         // after its retry budget is exhausted.
         if (streamError.code === "no_message_done") {
+          this.markTurnTerminal();
           yield { type: "error", error: streamError };
         }
-        yield {
+        yield this.terminalTurnEvent({
           type: "turn_end",
           // A user interrupt surfaces as a provider abort error — report it as
           // interrupted, not failed.
@@ -2043,26 +2469,27 @@ export class QueryEngine {
           workStatus: resolvedWorkStatus(),
           usage: totalUsage,
           durationMs: Date.now() - startedAt,
-        };
+        });
         return;
       }
 
       if (!assistantMessage) {
+        this.activeProviderAttempt = null;
+        this.turnPhase = "boundary";
+        this.markTurnTerminal();
         yield {
           type: "error",
           error: { code: "no_message_done", message: "provider closed stream without message_done", retriable: false },
         };
-        yield {
+        yield this.terminalTurnEvent({
           type: "turn_end",
           status: "failed",
           workStatus: resolvedWorkStatus(),
           usage: totalUsage,
           durationMs: Date.now() - startedAt,
-        };
+        });
         return;
       }
-
-      this.messages.push(assistantMessage);
 
       // Reconcile the final message's tool_use blocks against what actually
       // streamed a tool_use_input_done. A provider can assemble a tool_use into
@@ -2082,12 +2509,25 @@ export class QueryEngine {
         }
       }
 
+      // Linearize provider completion before exposing message_done. Every tool
+      // proposal inherits the current steering epoch; a later epoch may skip
+      // only calls that have not crossed their implementation-entry boundary.
+      const hasProposedTools = pendingToolUses.length > 0;
+      const toolBatchSteeringEpoch = this.steeringWakeEpoch;
+      this.activeProviderAttempt = null;
+      this.turnPhase = hasProposedTools ? "effect" : "boundary";
+      this.messages.push(assistantMessage);
+      if (terminalMessageEvent) yield terminalMessageEvent;
+
       // ─── Tool execution phase ────────────────────────────────────────
       if (pendingToolUses.length === 0) {
         // A correction that arrived during this provider call preempts the
         // model's attempted finish. Install and acknowledge it, then give the
         // same active generation another model round to respond.
-        if (await this.applySteeringAtBoundary() > 0) continue;
+        if (await this.applySteeringAtBoundary() > 0) {
+          iter--;
+          continue;
+        }
         // C3 — the model was cut off at its output-token ceiling mid-message
         // (no tool calls). Don't end the turn on a truncated answer: tell it to
         // continue exactly where it stopped, and loop. Capped so it can't spin.
@@ -2212,9 +2652,8 @@ export class QueryEngine {
             }
           }
         }
-        // GUI ground-truth gate. A windowed-app artifact (Godot scene, Tauri/
-        // Electron build, desktop export) can pass every headless check and
-        // still open to a broken screen — pixels are the only proof. Require a
+        // GUI ground-truth gate. A manifest-matched environment artifact can
+        // pass every headless check and still open broken — pixels are proof. Require a
         // successful screenshot NEWER than the last mutation before accepting
         // "done". One push; a second unsupported finish ends honestly as
         // GUI-UNVERIFIED (and resolvedWorkStatus stays unverified).
@@ -2228,11 +2667,11 @@ export class QueryEngine {
           // Without a screenshot-capable tool in the belt (headless workers,
           // non-Windows builds) demanding one is a dead order — skip straight
           // to the honest GUI-UNVERIFIED disclosure instead.
-          const hasVisualTool = this.cfg.tools.some((t) => /^(?:computeruse|browser)$/i.test(t.schema.name));
+          const hasVisualTool = this.cfg.tools.some((t) => /^(?:computeruse|browser|capability)$/i.test(t.schema.name));
           if (!guiGateFired && hasVisualTool) {
             guiGateFired = true;
             const what = [...guiSignals].slice(0, 4).join(", ");
-            const text = `This task produced a WINDOWED app artifact (${what}), and there is no screenshot of the running app newer than your last change. Headless boots and unit tests do not prove the UI renders — an app can pass every logic test and still open to a broken/grey screen. Launch the actual app (windowed, NOT --headless), capture a real screenshot (ComputerUse {action:"screenshot"}, or the Browser screenshot action for web UIs), look at it, and confirm what is on screen matches what you claim. If you cannot open a window in this environment, say so plainly instead of claiming the UI works.`;
+            const text = `This task produced a WINDOWED app artifact (${what}), and there is no screenshot of the running app newer than your last change. Headless boots and unit tests do not prove the UI renders — an app can pass every logic test and still open to a broken/grey screen. Use the matching environment Capability's read-only observation operation (acquire one if missing), ComputerUse {action:"screenshot"}, or Browser screenshot for a web UI. Inspect the fresh pixels and confirm what is on screen matches the claim. If this environment cannot expose pixels, say so plainly instead of claiming the UI works.`;
             this.messages.push({
               id: cryptoId(),
               role: "user",
@@ -2329,18 +2768,23 @@ export class QueryEngine {
             source: "instructions",
           };
         }
-        yield {
+        if (!this.liveSignal().aborted && !(await this.closeTurnAtBoundary())) {
+          iter--;
+          continue;
+        }
+        yield this.terminalTurnEvent({
           type: "turn_end",
           status: this.liveSignal().aborted ? "interrupted" : "completed",
           workStatus: resolvedWorkStatus(),
           usage: totalUsage,
           durationMs: Date.now() - startedAt,
-        };
+        });
         return;
       }
 
       const resultByToolUseId = new Map<string, ToolResultBlock>();
       const runnable: ResolvedToolUse[] = [];
+      const steeringSkippedToolUseIds = new Set<string>();
       for (const use of pendingToolUses) {
         // A tool_use that reached history but never finished streaming its
         // arguments (see reconciliation above): its args are partial, so do NOT
@@ -2396,9 +2840,10 @@ export class QueryEngine {
         // schedule verification while tool_end is yielded, so reading the
         // generation after yield would mistake the new generation for baseline.
         const verificationGenerationBeforeBatch = this.cfg.verificationEvidence?.().mutationGeneration ?? verificationGenerationAtMutation;
-        const outcomes = yield* this.runToolBatch(batch);
+        const outcomes = yield* this.runToolBatch(batch, toolBatchSteeringEpoch);
         for (const outcome of outcomes) {
           resultByToolUseId.set(outcome.toolUseId, outcome.result);
+          if (outcome.skippedBySteering) steeringSkippedToolUseIds.add(outcome.toolUseId);
           interruptedByTool ||= outcome.interrupted === true;
           evidenceTick++; // strictly increasing, in outcome order
           if (outcome.touchedFiles?.length) {
@@ -2422,8 +2867,29 @@ export class QueryEngine {
           {
             const use = useById.get(outcome.toolUseId);
             if (use && outcome.result.is_error !== true) {
-              for (const sig of guiArtifactSignals(use.name, use.input, outcome.touchedFiles)) guiSignals.add(sig);
-              if (isVisualEvidenceCall(use.name, use.input, outcome.result)) {
+              const signalCountBefore = guiSignals.size;
+              for (const sig of guiArtifactSignals(use.name, use.input, outcome.touchedFiles, outcome.output)) guiSignals.add(sig);
+              const hostSignals = await this.cfg.environmentArtifactSignals?.({
+                toolName: use.name,
+                input: use.input,
+                output: outcome.output,
+                touchedFiles: outcome.touchedFiles,
+              });
+              for (const sig of hostSignals ?? []) guiSignals.add(sig);
+              // External editor/environment mutations may not touch a workspace
+              // file at all (for example, changing a live scene transform). A
+              // newly armed provider signal is therefore itself mutation debt.
+              if (
+                guiSignals.size > signalCountBefore &&
+                !outcome.touchedFiles?.length &&
+                !outcome.potentialMutation
+              ) {
+                lastMutationAt = Math.max(lastMutationAt, outcome.finishedAt ?? Date.now());
+                lastMutationTick = evidenceTick;
+                changedFiles.add("<environment-provider state>");
+                workStatus = "unverified";
+              }
+              if (isVisualEvidenceCall(use.name, use.input, outcome.result, outcome.output)) {
                 visualEvidenceTick = evidenceTick;
               }
             }
@@ -2449,13 +2915,21 @@ export class QueryEngine {
             content: orderedToolResults(pendingToolUses, resultByToolUseId),
             createdAt: new Date().toISOString(),
           });
-          yield {
+          if (steeringSkippedToolUseIds.size > 0 && completedProviderAttemptId) {
+            yield {
+              type: "provider_attempt_effects_skipped",
+              attemptId: completedProviderAttemptId,
+              reason: "steering",
+              toolUseIds: [...steeringSkippedToolUseIds],
+            };
+          }
+          yield this.terminalTurnEvent({
             type: "turn_end",
             status: "interrupted",
             workStatus: resolvedWorkStatus(),
             usage: totalUsage,
             durationMs: Date.now() - startedAt,
-          };
+          });
           return;
         }
       }
@@ -2468,12 +2942,27 @@ export class QueryEngine {
         content: orderedToolResults(pendingToolUses, resultByToolUseId),
         createdAt: new Date().toISOString(),
       });
+      if (steeringSkippedToolUseIds.size > 0 && completedProviderAttemptId) {
+        yield {
+          type: "provider_attempt_effects_skipped",
+          attemptId: completedProviderAttemptId,
+          reason: "steering",
+          toolUseIds: [...steeringSkippedToolUseIds],
+        };
+      }
+      this.turnPhase = "boundary";
 
       // Tools are fully settled and their results are paired in history. This
       // is the earliest safe point to apply steering admitted while a tool was
       // running; continue immediately so no convergence/end guard can consume
       // the correction without the model seeing it.
-      if (await this.applySteeringAtBoundary() > 0) continue;
+      if (await this.applySteeringAtBoundary() > 0) {
+        // Owner steering grants the replacement response its own provider slot.
+        // Otherwise maxTurns=1 can pair skipped effects correctly and then fail
+        // before the model ever sees or answers the correction.
+        iter--;
+        continue;
+      }
 
       // ── shell-regex file-edit hint (one-shot) ───────────────────────────
       // Editing files via shell regex replace (`-replace` + Set-Content, or
@@ -2559,6 +3048,7 @@ export class QueryEngine {
       const deadSig = [...failStreak.entries()].find(([, n]) => n >= loopKillLimit())?.[0];
       if (deadSig) {
         const toolName = deadSig.split(":")[0];
+        this.markTurnTerminal();
         yield {
           type: "error",
           error: {
@@ -2567,13 +3057,13 @@ export class QueryEngine {
             retriable: false,
           },
         };
-        yield {
+        yield this.terminalTurnEvent({
           type: "turn_end",
           status: "failed",
           workStatus: resolvedWorkStatus(),
           usage: totalUsage,
           durationMs: Date.now() - startedAt,
-        };
+        });
         return;
       }
       const stuckSig = [...failStreak.entries()].find(([, n]) => n >= 3)?.[0];
@@ -2610,6 +3100,7 @@ export class QueryEngine {
       const noopSig = [...repeatStreak.entries()].find(([, n]) => n >= repeatCallLimit() * 3)?.[0];
       if (noopSig) {
         const toolName = pendingToolUses.find((u) => canonicalCallSignature(u.name, u.input) === noopSig)?.name ?? noopSig.split("::")[0];
+        this.markTurnTerminal();
         yield {
           type: "error",
           error: {
@@ -2618,13 +3109,13 @@ export class QueryEngine {
             retriable: false,
           },
         };
-        yield {
+        yield this.terminalTurnEvent({
           type: "turn_end",
           status: "failed",
           workStatus: resolvedWorkStatus(),
           usage: totalUsage,
           durationMs: Date.now() - startedAt,
-        };
+        });
         return;
       }
       const repeatedSig = [...repeatStreak.entries()].find(([, n]) => n >= repeatCallLimit())?.[0];
@@ -2660,6 +3151,7 @@ export class QueryEngine {
       // ping-ponging A/B/A/B many rounds later has ignored it. Terminate.
       oscillationStreak = oscillating ? oscillationStreak + 1 : 0;
       if (oscillationStreak >= loopKillLimit()) {
+        this.markTurnTerminal();
         yield {
           type: "error",
           error: {
@@ -2668,13 +3160,13 @@ export class QueryEngine {
             retriable: false,
           },
         };
-        yield {
+        yield this.terminalTurnEvent({
           type: "turn_end",
           status: "failed",
           workStatus: resolvedWorkStatus(),
           usage: totalUsage,
           durationMs: Date.now() - startedAt,
-        };
+        });
         return;
       }
       if (oscillating && !oscillationFired) {
@@ -2780,13 +3272,17 @@ export class QueryEngine {
         // honesty is carried by the UNRESOLVED reminder above, consistent with
         // the C1 end-gate contract (status reflects loop-termination; work-quality
         // failures are surfaced via reminders, not the status field).
-        yield {
+        if (!this.liveSignal().aborted && !(await this.closeTurnAtBoundary())) {
+          iter--;
+          continue;
+        }
+        yield this.terminalTurnEvent({
           type: "turn_end",
           status: "completed",
           workStatus: resolvedWorkStatus(),
           usage: totalUsage,
           durationMs: Date.now() - startedAt,
-        };
+        });
         return;
       }
 
@@ -2795,21 +3291,23 @@ export class QueryEngine {
     }
 
     // Exceeded maxTurns
+    this.markTurnTerminal();
     yield {
       type: "error",
       error: { code: "max_turns_exceeded", message: `exceeded ${maxIters} turn iterations`, retriable: false },
     };
-    yield {
+    yield this.terminalTurnEvent({
       type: "turn_end",
       status: "failed",
       workStatus: resolvedWorkStatus(),
       usage: totalUsage,
       durationMs: Date.now() - startedAt,
-    };
+    });
   }
 
   private async *runToolBatch(
     uses: readonly ResolvedToolUse[],
+    effectEpoch: number,
   ): AsyncGenerator<TurnEvent, ToolExecutionOutcome[], void> {
     if (uses.length === 0) return [];
 
@@ -2830,7 +3328,11 @@ export class QueryEngine {
         if (index >= uses.length) return;
         const use = uses[index];
         try {
-          outcomes[index] = await this.executeToolUse(use, (event) => queue.push(event));
+          if (this.steeringWakeEpoch !== effectEpoch) {
+            outcomes[index] = this.steeringSkippedToolOutcome(use, (event) => queue.push(event));
+          } else {
+            outcomes[index] = await this.executeToolUse(use, (event) => queue.push(event), effectEpoch);
+          }
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           queue.push({ type: "tool_error", id: use.id, error: message, durationMs: 0 });
@@ -2856,6 +3358,28 @@ export class QueryEngine {
 
     await Promise.all(workers);
     return outcomes.filter((outcome): outcome is ToolExecutionOutcome => outcome !== undefined);
+  }
+
+  private steeringSkippedToolOutcome(
+    use: ResolvedToolUse,
+    emit: (event: TurnEvent) => void,
+    durationMs = 0,
+    options: { message?: string; potentialMutation?: boolean } = {},
+  ): ToolExecutionOutcome {
+    const message = options.message ?? `tool call '${use.name}' skipped because the user steered before execution`;
+    emit({ type: "tool_error", id: use.id, error: message, durationMs });
+    return {
+      toolUseId: use.id,
+      skippedBySteering: true,
+      potentialMutation: options.potentialMutation,
+      finishedAt: Date.now(),
+      result: {
+        type: "tool_result",
+        tool_use_id: use.id,
+        content: message,
+        is_error: true,
+      },
+    };
   }
 
   /**
@@ -2984,7 +3508,9 @@ export class QueryEngine {
   private async executeToolUse(
     use: ResolvedToolUse,
     emit: (event: TurnEvent) => void,
+    effectEpoch: number,
   ): Promise<ToolExecutionOutcome> {
+    const t0 = Date.now();
     let checkpointId: string | undefined;
     if (shouldCheckpointBeforeTool(use.safety) && this.cfg.beforeToolUseCheckpoint) {
       // Declared single-file target (Edit/Write) → the host can snapshot
@@ -3022,7 +3548,12 @@ export class QueryEngine {
       }
     }
 
-    const t0 = Date.now();
+    // The call was dequeued before its checkpoint await. If steering advanced
+    // while that non-effectful preparation ran, skip before durable admission.
+    if (this.steeringWakeEpoch !== effectEpoch) {
+      return this.steeringSkippedToolOutcome(use, emit, Date.now() - t0);
+    }
+
     let executionAdmitted = false;
     let executionSettled = false;
     let executionSettlementAttempted = false;
@@ -3071,15 +3602,54 @@ export class QueryEngine {
               try {
                 const waitMs = Number(process.env.ARES_PERMISSION_WAIT_MS) > 0 ? Number(process.env.ARES_PERMISSION_WAIT_MS) : 10 * 60_000;
                 let ceiling: ReturnType<typeof setTimeout> | undefined;
-                const decision = await Promise.race([
-                  this.cfg.requestPermission!(requestWithId),
+                const wakeSignal = this.steeringWakeController.signal;
+                if (this.steeringWakeEpoch !== effectEpoch) {
+                  emit({ type: "permission_response", id, decision: "deny" });
+                  throw new SteeringPermissionWakeError(use.name);
+                }
+                let onSteering: (() => void) | undefined;
+                const steering = new Promise<{ kind: "steering" }>((resolve) => {
+                  onSteering = () => resolve({ kind: "steering" });
+                  if (wakeSignal.aborted) onSteering();
+                  else wakeSignal.addEventListener("abort", onSteering, { once: true });
+                });
+                const inheritedSignals = [wakeSignal, this.liveSignal()];
+                if (request.signal) inheritedSignals.push(request.signal);
+                const permissionSignal = AbortSignal.any(inheritedSignals);
+                const decision = Promise.race([
+                  this.cfg.requestPermission!({ ...requestWithId, signal: permissionSignal }),
                   new Promise<PermissionPromptDecision>((resolve) => {
                     ceiling = setTimeout(() => resolve("deny"), waitMs);
                     ceiling.unref?.();
                   }),
-                ]).finally(() => clearTimeout(ceiling));
-                emit({ type: "permission_response", id, decision });
-                return decision;
+                ])
+                  .then((value) => ({ kind: "decision" as const, value }))
+                  .catch((error: unknown) => {
+                    // Abort-aware hosts conventionally reject rather than
+                    // resolve when their waiter is cancelled. Steering still
+                    // owns this boundary; only unrelated host failures escape.
+                    if (wakeSignal.aborted || this.steeringWakeEpoch !== effectEpoch) {
+                      return { kind: "steering" as const };
+                    }
+                    throw error;
+                  });
+                const outcome = await Promise.race([decision, steering]).finally(() => {
+                  clearTimeout(ceiling);
+                  if (onSteering) wakeSignal.removeEventListener("abort", onSteering);
+                });
+                if (
+                  outcome.kind === "steering" ||
+                  wakeSignal.aborted ||
+                  this.steeringWakeEpoch !== effectEpoch
+                ) {
+                  // This is not an owner denial and must not trip the
+                  // permission-interrupt path. Wake the surface with a synthetic
+                  // deny, then unwind as a steering-specific pre-effect skip.
+                  emit({ type: "permission_response", id, decision: "deny" });
+                  throw new SteeringPermissionWakeError(use.name);
+                }
+                emit({ type: "permission_response", id, decision: outcome.value });
+                return outcome.value;
               } finally {
                 watchdog.resume();
               }
@@ -3102,6 +3672,23 @@ export class QueryEngine {
         mutationTransactionId: workspaceMutationTransactionId(this.sessionId, use.id),
       });
       executionAdmitted = true;
+      // Admission is not implementation entry. A steer can land while SQLite,
+      // checkpoint, or write-ahead work is awaited; settle the admitted record
+      // as a paired failure without invoking hooks or the tool implementation.
+      if (this.steeringWakeEpoch !== effectEpoch) {
+        const message = `tool call '${use.name}' skipped because the user steered before execution`;
+        executionSettlementAttempted = true;
+        await this.cfg.afterToolExecution?.({
+          toolUseId: use.id,
+          toolName: use.name,
+          input: use.input,
+          safety: use.safety,
+          status: "failed",
+          error: message,
+        });
+        executionSettled = true;
+        return this.steeringSkippedToolOutcome(use, emit, Date.now() - t0);
+      }
       // Hooks are executable host code and may themselves touch the workspace.
       // They therefore run *inside* the durable tool boundary and after the
       // pre-tool checkpoint. A blocking hook settles the canonical call as a
@@ -3136,6 +3723,40 @@ export class QueryEngine {
           interrupted: false,
           finishedAt: Date.now(),
           result: { type: "tool_result", tool_use_id: use.id, content: message, is_error: true },
+        };
+      }
+      // A PreToolUse hook is host code and may take arbitrarily long. Steering
+      // that arrives while it runs must still fence the stale PRIMARY call. The
+      // hook itself has already settled and cannot be undone; when one matched,
+      // preserve that uncertainty in the durable receipt instead of claiming
+      // the entire call was side-effect-free.
+      if (this.steeringWakeEpoch !== effectEpoch) {
+        const skipped = `tool call '${use.name}' skipped because the user steered before execution`;
+        const message = preHookMayHaveEffects
+          ? `${skipped}\n\nA PreToolUse hook already ran, so the hook's effect status is unknown. The primary tool implementation did not run; inspect any hook effects before retrying.`
+          : skipped;
+        executionSettlementAttempted = true;
+        await this.cfg.afterToolExecution?.({
+          toolUseId: use.id,
+          toolName: use.name,
+          input: use.input,
+          safety: use.safety,
+          status: preHookMayHaveEffects ? "effect_unknown" : "failed",
+          error: message,
+        });
+        executionSettled = true;
+        emit({ type: "tool_error", id: use.id, error: message, durationMs: Date.now() - t0 });
+        return {
+          toolUseId: use.id,
+          skippedBySteering: true,
+          potentialMutation: preHookMayHaveEffects,
+          finishedAt: Date.now(),
+          result: {
+            type: "tool_result",
+            tool_use_id: use.id,
+            content: message,
+            is_error: true,
+          },
         };
       }
       // Never expose tool_start until the host's write-ahead admission is
@@ -3233,6 +3854,7 @@ export class QueryEngine {
           : modelResultText;
       return {
         toolUseId: use.id,
+        output: result.output,
         touchedFiles,
         finishedAt: Date.now(),
         verificationAttempted: isManualVerificationCall(use.name, use.input),
@@ -3247,6 +3869,32 @@ export class QueryEngine {
         },
       };
     } catch (err) {
+      if (err instanceof SteeringPermissionWakeError) {
+        // The adapter entered only far enough to ask for authority; the actual
+        // operation never received approval. Settle the durable primary record
+        // as failed (or effect_unknown when a pre-hook ran), do not run
+        // PostToolUse hooks, and keep the owner generation alive so its newly
+        // installed correction receives the next response.
+        const message = preHookMayHaveEffects
+          ? `${err.message}\n\nA PreToolUse hook already ran, so the hook's effect status is unknown. The permission-gated primary effect did not run; inspect any hook effects before retrying.`
+          : err.message;
+        if (executionAdmitted && !executionSettled) {
+          executionSettlementAttempted = true;
+          await this.cfg.afterToolExecution?.({
+            toolUseId: use.id,
+            toolName: use.name,
+            input: use.input,
+            safety: use.safety,
+            status: preHookMayHaveEffects ? "effect_unknown" : "failed",
+            error: message,
+          });
+          executionSettled = true;
+        }
+        return this.steeringSkippedToolOutcome(use, emit, Date.now() - t0, {
+          message,
+          potentialMutation: preHookMayHaveEffects,
+        });
+      }
       // A failed durable settlement barrier is not an ordinary tool failure.
       // Retrying that barrier here can conflict with a commit whose response
       // was lost. Leave the generation for canonical recovery instead.
@@ -3349,6 +3997,14 @@ export function workspaceMutationTransactionId(sessionId: string, toolUseId: str
 interface ToolExecutionOutcome {
   toolUseId: string;
   result: ToolResultBlock;
+  /** The assistant proposal was canonical, but steering advanced before its
+   * primary effect gained authority. Its paired error is authoritative; a
+   * permission adapter or already-settled pre-hook may have run, with any hook
+   * uncertainty carried separately as potentialMutation/effect_unknown. */
+  skippedBySteering?: boolean;
+  /** Structured output retained for this loop so generic provider receipts can
+   * drive proof routing without reparsing capped model-facing text. */
+  output?: unknown;
   interrupted?: boolean;
   touchedFiles?: string[];
   finishedAt?: number;
@@ -3439,6 +4095,17 @@ function toolConcurrencyLimit(): number {
 }
 
 /** Error tag for a watchdog-aborted tool — distinct from a user/turn abort. */
+/** Internal control-flow marker: a durable correction woke a permission wait
+ * before the owner granted authority, so no primary effect may begin. */
+class SteeringPermissionWakeError extends Error {
+  readonly aresToolEffectPhase = "pre-effect";
+
+  constructor(toolName: string) {
+    super(`tool call '${toolName}' skipped because the user steered before execution`);
+    this.name = "SteeringPermissionWakeError";
+  }
+}
+
 export class ToolWatchdogError extends Error {
   constructor(public readonly toolMs: number) {
     super(`watchdog: tool exceeded ${toolMs}ms`);
@@ -3981,6 +4648,10 @@ interface StallGuardOpts {
   activeIdleMs?: number;
   /** Called the moment a stall is declared — abort the underlying request. */
   onStall: () => void;
+  /** Abort-like wake-up owned by the caller, distinct from the stall timer.
+   * The guard races it against `iterator.next()` so even a provider that ignores
+   * its request signal cannot hold the turn hostage after Stop or steering. */
+  interruptSignal?: AbortSignal;
   now?: () => number;
 }
 
@@ -4000,6 +4671,19 @@ export async function* guardStreamStalls(
   let thinkingStartedAt = 0;
   let committed = false;
   let sawOutput = false;
+  let removeInterruptListener = (): void => {};
+  const interrupted = opts.interruptSignal
+    ? new Promise<"interrupt">((resolve) => {
+        const signal = opts.interruptSignal!;
+        const onAbort = () => resolve("interrupt");
+        if (signal.aborted) {
+          resolve("interrupt");
+          return;
+        }
+        signal.addEventListener("abort", onAbort, { once: true });
+        removeInterruptListener = () => signal.removeEventListener("abort", onAbort);
+      })
+    : null;
   try {
     while (true) {
       // The per-event deadline. Pre-output silence with NOTHING yet received
@@ -4022,12 +4706,29 @@ export async function* guardStreamStalls(
       const timeout = new Promise<"stall">((resolve) => {
         timer = setTimeout(() => resolve("stall"), waitMs);
       });
-      const winner = await Promise.race([it.next(), timeout]).finally(() => clearTimeout(timer));
+      const winner = await Promise.race([
+        it.next(),
+        timeout,
+        ...(interrupted ? [interrupted] : []),
+      ]).finally(() => clearTimeout(timer));
+      if (winner === "interrupt") {
+        // Do not await return(): a broken provider may also ignore iterator
+        // closure. Its request signal is already aborted; the speculative
+        // iterator is detached while QueryEngine advances to a safe boundary.
+        try {
+          const closing = it.return?.(undefined);
+          if (closing) void closing.catch(() => undefined);
+        } catch {
+          // Provider cleanup is best-effort and has no conversation authority.
+        }
+        return;
+      }
       if (winner === "stall") {
         const thinking = !committed && thinkingStartedAt > 0;
         opts.onStall();
         try {
-          void it.return?.(undefined);
+          const closing = it.return?.(undefined);
+          if (closing) void closing.catch(() => undefined);
         } catch {
           // the aborted request may throw on close — irrelevant now
         }
@@ -4062,6 +4763,8 @@ export async function* guardStreamStalls(
     // An abort we triggered surfaces as a throw from the underlying iterator —
     // the synthetic stall error already covered it; anything else propagates.
     if (!(err instanceof Error && /abort/i.test(err.name + err.message))) throw err;
+  } finally {
+    removeInterruptListener();
   }
 }
 
@@ -4252,43 +4955,57 @@ function fnv1a(text: string): string {
   return (h >>> 0).toString(36);
 }
 
-/** Files whose mutation means "a windowed app changed" — scene/config formats
- *  that only exist for GUI runtimes. Deliberately conservative: false positives
- *  add one screenshot request; false negatives ship grey screens. */
-const GUI_ARTIFACT_FILE_RE =
-  /\.(?:tscn|tres|uproject|unity|xaml)$|(?:^|[\\/])project\.godot$|(?:^|[\\/])tauri\.conf\.(?:json|json5|toml)$|(?:^|[\\/])export_presets\.cfg$/i;
-
-/** Shell commands that build/run a windowed app (desktop exports, GUI engines). */
-const GUI_ARTIFACT_SHELL_RE =
-  /\bgodot(?:[.\w-]*\.exe)?\b|--export-(?:release|debug)\b|\btauri\s+(?:dev|build)\b|\bcargo\s+tauri\b|\belectron\b|\belectron-builder\b/i;
-
-/** Signals that this tool outcome touched a windowed-app artifact. */
-function guiArtifactSignals(toolName: string, input: unknown, touchedFiles?: readonly string[]): string[] {
-  const signals: string[] = [];
-  for (const file of touchedFiles ?? []) {
-    if (GUI_ARTIFACT_FILE_RE.test(file)) signals.push(path.basename(file));
-  }
-  if ((toolName === "Bash" || toolName === "PowerShell") && input && typeof input === "object") {
-    const cmd = (input as Record<string, unknown>)["command"];
-    if (typeof cmd === "string") {
-      const m = GUI_ARTIFACT_SHELL_RE.exec(cmd);
-      if (m) signals.push(`shell:${m[0].trim()}`);
-    }
-  }
-  return signals;
+/** Signals supplied by an engine-neutral Capability provider invocation. File
+ * and command matching for direct Edit/shell calls belongs to the host's live
+ * manifest registry (`environmentArtifactSignals`), not a baked-in list of
+ * specific editors or engines in core. */
+function guiArtifactSignals(
+  toolName: string,
+  _input: unknown,
+  _touchedFiles?: readonly string[],
+  output?: unknown,
+): string[] {
+  if (toolName !== "Capability" || !output || typeof output !== "object" || Array.isArray(output)) return [];
+  const result = output as Record<string, unknown>;
+  const provider = result.provider && typeof result.provider === "object" && !Array.isArray(result.provider)
+    ? result.provider as Record<string, unknown>
+    : null;
+  if (provider?.kind !== "environment-provider") return [];
+  const operation = typeof result.operation === "string" ? result.operation : "unknown";
+  const operations = provider.operations && typeof provider.operations === "object" && !Array.isArray(provider.operations)
+    ? provider.operations as Record<string, unknown>
+    : {};
+  const operationSpec = operations[operation] && typeof operations[operation] === "object" && !Array.isArray(operations[operation])
+    ? operations[operation] as Record<string, unknown>
+    : null;
+  return operationSpec?.effect !== "read-only"
+    ? [`provider:${String(provider.id ?? "environment")}:${operation}`]
+    : [];
 }
 
 /** True when this successful call captured REAL pixels of a running UI.
  *  ComputerUse screenshot/zoom always grabs the screen; Browser screenshot
  *  counts only when the result actually carries an image block (its embedded
  *  fallback returns a self-flagged text snapshot that proves nothing). */
-function isVisualEvidenceCall(toolName: string, input: unknown, result: ToolResultBlock): boolean {
+function isVisualEvidenceCall(toolName: string, input: unknown, result: ToolResultBlock, output?: unknown): boolean {
   const action =
     input && typeof input === "object" ? String((input as Record<string, unknown>)["action"] ?? "") : "";
   if (toolName === "ComputerUse") return action === "screenshot" || action === "zoom";
   if (toolName === "Browser") {
     if (!/^(?:screenshot|filmstrip)$/.test(action)) return false;
     return Array.isArray(result.content) && result.content.some((b) => (b as { type?: string }).type === "image");
+  }
+  if (toolName === "Capability" && output && typeof output === "object" && !Array.isArray(output)) {
+    const receipt = (output as Record<string, unknown>).receipt;
+    const evidence = receipt && typeof receipt === "object" && !Array.isArray(receipt)
+      ? (receipt as Record<string, unknown>).evidence
+      : null;
+    return Array.isArray(evidence) && evidence.some((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+      const evidenceItem = item as Record<string, unknown>;
+      return /(?:screenshot|frame|image|pixel|render|viewport)/i.test(String(evidenceItem.kind ?? "")) &&
+        typeof evidenceItem.observedAt === "string";
+    });
   }
   return false;
 }

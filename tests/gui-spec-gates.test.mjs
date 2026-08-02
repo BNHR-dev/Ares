@@ -1,7 +1,8 @@
 // GUI ground-truth gate + spec-checklist gate. Born from the BeanBrawl
 // failure: a Godot game reported "27/27 tests pass" and shipped a grey
 // screen, with the spec's mandated screenshots never taken.
-//   1. Touching a windowed-app artifact (.tscn) arms the GUI gate: the first
+//   1. Touching an artifact matched by an environment-provider manifest arms
+//      the GUI gate: the first
 //      completion attempt gets a "launch it + screenshot it" push, a second
 //      unsupported finish surfaces GUI-UNVERIFIED, and workStatus can never
 //      resolve verified without visual proof.
@@ -53,6 +54,37 @@ const computerUseTool = {
   async call() { return { output: { ok: true, screenshotPath: "shot.png" } }; },
 };
 
+const environmentCapabilityTool = {
+  schema: { name: "Capability", description: "adaptive environment", inputJsonSchema: { type: "object" }, safety: "read-only", concurrency: "exclusive" },
+  classifyInput(input) {
+    return { safety: input.operation === "observe" ? "read-only" : "external-state" };
+  },
+  async call(input) {
+    const observe = input.operation === "observe";
+    return {
+      output: {
+        action: "invoke",
+        ok: true,
+        operation: input.operation,
+        provider: {
+          id: "test.scene.provider",
+          kind: "environment-provider",
+          operations: {
+            pose: { effect: "external-state" },
+            observe: { effect: "read-only" },
+          },
+        },
+        receipt: {
+          ok: true,
+          evidence: observe
+            ? [{ kind: "viewport-screenshot", observedAt: new Date().toISOString(), uri: "artifact://scene.png" }]
+            : [],
+        },
+      },
+    };
+  },
+};
+
 async function collect(engine) {
   const events = [];
   for await (const ev of engine.streamTurn()) events.push(ev);
@@ -61,7 +93,21 @@ async function collect(engine) {
 
 function makeEngine(provider, tools, extraCfg = {}) {
   const engine = QueryEngine.forTesting(
-    { provider, model: "test", systemPrompt: "t", tools, workspace: "D:\\Ares", requireVerificationEvidence: true, ...extraCfg },
+    {
+      provider,
+      model: "test",
+      systemPrompt: "t",
+      tools,
+      workspace: "D:\\Ares",
+      requireVerificationEvidence: true,
+      // Test fixture for a provider manifest with match.files=["*.tscn"]. Core
+      // itself intentionally knows no engine/editor extensions.
+      environmentArtifactSignals: ({ touchedFiles = [] }) => {
+        const file = touchedFiles.find((candidate) => /\.tscn$/i.test(candidate));
+        return file ? [`provider:test.scene:file:${path.basename(file)}`] : [];
+      },
+      ...extraCfg,
+    },
     "sess_gui",
   );
   engine.appendUserMessage("build the game");
@@ -129,6 +175,31 @@ test("GUI gate: a screenshot taken BEFORE the last mutation does not count", asy
   assert.ok(
     events.some((e) => e.type === "system_reminder_injected" && /WINDOWED app artifact/.test(e.text)),
     "stale screenshot → gate still fires",
+  );
+});
+
+test("GUI gate: an environment provider mutation requires later provider pixel evidence", async () => {
+  const withoutObservation = await collect(makeEngine(
+    scriptedProvider([{ name: "Capability", input: { action: "invoke", operation: "pose" } }]),
+    [environmentCapabilityTool],
+    { environmentArtifactSignals: () => [] },
+  ));
+  assert.ok(
+    withoutObservation.some((event) => event.type === "system_reminder_injected" && /WINDOWED app artifact/.test(event.text)),
+    "a live editor mutation with no files still arms visual proof",
+  );
+
+  const withObservation = await collect(makeEngine(
+    scriptedProvider([
+      { name: "Capability", input: { action: "invoke", operation: "pose" } },
+      { name: "Capability", input: { action: "invoke", operation: "observe" } },
+    ]),
+    [environmentCapabilityTool],
+    { environmentArtifactSignals: () => [] },
+  ));
+  assert.ok(
+    !withObservation.some((event) => event.type === "system_reminder_injected" && /WINDOWED app artifact/.test(event.text)),
+    "a fresh contract receipt carrying viewport pixels settles the GUI gate",
   );
 });
 

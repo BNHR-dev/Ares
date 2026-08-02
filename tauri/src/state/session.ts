@@ -12,7 +12,7 @@ export type ReasoningLevel = "off" | "minimal" | "low" | "medium" | "high" | "xh
 // vs. running standalone. Grant the fuller set (same posture as the embedded
 // browser) so a previewed app behaves the way it does on its own. This is the
 // user's OWN generated code in their OWN desktop app, so same-origin is fine.
-export const PREVIEW_SANDBOX = "allow-scripts allow-same-origin allow-forms allow-modals allow-popups allow-pointer-lock allow-downloads";
+export const PREVIEW_SANDBOX = "allow-scripts allow-same-origin allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-pointer-lock allow-downloads";
 
 export const REASONING_LEVELS: ReasoningLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 export const EFFORT_META: Record<ReasoningLevel, { label: string; hint: string }> = {
@@ -125,12 +125,27 @@ export interface ToolStep {
   draftHead?: string;
   /** Live sub-tool output tail (last ~200 lines of shell stdout/stderr). */
   liveTail?: string;
+  /** Provider attempt that authored this call. Draft-only steps from a
+   * superseded attempt are rolled back without touching settled tools. */
+  providerAttemptId?: string;
+  /** True only after a real tool_start crossed the execution boundary. Synthetic
+   * skipped results created by steering remain false and are safe to roll back. */
+  actuallyStarted?: boolean;
 }
 
+export type SteerStatus =
+  | "submitting"
+  | "interrupting_generation"
+  | "waiting_for_action"
+  | "waiting_for_boundary"
+  | "applied"
+  | "cancelled"
+  | "rejected";
+
 export type Item =
-  | { kind: "user"; key: string; text: string; images?: string[] }
-  | { kind: "steer"; key: string; text: string; landed?: boolean }
-  | { kind: "assistant"; key: string; text: string; thinking: string; streaming: boolean; model?: string; lane?: string; provider?: string; proactive?: boolean }
+  | { kind: "user"; key: string; inputId?: string; text: string; images?: string[] }
+  | { kind: "steer"; key: string; inputId?: string; text: string; images?: string[]; landed?: boolean; status?: SteerStatus }
+  | { kind: "assistant"; key: string; text: string; thinking: string; streaming: boolean; model?: string; lane?: string; provider?: string; proactive?: boolean; providerAttemptId?: string }
   | { kind: "tools"; key: string; steps: ToolStep[]; startedAt: number; finishedAt?: number }
   | {
       kind: "usage";
@@ -145,7 +160,7 @@ export type Item =
       lane?: string;
       provider?: string;
     }
-  | { kind: "permission"; key: string; id: string; toolName: string; reason: string; decided?: string }
+  | { kind: "permission"; key: string; id: string; toolName: string; reason: string; input?: unknown; decided?: string; submitting?: string }
   | { kind: "notice"; key: string; text: string; tone: "dim" | "warn" | "bad" }
   | { kind: "authPrompt"; key: string; provider: string; text: string }
   | { kind: "artifact"; key: string; path: string; label: string }
@@ -157,6 +172,12 @@ export interface SessionVm {
   title: string;
   items: Item[];
   busy: boolean;
+  /** Stop was accepted but the daemon has not yet released the owning turn.
+   * Drafting remains available, while send/steer and duplicate Stop are gated. */
+  cancelling?: boolean;
+  /** Canonical authority shown in the chrome. Plan is a hard no-effects
+   * boundary; build appears only after the owner approves the exact handoff. */
+  workflowMode: "plan" | "build";
   tokensIn: number;
   /** Portion of tokensIn served from the provider prompt cache. */
   cacheReadTokens: number;
@@ -167,6 +188,12 @@ export interface SessionVm {
   todos: Array<{ id: string; content: string; activeForm: string; status: string }>;
   /** Steer messages queued mid-turn, awaiting a safe injection boundary. */
   steerQueued?: number;
+  /** Current model-attempt rollback fence. A steering supersession removes only
+   * transient output authored after this boundary, never the steer bubble. */
+  providerAttempt?: { id: string; itemBoundary: number };
+  /** Rejected/cancelled steers return here until the composer merges them back
+   * into the owner's draft. Exact IDs prevent double restoration. */
+  recoverableDrafts?: Array<{ inputId: string; text: string; images?: string[] }>;
   /** Model + lane the daemon resolved for the current turn (routing transparency). */
   turnModel?: string;
   turnLane?: string;
@@ -236,6 +263,7 @@ export function freshSession(): SessionVm {
     title: "New session",
     items: [],
     busy: false,
+    workflowMode: "build",
     tokensIn: 0,
     cacheReadTokens: 0,
     tokensOut: 0,
@@ -250,6 +278,7 @@ export interface SessionSummaryWire {
   updatedAt?: string;
   preview?: string;
   label?: string;
+  workflowMode?: "plan" | "build";
 }
 
 export interface MessageWire {
@@ -264,6 +293,7 @@ export function sessionFromSummary(summary: SessionSummaryWire): SessionVm {
     title: compact(summary.label || summary.preview || "Saved session", 42),
     items: [],
     busy: false,
+    workflowMode: summary.workflowMode ?? "build",
     tokensIn: 0,
     cacheReadTokens: 0,
     tokensOut: 0,
@@ -278,6 +308,18 @@ export function sessionFromSummary(summary: SessionSummaryWire): SessionVm {
 export function sessionFromHistory(id: string, rawMessages: unknown, meta: unknown): SessionVm {
   const messages = Array.isArray(rawMessages) ? (rawMessages as MessageWire[]) : [];
   const items: Item[] = [];
+  const toolResults = new Map<string, Array<Record<string, unknown>>>();
+  for (const message of messages) {
+    if (message.role !== "user") continue;
+    for (const block of Array.isArray(message.content) ? message.content : []) {
+      if (block.type !== "tool_result") continue;
+      const toolUseId = String(block.tool_use_id ?? "");
+      if (!toolUseId) continue;
+      const queued = toolResults.get(toolUseId) ?? [];
+      queued.push(block);
+      toolResults.set(toolUseId, queued);
+    }
+  }
   for (const message of messages) {
     const blocks = Array.isArray(message.content) ? message.content : [];
     if (message.role === "assistant") {
@@ -288,13 +330,23 @@ export function sessionFromHistory(id: string, rawMessages: unknown, meta: unkno
       }
       const tools = blocks
         .filter((b) => b.type === "tool_use")
-        .map((b, index): ToolStep => ({
-          id: String(b.id ?? `replay-tool-${index}`),
-          label: String(b.name ?? "Tool"),
-          name: String(b.name ?? "Tool"),
-          status: "ok",
-          inputJson: stringify(b.input ?? {}),
-        }));
+        .map((b, index): ToolStep => {
+          const toolUseId = String(b.id ?? `replay-tool-${index}`);
+          const result = toolResults.get(toolUseId)?.shift();
+          const failed = !result || result.is_error === true || result.isError === true;
+          const rawDetail = result?.content;
+          const detail = result
+            ? compact(typeof rawDetail === "string" ? rawDetail : stringify(rawDetail ?? result), 600)
+            : "No settled tool result was recorded; this proposal did not complete.";
+          return {
+            id: toolUseId,
+            label: String(b.name ?? "Tool"),
+            name: String(b.name ?? "Tool"),
+            status: failed ? "error" : "ok",
+            detail,
+            inputJson: stringify(b.input ?? {}),
+          };
+        });
       if (tools.length > 0) items.push({ kind: "tools", key: nextKey(), steps: tools, startedAt: 0, finishedAt: 0 });
       continue;
     }
@@ -305,9 +357,9 @@ export function sessionFromHistory(id: string, rawMessages: unknown, meta: unkno
       const blockImages = blocks
         .filter((b) => b.type === "image")
         .map((b) => {
-          const src = b as { source?: { data?: string; media_type?: string; type?: string; url?: string } };
+          const src = b as { source?: { data?: string; media_type?: string; mediaType?: string; type?: string; url?: string } };
           if (src.source?.url) return src.source.url;
-          if (src.source?.data) return `data:${src.source.media_type ?? "image/png"};base64,${src.source.data}`;
+          if (src.source?.data) return `data:${src.source.mediaType ?? src.source.media_type ?? "image/png"};base64,${src.source.data}`;
           return "";
         })
         .filter(Boolean);
@@ -319,12 +371,16 @@ export function sessionFromHistory(id: string, rawMessages: unknown, meta: unkno
     }
   }
   const firstUser = items.find((item): item is Extract<Item, { kind: "user" }> => item.kind === "user");
-  const provider = (meta && typeof meta === "object" ? (meta as { provider?: { name?: string; model?: string } }).provider : undefined);
+  const metadata = meta && typeof meta === "object"
+    ? meta as { provider?: { name?: string; model?: string }; workflowMode?: "plan" | "build" }
+    : undefined;
+  const provider = metadata?.provider;
   return {
     id,
     title: compact(firstUser?.text || "Saved session", 42),
     items,
     busy: false,
+    workflowMode: metadata?.workflowMode ?? "build",
     tokensIn: 0,
     cacheReadTokens: 0,
     tokensOut: 0,
