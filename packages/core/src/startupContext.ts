@@ -17,7 +17,25 @@ export interface StartupReminder {
   instructionClaims?: RepositoryInstructionClaim[];
 }
 
-const MAX_CONTEXT_CHARS = 24_000;
+/** Project instruction files (ARES.md/AGENTS.md/CLAUDE.md) are rules the OWNER
+ *  wrote and expects honored in full — they earn a generous budget. */
+const MAX_INSTRUCTION_CHARS = 24_000;
+
+/**
+ * Memory gets a FAR tighter budget than instructions, and the difference is
+ * the whole point.
+ *
+ * Field evidence (2026-08-02 session sweep): memory.md reached 24,112 chars and
+ * was injected verbatim at the head of every session — ~6k tokens spent before
+ * the owner's message was even read. Measured against the model's own output,
+ * reminders ran as high as 10.5:1, and `memory` was the dominant source by an
+ * order of magnitude over every other reminder channel.
+ *
+ * Curated long-term memory that cannot fit in this budget is not curated. If
+ * it overflows, the fix is consolidation (`ares mind consolidate`), never a
+ * bigger context bite.
+ */
+const MAX_MEMORY_CHARS = 4_000;
 
 export async function loadStartupReminders(workspace: string): Promise<StartupReminder[]> {
   const reminders: StartupReminder[] = [];
@@ -33,7 +51,7 @@ export async function loadMemoryReminders(workspace: string): Promise<StartupRem
   ];
   const reminders: StartupReminder[] = [];
   for (const entry of files) {
-    const text = await readSmallText(entry.file);
+    const text = await readSmallText(entry.file, MAX_MEMORY_CHARS);
     if (!text) continue;
     reminders.push({
       source: "memory",
@@ -48,7 +66,7 @@ export async function loadInstructionReminders(workspace: string): Promise<Start
   for (const dir of ancestorDirs(path.resolve(workspace))) {
     for (const name of REPOSITORY_INSTRUCTION_FILES) {
       const file = path.join(dir, name);
-      const text = await readSmallText(file);
+      const text = await readSmallText(file, MAX_INSTRUCTION_CHARS);
       if (!text) continue;
       const contentHash = await fs.readFile(file)
         .then((bytes) => createHash("sha256").update(bytes).digest("hex"))
@@ -64,14 +82,16 @@ export async function loadInstructionReminders(workspace: string): Promise<Start
   return reminders;
 }
 
-async function readSmallText(file: string): Promise<string | null> {
+async function readSmallText(file: string, maxChars: number): Promise<string | null> {
   try {
     const stat = await fs.stat(file);
     if (!stat.isFile() || stat.size === 0) return null;
     const text = await fs.readFile(file, "utf8");
-    return text.length > MAX_CONTEXT_CHARS
-      ? `${text.slice(0, MAX_CONTEXT_CHARS)}\n\n[truncated: ${text.length - MAX_CONTEXT_CHARS} chars omitted]`
-      : text;
+    if (text.length <= maxChars) return text;
+    // Keep the HEAD: curated files put their durable facts first, and a
+    // truncation notice that names the consolidation command turns an
+    // invisible context bite into an actionable one.
+    return `${text.slice(0, maxChars)}\n\n[truncated: ${text.length - maxChars} chars omitted — this file is too large to inject in full. Run \`ares mind consolidate\` to distil it.]`;
   } catch {
     return null;
   }

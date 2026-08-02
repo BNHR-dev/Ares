@@ -136,6 +136,21 @@ export function coerceToolArgs(raw: string, toolName: string): Record<string, un
   try {
     parsed = JSON.parse(trimmed);
   } catch {
+    // A LONG payload that failed to parse was almost certainly cut off at the
+    // output-token cap, not mistyped — and "re-emit with valid JSON" makes the
+    // model retry the same oversized call and truncate at the same place. A
+    // pomodoro-clock task lost its first Write exactly this way. When the
+    // evidence points at size, give the strategy that actually fits.
+    const looksTruncated = trimmed.length > 2_000 && !trimmed.endsWith("}");
+    const writesContent = /^(?:Write|Edit|ApplyPatch|NotebookEdit|ApplyIntent)$/i.test(toolName);
+    if (looksTruncated && writesContent) {
+      throw new Error(
+        `<tool_use_error>${toolName}: the arguments JSON was cut off mid-value (${trimmed.length} chars received, no closing brace) — ` +
+          `this is the output-token limit, not a syntax mistake, so re-sending the same call will truncate at the same place. ` +
+          `Split the work: Write a smaller first version containing the structure and the critical parts, then extend it with follow-up Edit calls. ` +
+          `For a large single file, write it in 2-4 sequential passes rather than one call.</tool_use_error>`,
+      );
+    }
     throw new Error(
       `<tool_use_error>${toolName}: the arguments JSON was malformed or truncated and could not be parsed. ` +
         `Re-emit the ${toolName} call with complete, valid JSON arguments.</tool_use_error>`,

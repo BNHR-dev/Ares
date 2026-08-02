@@ -1924,6 +1924,13 @@ export class QueryEngine {
     let oscillationStreak = 0;
     let ceilingNudged = false;
     let shellEditHinted = false;
+    // Sleep-polling detector. A pomodoro-clock task burned 26 browser calls and
+    // 24 seconds of literal Start-Sleep trying to watch a timer tick in real
+    // time, then still ended unverified — you cannot observe a minute-scale
+    // rule by waiting for it. Counted across the turn (like the grind breaker,
+    // not the tight-loop detector) because the sleeps are separated by work.
+    let sleepCalls = 0;
+    let sleepPollHinted = false;
     // Coding completion truth. Tool-reported mutations arm the proof gate;
     // only a successful manual check or host verifier result AFTER the latest
     // mutation can mark the work verified.
@@ -3034,12 +3041,36 @@ export class QueryEngine {
             role: "user",
             content: [{
               type: "system_reminder",
-              text: "You edited a file via shell regex replace (`-replace`/`sed -i`). If the pattern doesn't match, that silently does NOTHING — the command still exits 0 and the file stays stale. Prefer the Edit tool: it fails loudly when the target string isn't found. If you keep the shell approach, verify the file actually changed (grep for the new value) before relying on it.",
+              text: "You edited a file via shell regex replace (`-replace`/`sed -i`). If the pattern doesn't match, that silently does NOTHING — the command still exits 0 and the file stays stale. Prefer the Edit tool: it fails loudly when the target string isn't found. If you reached for the shell because the replacement content is large (inlining a library, splicing in a generated file), use Edit's `new_string_from_file` instead — it reads the bytes straight off disk, so nothing is truncated and the match is still checked. If you keep the shell approach, verify the file actually changed (grep for the new value) before relying on it.",
             }],
             createdAt: new Date().toISOString(),
           });
           yield { type: "system_reminder_injected", text: "shell-regex file edit detected — Edit tool fails loudly, shell replace fails silently", source: "instructions" };
         }
+      }
+
+      // ── sleep-polling hint (one-shot) ───────────────────────────────────
+      // Waiting in real time to observe time-dependent behaviour cannot prove
+      // a minute-scale rule and eats the turn. Drive the logic instead.
+      for (const use of pendingToolUses) {
+        if (use.name !== "PowerShell" && use.name !== "Bash") continue;
+        const cmd = (use.input as Record<string, unknown> | null | undefined)?.["command"];
+        if (typeof cmd !== "string") continue;
+        if (/^\s*(?:start-sleep|sleep)\b/i.test(cmd) || /\b(?:start-sleep\s+-seconds|sleep)\s+\d+\s*$/i.test(cmd)) {
+          sleepCalls++;
+        }
+      }
+      if (sleepCalls >= 3 && !sleepPollHinted) {
+        sleepPollHinted = true;
+        const text =
+          "You've now slept 3+ times this turn to watch something happen. Real-time waiting cannot prove time-dependent behaviour (a timer, an interval, \"randomises every minute\") — the wait is always either too short to be evidence or too long to afford. Drive the logic directly instead: with Browser eval, call the page's own tick/update/randomise function in a loop and collect the outputs, or override the clock (Date.now / performance.now) and invoke the interval callback yourself. One eval that exercises 60 iterations is stronger proof than any number of screenshots spaced a minute apart. Reserve real sleeps for a process that genuinely needs boot time (a dev server), and even then poll its readiness, not the wall clock.";
+        this.messages.push({
+          id: cryptoId(),
+          role: "user",
+          content: [{ type: "system_reminder", text }],
+          createdAt: new Date().toISOString(),
+        });
+        yield { type: "system_reminder_injected", text: "sleep-polling detected — drive the logic with eval instead of waiting", source: "instructions" };
       }
 
       // ── repeated-failure circuit-breaker ────────────────────────────────

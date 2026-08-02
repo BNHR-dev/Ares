@@ -36,10 +36,21 @@ import { appendMutationFeedback, collectMutationFeedback } from "./postMutationF
 // extension so this package needn't widen _shared.ts.
 type WrittenStamp = FileReadStamp & { writtenNotRead?: boolean };
 
+/** Replacement-by-reference: the bytes come from a file on disk instead of the
+ *  model's output. This exists because the alternative was shell string
+ *  surgery — a live session inlined a ~600 KB three.js UMD into an HTML file
+ *  with `Get-Content -Raw` + replace + write-back, because passing that library
+ *  through new_string would have blown the output-token cap. Shell replace
+ *  fails SILENTLY on a non-matching pattern; Edit fails loudly. Making
+ *  composition expressible here removes the last honest reason to leave. */
+const FROM_FILE_DESC =
+  "Path to a file whose ENTIRE contents become the replacement text. Use instead of new_string when inserting large content (a library, a generated asset, another file's body) so the bytes never pass through your output and cannot be truncated. Mutually exclusive with new_string.";
+
 const editHunk = z
   .object({
     old_string: z.string().describe("Exact text to replace. Must be unique unless replace_all."),
-    new_string: z.string().describe("Replacement text. Must differ from old_string."),
+    new_string: z.string().optional().describe("Replacement text. Must differ from old_string."),
+    new_string_from_file: zPath.optional().describe(FROM_FILE_DESC),
     replace_all: z.boolean().default(false).describe("If true, replace every occurrence of this hunk."),
   })
   .strict();
@@ -50,6 +61,7 @@ const inputSchema = z
     // Single-edit mode (omit when using `edits`).
     old_string: z.string().optional().describe("Single-edit mode: exact text to replace. Omit when using `edits`."),
     new_string: z.string().optional().describe("Single-edit mode: replacement text."),
+    new_string_from_file: zPath.optional().describe(`Single-edit mode: ${FROM_FILE_DESC}`),
     replace_all: z.boolean().default(false).describe("Single-edit mode: replace every occurrence."),
     // Batch mode.
     edits: z
@@ -63,12 +75,61 @@ const inputSchema = z
 
 type EditInput = z.infer<typeof inputSchema>;
 
-/** Normalize either mode into an ordered list of hunks. */
-function editHunks(i: EditInput): Array<{ old_string: string; new_string: string; replace_all: boolean }> {
+interface EditHunk {
+  old_string: string;
+  new_string: string;
+  replace_all: boolean;
+  /** Unresolved source path; new_string is empty until resolveHunks reads it. */
+  from_file?: string;
+}
+
+/** Normalize either mode into an ordered list of hunks. Content referenced by
+ *  `new_string_from_file` is NOT read here — validation and permission checks
+ *  are sync, so resolution happens in resolveHunks() at call time. */
+function editHunks(i: EditInput): EditHunk[] {
   if (Array.isArray(i.edits) && i.edits.length > 0) {
-    return i.edits.map((h) => ({ old_string: h.old_string, new_string: h.new_string, replace_all: h.replace_all }));
+    return i.edits.map((h) => ({
+      old_string: h.old_string,
+      new_string: h.new_string ?? "",
+      replace_all: h.replace_all,
+      from_file: h.new_string_from_file,
+    }));
   }
-  return [{ old_string: i.old_string ?? "", new_string: i.new_string ?? "", replace_all: i.replace_all }];
+  return [{
+    old_string: i.old_string ?? "",
+    new_string: i.new_string ?? "",
+    replace_all: i.replace_all,
+    from_file: i.new_string_from_file,
+  }];
+}
+
+/** Read every `new_string_from_file` source into its hunk. Each source is
+ *  permission-checked as a READ, so composition can't smuggle bytes out of a
+ *  directory the session was never granted. */
+async function resolveHunks(
+  hunks: readonly EditHunk[],
+  ctx: Parameters<typeof resolveWorkspacePath>[0],
+): Promise<EditHunk[]> {
+  const resolved: EditHunk[] = [];
+  for (const h of hunks) {
+    if (!h.from_file) {
+      resolved.push(h);
+      continue;
+    }
+    const source = await resolveWorkspacePath(ctx, h.from_file, "new_string_from_file", "read");
+    const body = await fs.readFile(source, "utf8").catch((error: NodeJS.ErrnoException) => {
+      throw toolError(
+        error.code === "ENOENT"
+          ? `new_string_from_file: ${source} does not exist.`
+          : `new_string_from_file: could not read ${source} (${error.code ?? error.message}).`,
+      );
+    });
+    if (body === h.old_string) {
+      throw toolError(`new_string_from_file: ${source} is byte-identical to old_string — the edit would be a no-op.`);
+    }
+    resolved.push({ ...h, new_string: body });
+  }
+  return resolved;
 }
 
 export interface EditOutput {
@@ -87,7 +148,7 @@ export interface EditOutput {
 export const EditTool = buildTool({
   name: "Edit",
   description:
-    "Replace exact text in a file (requires prior Read; tolerates CRLF/LF + trailing-whitespace drift). Single edit: old_string/new_string. Multi-site: pass `edits` — an ATOMIC, all-or-nothing batch applied in order (use this instead of many separate Edit calls on one file). Fails if an old_string is non-unique (set replace_all). Pick the SMALLEST old_string that is still unique — usually 2-4 adjacent lines with a distinctive token; over-long anchors are brittle to whitespace/edits, and single-line anchors are often non-unique.",
+    "Replace exact text in a file (requires prior Read; tolerates CRLF/LF + trailing-whitespace drift). Single edit: old_string/new_string. Multi-site: pass `edits` — an ATOMIC, all-or-nothing batch applied in order (use this instead of many separate Edit calls on one file). Fails if an old_string is non-unique (set replace_all). Pick the SMALLEST old_string that is still unique — usually 2-4 adjacent lines with a distinctive token; over-long anchors are brittle to whitespace/edits, and single-line anchors are often non-unique. To insert LARGE content (inline a library, splice in a generated asset, merge another file's body) pass `new_string_from_file` instead of new_string: the bytes are read from disk and never pass through your output, so they cannot be truncated — this is the correct alternative to shell string-surgery.",
   safety: "workspace-write",
   concurrency: "exclusive",
   inputZod: inputSchema,
@@ -101,10 +162,14 @@ export const EditTool = buildTool({
     const pathProblem = pathInputProblem(i.file_path, ctx?.workspace);
     if (pathProblem) return { ok: false, message: `file_path: ${pathProblem}` };
     const usingBatch = Array.isArray(i.edits) && i.edits.length > 0;
-    if (!usingBatch && (i.old_string === undefined || i.new_string === undefined)) {
+    // A single edit needs old_string plus EITHER new_string or
+    // new_string_from_file — this guard predates composition and would
+    // otherwise reject the by-reference form before it reached the per-hunk
+    // checks below.
+    if (!usingBatch && (i.old_string === undefined || (i.new_string === undefined && i.new_string_from_file === undefined))) {
       return {
         ok: false,
-        message: "Provide both old_string and new_string for a single edit, or an `edits` array for an atomic batch.",
+        message: "Provide old_string plus new_string (or new_string_from_file) for a single edit, or an `edits` array for an atomic batch.",
       };
     }
     const hunks = editHunks(i);
@@ -116,7 +181,20 @@ export const EditTool = buildTool({
           message: `old_string is empty${where}. Provide the exact existing text to replace, or use Write to create/replace the whole file.`,
         };
       }
-      if (hunks[idx].old_string === hunks[idx].new_string) {
+      if (hunks[idx].from_file && (i.edits ? i.edits[idx]?.new_string : i.new_string) !== undefined) {
+        return {
+          ok: false,
+          message: `new_string and new_string_from_file are both set${where} — provide exactly one.`,
+        };
+      }
+      if (!hunks[idx].from_file && (i.edits ? i.edits[idx]?.new_string : i.new_string) === undefined) {
+        return {
+          ok: false,
+          message: `new_string is missing${where}. Provide new_string, or new_string_from_file to insert another file's contents.`,
+        };
+      }
+      // A from_file no-op can only be detected after the read (see resolveHunks).
+      if (!hunks[idx].from_file && hunks[idx].old_string === hunks[idx].new_string) {
         return { ok: false, message: `old_string and new_string are identical${where} — the edit would be a no-op.` };
       }
       if (looksLineNumberPrefixed(hunks[idx].old_string)) {
@@ -171,7 +249,7 @@ export const EditTool = buildTool({
     // Only write once ALL hunks resolve — if any fails the file is untouched, so
     // a multi-site edit can never half-apply (the classic "edit 2's text is gone
     // after edit 1" failure becomes a clean, recoverable error instead).
-    const hunks = editHunks(i);
+    const hunks = await resolveHunks(editHunks(i), ctx);
     let working = content;
     let totalReplacements = 0;
     const matchedBys = new Set<string>();

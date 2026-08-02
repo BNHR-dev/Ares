@@ -200,9 +200,18 @@ function extractSessionSignals(eventsJsonl: string): string[] {
         const text = messageText((event as any).userMessage);
         if (durable(text)) signals.add(`User asked: ${compact(text)}`);
       }
-      if (event.type === "tool_error" && event.error) {
-        signals.add(`Tool error observed: ${compact(event.error)}`);
-      }
+      // Tool errors are DELIBERATELY not memories.
+      //
+      // They used to be captured here as durable FEEDBACK entries, which meant
+      // long-term memory filled with lines like "Tool error observed:
+      // <tool_use_error>...". Every session then injected that history back
+      // into context, priming the model on its own past failures — and worse,
+      // preserving bugs forever: memory still carried "SearXNG: no instance
+      // URL" long after that bug was fixed in the harness.
+      //
+      // Transient failures already have a proper home: the friction telemetry
+      // (~/.ares/telemetry/friction-*.jsonl), which reliabilityTriage and the
+      // Self tool read on demand. Memory is for what stays true.
     } catch {
       // Ignore torn JSONL tails.
     }
@@ -210,8 +219,34 @@ function extractSessionSignals(eventsJsonl: string): string[] {
   return [...signals];
 }
 
+/**
+ * Does this message state something that stays TRUE after the session ends?
+ *
+ * The old test was a bare keyword list including "use", "tool", and "test" —
+ * words present in nearly every message anyone sends a coding agent. That is
+ * how conversational openers ("...just to test your capabilities...") became
+ * permanent memories, stored as truncated mid-sentence fragments.
+ *
+ * A standing fact is a STATEMENT, not a request: an expressed preference, a
+ * settled decision, or an explicit instruction to remember. Questions and
+ * task requests are work, not knowledge — the coding journal and the session
+ * transcript already hold those.
+ */
 function durable(text: string): boolean {
-  return /\b(prefer|always|never|remember|use|architecture|decision|style|tool|commit|test|verify)\b/i.test(text);
+  const clean = text.replace(/\s+/g, " ").trim();
+  // Too short to carry a fact, or a bare question → not knowledge.
+  if (clean.length < 25) return false;
+  if (/^(?:hi|hey|yo|hello|sup|thanks|ok|okay)\b/i.test(clean)) return false;
+  if (clean.endsWith("?")) return false;
+  return (
+    // Explicit instruction to retain.
+    /\b(?:remember|keep in mind|for future reference|from now on|going forward)\b/i.test(clean) ||
+    // Expressed preference / standing rule, stated in the first person.
+    /\b(?:i|we)\s+(?:prefer|always|never|usually|don'?t|do not|like to|want you to|need you to)\b/i.test(clean) ||
+    /\b(?:always|never)\s+(?:use|write|run|commit|verify|assume|ask)\b/i.test(clean) ||
+    // A settled decision about how the work is done.
+    /\b(?:we (?:decided|agreed|settled on|are using)|the (?:convention|standard|rule) is|stick (?:to|with))\b/i.test(clean)
+  );
 }
 
 function classifySignal(text: string): MemoryCategory {
