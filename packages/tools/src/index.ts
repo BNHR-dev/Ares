@@ -44,6 +44,7 @@ export {
 export {
   makeWebFetchTool,
   htmlToText,
+  assertPublicHost,
   type WebFetchOutput,
   type Summarizer,
 } from "./WebFetch.js";

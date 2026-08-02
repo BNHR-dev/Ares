@@ -41,16 +41,46 @@ export function isBlockedIp(ip: string): boolean {
   return true; // unparseable → block
 }
 
+/** Is this IP the machine's OWN loopback (127/8, ::1)? Distinct from the wider
+ *  private ranges: the owner's own dev server on localhost is a legitimate,
+ *  routine fetch target during coding verification. */
+function isLoopbackIp(ip: string): boolean {
+  const v = isIP(ip);
+  if (v === 4) return ip.split(".")[0] === "127";
+  if (v === 6) {
+    const lower = ip.toLowerCase().replace(/^\[|\]$/g, "");
+    if (lower === "::1") return true;
+    if (lower.startsWith("::ffff:")) return isLoopbackIp(lower.slice(7));
+  }
+  return false;
+}
+
 /** Resolve a hostname and reject if it (or any A/AAAA record) is a blocked IP —
- *  the DNS-rebinding-safe SSRF gate. Localhost by name is blocked too. */
-export async function assertPublicHost(hostname: string): Promise<{ ok: true } | { ok: false; message: string }> {
+ *  the DNS-rebinding-safe SSRF gate.
+ *
+ *  EXPLICIT loopback is allowed: a URL that literally names localhost /
+ *  127.x / ::1 is the owner probing their own dev server — the core coding
+ *  verify loop, and no more privilege than the shell already has with curl.
+ *  COVERT loopback stays blocked: a public hostname that merely RESOLVES to
+ *  loopback is the DNS-rebinding shape (a hostile page steering a fetch into
+ *  local admin endpoints), and LAN/metadata ranges stay blocked either way. */
+export async function assertPublicHost(
+  hostname: string,
+  opts: { allowLoopback?: boolean } = {},
+): Promise<{ ok: true } | { ok: false; message: string }> {
   const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".internal") || host.endsWith(".local")) {
+  const loopbackByName = host === "localhost" || host.endsWith(".localhost"); // RFC 6761: always loopback
+  if (loopbackByName || (isIP(host) && isLoopbackIp(host))) {
+    return opts.allowLoopback
+      ? { ok: true }
+      : { ok: false, message: `WebFetch won't follow a redirect from a public page onto loopback (${hostname}) — fetch the local URL directly instead.` };
+  }
+  if (host.endsWith(".internal") || host.endsWith(".local")) {
     return { ok: false, message: `WebFetch won't reach internal host "${hostname}". It fetches public web pages only.` };
   }
   if (isIP(host)) {
     return isBlockedIp(host)
-      ? { ok: false, message: `WebFetch won't reach the private/loopback address ${hostname}.` }
+      ? { ok: false, message: `WebFetch won't reach the private address ${hostname}.` }
       : { ok: true };
   }
   try {
@@ -196,10 +226,12 @@ export function makeWebFetchTool(summarizer?: Summarizer, jsRenderer: JsRenderer
           message: `WebFetch only fetches http:// and https:// URLs — got ${scheme}//. For local files use Read; for other protocols use a shell tool.`,
         };
       }
-      // SSRF gate: block the private/loopback/metadata ranges (opt-out for
-      // users who genuinely need to fetch a LAN service in a trusted setup).
+      // SSRF gate: block private/metadata ranges (opt-out for users who
+      // genuinely need to fetch a LAN service in a trusted setup). EXPLICIT
+      // loopback is allowed at pre-flight — probing the owner's own dev server
+      // is the routine coding verify loop.
       if (process.env.ARES_WEBFETCH_ALLOW_PRIVATE !== "1") {
-        const guard = await assertPublicHost(new URL(i.url).hostname);
+        const guard = await assertPublicHost(new URL(i.url).hostname, { allowLoopback: true });
         if (!guard.ok) return guard;
       }
       return { ok: true };
@@ -224,10 +256,17 @@ export function makeWebFetchTool(summarizer?: Summarizer, jsRenderer: JsRenderer
         ctx.signal.removeEventListener("abort", onAbort);
 
         // A redirect can jump to an internal host AFTER the pre-flight check
-        // passed — re-validate the final URL before reading its body.
+        // passed — re-validate the final URL before reading its body. Loopback
+        // finals are legal only when the ORIGINAL request already targeted
+        // loopback (local dev servers redirect within themselves constantly);
+        // a public page 302'ing onto localhost stays blocked.
         if (process.env.ARES_WEBFETCH_ALLOW_PRIVATE !== "1" && res.url) {
           try {
-            const finalGuard = await assertPublicHost(new URL(res.url).hostname);
+            const originalHost = new URL(upgraded).hostname.toLowerCase().replace(/^\[|\]$/g, "");
+            const originalWasLoopback =
+              originalHost === "localhost" || originalHost.endsWith(".localhost") ||
+              (isIP(originalHost) !== 0 && isLoopbackIp(originalHost));
+            const finalGuard = await assertPublicHost(new URL(res.url).hostname, { allowLoopback: originalWasLoopback });
             if (!finalGuard.ok) {
               return {
                 output: { url: upgraded, finalUrl: res.url, status: res.status, contentType: "", text: `[blocked: ${finalGuard.message}]`, truncated: false },

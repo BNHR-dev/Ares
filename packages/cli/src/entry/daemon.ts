@@ -546,26 +546,50 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
     }
   };
 
+  /** Map a persisted session-meta provider NAME onto the flag vocabulary
+   *  selectProvider understands (same normalization as providerFamilyForSelection). */
+  const providerFlagForMetaName = (name: string): string => {
+    const normalized = name.toLowerCase();
+    if (normalized.startsWith("openai")) return "openai";
+    if (normalized.startsWith("moa")) return "moa";
+    if (normalized.startsWith("ollama")) return "ollama";
+    if (normalized.startsWith("mock")) return "mock";
+    return normalized;
+  };
+
   const resolveEntry = async (sessionId: string | undefined): Promise<DaemonEntry> => {
     const sid = sessionId || DEFAULT_SID;
     if (sid === DEFAULT_SID) return primaryEntry;
     const existing = sessions.get(sid);
     if (existing) return existing;
-    // A new card → a fresh, fully-isolated session (no background heartbeat;
-    // the primary owns the shared mind loop). Inherits the daemon's provider.
-    const selection = await selectProvider(
-      new Map([
-        ["provider", mainProviderFamily],
-        ["model", mainSelection.model],
-      ]),
-    );
+    // A RESUMED card must come back on ITS OWN saved provider+model pair. The
+    // daemon's main lane is a moving target (failover and model switches mutate
+    // it), and pairing main's provider with another session's model built
+    // Franken-selections — a deepseek-wire client asked to run gpt-5.6-sol
+    // 400'd the same recovered input on four consecutive boots. Only a brand
+    // new card (no snapshot on disk) inherits the daemon's provider.
     let saved = false;
+    let savedProvider: { name: string; model: string } | undefined;
     try {
-      await loadSessionSnapshot(live.context.workspace, sid, { maxMessages: 1 });
+      const peek = await loadSessionSnapshot(live.context.workspace, sid, { maxMessages: 1 });
       saved = true;
+      if (peek.meta?.provider?.name && peek.meta.provider.model) {
+        savedProvider = { name: peek.meta.provider.name, model: peek.meta.provider.model };
+      }
     } catch (error) {
       if (!(error instanceof SessionNotFoundError)) throw error;
     }
+    const selection = await selectProvider(
+      savedProvider
+        ? new Map([
+            ["provider", providerFlagForMetaName(savedProvider.name)],
+            ["model", savedProvider.model],
+          ])
+        : new Map([
+            ["provider", mainProviderFamily],
+            ["model", mainSelection.model],
+          ]),
+    );
     const fresh = await createSessionWithSelection(
       args,
       selection,
@@ -3034,6 +3058,34 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
           if (completedStartupRecovery && !settlementRecoveryScheduled) {
             entry.startupRecoveryInputId = undefined;
             entry.startupRecoveryCancelRequested = false;
+          }
+          // Poison-pill guard: a RECOVERED input that died on a non-retriable
+          // provider rejection (400 invalid_request, 401/403 auth) will die
+          // identically on every future boot — the same GameFPS input re-ran
+          // and failed on four consecutive daemon starts across 16 hours.
+          // Cancel it durably so recovery stops resurrecting it; transient
+          // failures (rate limits, capacity) keep their retry-next-boot value.
+          if (
+            completedStartupRecovery &&
+            turnState.status === "failed" &&
+            turnState.fatalProvider &&
+            /\b40[013]\b|invalid_request|invalid_authentication|unauthorized|forbidden|invalid.?api.?key/i.test(turnState.fatalProvider)
+          ) {
+            try {
+              const kernel = await openWorkspaceSessionKernel(entry.live.context.workspace);
+              kernel.cancelInput(inputId, {
+                sessionId: entry.live.session.meta.id,
+                reason: { kind: "startup_recovery_poison", error: turnState.fatalProvider.slice(0, 500) },
+              });
+              tagEmit(command.sessionId, {
+                type: "system_reminder_injected",
+                source: "instructions",
+                text: `A recovered request from a previous run kept failing with a permanent provider error and has been cancelled (${turnState.fatalProvider.slice(0, 160)}). Re-send it if you still want it.`,
+              });
+            } catch {
+              // Couldn't cancel (e.g. claimed under a live generation) — the
+              // next boot may retry once more; never break turn settlement.
+            }
           }
           // Same command path as a fresh owner turn: routing, vision escalation,
           // persona, recall, failover, verification, and journaling all run.
