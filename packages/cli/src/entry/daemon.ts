@@ -1912,10 +1912,24 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
       if (command.type === "persona_adopt") {
         // name omitted (or null) means "release" — one command for both so the
         // desktop's chip revert and its adopt button share a path.
-        const sid = typeof command.sessionId === "string" ? command.sessionId : undefined;
-        const entry = sid ? sessions.get(sid) : primaryEntry;
-        if (!entry) {
-          process.stdout.write(JSON.stringify({ type: "daemon_error", error: "persona_adopt: unknown session" }) + "\n");
+        //
+        // resolveEntry, NOT sessions.get: a resumed card only materializes a
+        // live entry on its first SEND, so after any app restart the adopt
+        // button on the active chat hit "unknown session" and died silently —
+        // the whole roster read as broken. resolveEntry rebuilds the session
+        // from disk exactly like every other per-session command.
+        const sid = typeof command.sessionId === "string" && command.sessionId.trim() ? command.sessionId : undefined;
+        let entry: DaemonEntry;
+        try {
+          entry = await resolveEntry(sid);
+        } catch (error) {
+          process.stdout.write(JSON.stringify({
+            type: "persona_changed",
+            sessionId: sid,
+            active: null,
+            origin: "owner",
+            error: `couldn't open this chat to wear the persona: ${error instanceof Error ? error.message : String(error)}`,
+          }) + "\n");
           continue;
         }
         const name = typeof command.name === "string" && command.name.trim() ? command.name.trim() : undefined;
@@ -1924,7 +1938,17 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
         // "Back to Ares" holds until they wear something on purpose again —
         // otherwise the next message containing "fix" put the persona straight
         // back on and the button looked broken.
-        if (result.ok) entry.personaGate.off = !name;
+        if (result.ok) {
+          entry.personaGate.off = !name;
+          // Durably record the choice so a restart re-wears it (sessionFactory
+          // resume reads this back). Best-effort — never fail the adopt.
+          try {
+            const kernel = await openWorkspaceSessionKernel(entry.live.context.workspace);
+            kernel.mergeSessionMetadata(entry.live.session.meta.id, {
+              activePersona: result.active?.name ?? null,
+            });
+          } catch { /* persona still works for this run */ }
+        }
         process.stdout.write(
           JSON.stringify({
             type: "persona_changed",

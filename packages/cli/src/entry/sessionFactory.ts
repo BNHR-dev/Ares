@@ -9,7 +9,7 @@ import { isReasoningLevel } from "@ares/protocol";
 import type { ToolPermissionRequest } from "@ares/core";
 import { notice } from "../terminalUi.js";
 import { loadUiSettings, updateUiSettings, type UiSettings } from "../uiSettings.js";
-import { AresAgentRuntime, prepareAresAgent, scanCapabilityRegistry, type CapabilityProvider, type PersonaDef } from "@ares/agent";
+import { AresAgentRuntime, prepareAresAgent, readPersona, scanCapabilityRegistry, type CapabilityProvider, type PersonaDef } from "@ares/agent";
 import { listCapabilities, seedAllCapabilities, writeCapabilitiesDoc } from "@ares/operator";
 import { ManualReminderSource, applyEngineConfigEnv } from "./daemon.js";
 import { buildEngineTools } from "./engineTools.js";
@@ -808,6 +808,19 @@ export async function createSessionWithSelection(
       queueReminder: (text, source) => queueSystemReminder(text, source),
     });
     if (startAgentRuntime) live.agentRuntime.start();
+    // Re-wear the durably-recorded persona. Adoption used to live only in
+    // process memory, so every restart silently took the persona off while the
+    // roster still read as functional — the owner's explicit choice must
+    // survive the daemon, like every other piece of session state.
+    const durableSessionMeta = sessionKernel.getSession(session.meta.id)?.metadata;
+    const wornPersonaName =
+      durableSessionMeta && typeof durableSessionMeta === "object" && !Array.isArray(durableSessionMeta)
+        ? (durableSessionMeta as Record<string, unknown>).activePersona
+        : undefined;
+    if (typeof wornPersonaName === "string" && wornPersonaName) {
+      const worn = await readPersona(wornPersonaName, context.home).catch(() => null);
+      if (worn) live.adoptPersona(worn);
+    }
     return live;
   }
   const session = new Session({
