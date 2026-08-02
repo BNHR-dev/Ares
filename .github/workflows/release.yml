@@ -75,15 +75,15 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: "Ares ${{ github.ref_name }}"
           releaseBody: |
-            Ares 0.32.0 rebuilds the coding harness for reliable long-horizon work.
+            Ares 0.33.0 fixes what a sweep of real sessions showed was quietly broken.
 
-            - Durable SQLite sessions preserve plans, memory, steering, background jobs, subagents, and recovery checkpoints across compaction and restart.
-            - Steering is admitted immediately and settles safely between tool actions; Stop and restart no longer strand queued instructions.
-            - Plan mode stays read-only until the user explicitly crosses into Build mode.
-            - Read, Write, Edit, Apply Patch, and shell use exact paths, conflict-safe editing, complete logs, formatter settlement, and language-server feedback.
-            - The Conductor runs durable background jobs and bounded specialists while the main conversation remains available.
-            - Adaptive environment capabilities work in the directory the user chooses instead of locking Ares to one workspace.
-            - Browser preview/auth handoff, image attachments, automatic local Ollama pulls, and a three-second dictation pause window are polished.
+            - Background commands run again: the packaged app never shipped the shell supervisor, so every `run_in_background` command failed on arrival.
+            - A command that left a process running behind it no longer hangs the turn past its own timeout.
+            - Completion can be proven in real projects: Unreal, .NET/C#, CMake, Make, Gradle, Maven, Swift and Zig builds now count as verification, and the prompt names the command that would satisfy the gate for the project at hand.
+            - Memory no longer spends the context window replaying past tool errors; injection is capped and errors stay in telemetry where they belong.
+            - Plan/Build is an owner-held toggle in the title bar that stays where it is put, and a pinned model is never silently switched or persisted as a new default.
+            - Personas apply on click and survive a restart; patches apply to projects outside the open workspace; repeated identical build failures trigger a rethink instead of a grind.
+            - Large content can be spliced into a file by reference, so oversized edits no longer truncate.
           releaseDraft: false
           prerelease: false
           args: --bundles nsis
@@ -147,15 +147,15 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: "Ares ${{ github.ref_name }}"
           releaseBody: |
-            Ares 0.32.0 rebuilds the coding harness for reliable long-horizon work.
+            Ares 0.33.0 fixes what a sweep of real sessions showed was quietly broken.
 
-            - Durable SQLite sessions preserve plans, memory, steering, background jobs, subagents, and recovery checkpoints across compaction and restart.
-            - Steering is admitted immediately and settles safely between tool actions; Stop and restart no longer strand queued instructions.
-            - Plan mode stays read-only until the user explicitly crosses into Build mode.
-            - Read, Write, Edit, Apply Patch, and shell use exact paths, conflict-safe editing, complete logs, formatter settlement, and language-server feedback.
-            - The Conductor runs durable background jobs and bounded specialists while the main conversation remains available.
-            - Adaptive environment capabilities work in the directory the user chooses instead of locking Ares to one workspace.
-            - Browser preview/auth handoff, image attachments, automatic local Ollama pulls, and a three-second dictation pause window are polished.
+            - Background commands run again: the packaged app never shipped the shell supervisor, so every `run_in_background` command failed on arrival.
+            - A command that left a process running behind it no longer hangs the turn past its own timeout.
+            - Completion can be proven in real projects: Unreal, .NET/C#, CMake, Make, Gradle, Maven, Swift and Zig builds now count as verification, and the prompt names the command that would satisfy the gate for the project at hand.
+            - Memory no longer spends the context window replaying past tool errors; injection is capped and errors stay in telemetry where they belong.
+            - Plan/Build is an owner-held toggle in the title bar that stays where it is put, and a pinned model is never silently switched or persisted as a new default.
+            - Personas apply on click and survive a restart; patches apply to projects outside the open workspace; repeated identical build failures trigger a rethink instead of a grind.
+            - Large content can be spliced into a file by reference, so oversized edits no longer truncate.
           releaseDraft: false
           prerelease: false
           args: --bundles appimage,deb

@@ -38,6 +38,62 @@ export interface ChangelogEntry {
 // from the "earlier updates" strip.
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.33.0",
+    date: "August 2026",
+    title: "Everything that was quietly broken",
+    tagline: "A sweep of every real session found the mechanical reasons Ares struggled with ordinary work — dead background commands, hangs that outlived their own timeout, a completion gate no game or C# project could ever satisfy, and a memory that spent your context replaying its own past errors. All of it is fixed.",
+    highlights: [
+      {
+        icon: "▶",
+        title: "Background commands work",
+        blurb: "Starting a dev server, a watcher, or any long-running command was failing every time in the installed app. It never shipped a required file. It does now.",
+        tag: "Safer",
+      },
+      {
+        icon: "⏱",
+        title: "No more endless commands",
+        blurb: "A command that left something running behind it could hang a turn forever, ignoring its own timeout. One session sat there for eleven minutes. Now it settles in seconds.",
+        tag: "Safer",
+      },
+      {
+        icon: "✓",
+        title: "\"Done\" works in real projects",
+        blurb: "Ares can now prove its work in Unreal, C#, CMake, Java, Swift and more — a green build counts. Before, those projects could never satisfy the check, so work was never accepted as finished.",
+        tag: "New",
+      },
+      {
+        icon: "🧠",
+        title: "Memory stopped crowding you out",
+        blurb: "Ares was spending a chunk of every conversation re-reading its own past error log. That's gone, so far more of its attention goes to your actual request.",
+        tag: "Faster",
+      },
+      {
+        icon: "⚑",
+        title: "Plan and Build is your switch",
+        blurb: "The mode badge in the title bar is now a real button, and it stays where you put it instead of flipping back on its own.",
+        tag: "New",
+      },
+      {
+        icon: "👤",
+        title: "Personas actually work",
+        blurb: "Wearing a persona was silently failing after any restart, and never survived one. Now it applies immediately and is still there next time you open the app.",
+        tag: "Safer",
+      },
+      {
+        icon: "📌",
+        title: "Your model stays your model",
+        blurb: "Ares no longer quietly switches models on you, and a one-off fallback can't become your new default.",
+        tag: "Safer",
+      },
+      {
+        icon: "🔁",
+        title: "It notices when it's stuck",
+        blurb: "Re-running the same failing build over and over now triggers a rethink instead of a grind, and edits to projects outside the open folder finally work properly.",
+        tag: "Polished",
+      },
+    ],
+  },
+  {
     version: "0.32.0",
     date: "August 2026",
     title: "The long-horizon coding engine",
