@@ -17,7 +17,7 @@ const IGNORED_DIRS = new Set([
   "vendor",
 ]);
 
-const INSTRUCTION_FILES = new Set(["AGENTS.md", "ARES.md", "CLAUDE.md", "CRIX.md"]);
+const INSTRUCTION_FILES = new Set(["AGENTS.md", "ARES.md", "CLAUDE.md"]);
 const ROOT_LANDMARKS = new Set([
   "Cargo.toml",
   "Makefile",

@@ -12,7 +12,7 @@ export interface CanonicalPlanSession {
   recordPlanProposal(body: string): Promise<void>;
   approvePlan(body: string, approver?: string): Promise<void>;
   approvePendingPlan(approver?: string): Promise<void>;
-  setWorkflowMode(mode: "plan" | "build"): void;
+  setWorkflowMode(mode: "plan" | "build", opts?: { ownerIntent?: boolean }): void;
   setSystemPrompt(systemPrompt: string): void;
 }
 
@@ -55,10 +55,10 @@ export class SessionPlanModeRegistry {
       onPlanApproved: async (body) => {
         await this.requireSession(sessionId).approvePlan(body, "owner");
       },
-      onPermissionModeChanged: async (mode) => {
+      onPermissionModeChanged: async (mode, opts) => {
         const session = this.requireSession(sessionId);
         if (mode !== "plan") await session.approvePendingPlan("owner-transition");
-        session.setWorkflowMode(mode === "plan" ? "plan" : "build");
+        session.setWorkflowMode(mode === "plan" ? "plan" : "build", { ownerIntent: opts?.ownerIntent });
         session.setSystemPrompt(this.options.systemPromptFor(mode, sessionId));
       },
     };
@@ -78,16 +78,19 @@ export class SessionPlanModeRegistry {
     this.states.delete(sessionId);
   }
 
+  /**
+   * `workflowMode` is the single source of truth for plan/build.
+   *
+   * This used to ALSO infer plan mode from an un-approved plan revision, which
+   * silently overrode the owner: every `refresh()` re-derived the mode, so a
+   * leftover draft snapped the session back to plan after the owner had chosen
+   * build. Entering plan mode already persists `workflowMode: "plan"` (the
+   * EnterPlanMode tool transitions before it drafts), so the durable flag alone
+   * survives restart and compaction without fighting the owner's choice.
+   */
   private canonicalModeFor(sessionId: string): PermissionMode {
     const durable = this.options.kernel.getSession(sessionId);
-    const plan = durable ? this.options.kernel.getActivePlan(sessionId) : null;
-    if (
-      durable?.workflowMode === "plan" ||
-      plan?.status === "draft" ||
-      plan?.status === "awaiting_approval"
-    ) {
-      return "plan";
-    }
+    if (durable?.workflowMode === "plan") return "plan";
     return this.options.defaultPermissionMode;
   }
 

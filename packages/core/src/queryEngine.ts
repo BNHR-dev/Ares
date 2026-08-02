@@ -1483,7 +1483,7 @@ export class QueryEngine {
    * (the API needs one to elicit an assistant turn), but tagged
    * `metadata.source = "work-item"` so chat-only consumers (intent gating,
    * episodic capture) can tell autonomous work from a real user message — the
-   * one Crix chat-assumption baked into the loop's entry, generalized.
+   * one chat-assumption baked into the loop's entry, generalized.
    */
   appendWorkItem(text: string): Message {
     const message: Message = {

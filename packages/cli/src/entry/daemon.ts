@@ -1246,6 +1246,30 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
         process.stdout.write(JSON.stringify({ type: "routing_mode_set", routingMode }) + "\n");
         continue;
       }
+      if (command.type === "workflow_mode") {
+        // The owner's own Plan/Build toggle, per session. Carries ownerIntent,
+        // so it supersedes an un-approved plan draft instead of being rejected
+        // by the guard that exists to stop the MODEL leaving plan mode.
+        const wantPlan = command.mode === "plan";
+        const entry = await resolveEntry(command.sessionId);
+        const target: PermissionMode = wantPlan
+          ? "plan"
+          : entry.live.runtime.permissions?.mode === "free"
+            ? "bypass"
+            : "workspace-write";
+        try {
+          await transitionPermissionMode(entry.live.runtime, target, { ownerIntent: true });
+          tagEmit(command.sessionId, { type: "workflow_mode_set", mode: wantPlan ? "plan" : "build" });
+        } catch (error) {
+          // Never leave the UI showing a mode the session did not actually take.
+          tagEmit(command.sessionId, {
+            type: "workflow_mode_set",
+            mode: entry.live.runtime.permissionMode === "plan" ? "plan" : "build",
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+        continue;
+      }
       if (command.type === "set_permissions") {
         // Owner permission posture. Sanitize to known keys/types (never trust the
         // wire), apply LIVE to every open session, keep dangerousBypass in sync
@@ -2844,11 +2868,19 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
               mainSelection = fallback;
               mainProviderFamily = providerFamilyForSelection(fallback);
             }
+            // An auth/key death deserves a plain-language diagnosis, not the raw
+            // upstream JSON blob — the owner's next action is "fix the key in
+            // Settings", and the message should say so (the mid-landscape
+            // OpenRouter-401 session surfaced the raw error and read as a crash).
+            const authDead = isPermanentlyDeadError(turnState.fatalProvider);
+            const failedFamily = providerFamilyForSelection(entry.live.selection);
             tagEmit(sid, {
               type: "system_reminder_injected",
               source: "instructions",
               text: overloaded
                 ? `${overloadedModel} is overloaded upstream — finishing this turn on ${fallback.model} instead. Your pinned model is unchanged and the next message will use it again.`
+                : authDead
+                ? `The ${failedFamily} API key was rejected (invalid, expired, or out of credit) — it's retired for this session and the turn is continuing on ${providerFamilyForSelection(fallback)}/${fallback.model}. To use ${failedFamily} again, paste a fresh key in Settings → API Keys.`
                 : `Provider failed (${turnState.fatalProvider}). Auto routing switched to ${providerFamilyForSelection(fallback)}/${fallback.model}.`,
             });
             tagEmit(sid, { type: "route_resolved", model: fallback.model, provider: providerFamilyForSelection(fallback), lane: entry.lane ?? "chat", source: "assigned" });

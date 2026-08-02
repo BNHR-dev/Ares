@@ -454,16 +454,7 @@ IDENTITY.md does not exist yet. Your first job is to finish the birth ritual.
 async function pushBlock(blocks: AgentContextBlock[], label: string, file: string, maxChars: number): Promise<void> {
   const text = await readTextIfExists(file, maxChars);
   if (!text) return;
-  // Display-time only (no disk write — charter-safe): old brain files still say
-  // the agent lives in ~/.crix/. Normalize the stale home token so the loaded
-  // context doesn't contradict the real home and confuse the agent's self-model.
-  blocks.push({ label, file, text: normalizeLegacyHome(text) });
-}
-
-/** Rewrite ONLY the dead `~/.crix` home reference to `~/.ares`. Narrow on
- *  purpose: a broad `.crix` match would mangle Windows paths and unrelated prose. */
-function normalizeLegacyHome(text: string): string {
-  return text.replace(/~\/\.crix\b/g, "~/.ares");
+  blocks.push({ label, file, text });
 }
 
 function formatBlock(block: AgentContextBlock): string {

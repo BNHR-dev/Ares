@@ -1222,6 +1222,15 @@ function App() {
           applyTo(recoverySession, (s) => foldEvent(s, e));
           return true;
         }
+        case "workflow_mode_set": {
+          // Authoritative echo from the daemon. The pill renders THIS, never an
+          // optimistic local guess, so it can never show a mode the session
+          // did not actually take.
+          const mode = e.mode === "plan" ? "plan" : "build";
+          applyTo(e.sessionId ?? activeRef.current, (s) => ({ ...s, workflowMode: mode }));
+          pushLog(e.error ? `[garrison] workflow_mode rejected: ${e.error}` : `[garrison] ${mode} mode`);
+          return true;
+        }
         case "reasoning_set":
         case "routing_set":
         case "routing_mode_set":
@@ -2978,15 +2987,22 @@ function App() {
         <span className="pill" data-state={daemon}>
           {daemon === "running" ? "ONLINE" : daemon.toUpperCase()}
         </span>
-        <span
+        <button
+          type="button"
           className="workflowPill"
           data-mode={active?.workflowMode ?? "build"}
+          onMouseDown={(ev) => ev.stopPropagation()}
+          onClick={() => {
+            const next = (active?.workflowMode ?? "build") === "plan" ? "build" : "plan";
+            daemonCmd({ type: "workflow_mode", mode: next, sessionId: active?.id });
+          }}
           title={(active?.workflowMode ?? "build") === "plan"
-            ? "Plan mode: Ares may inspect and discuss, but cannot edit or execute"
-            : "Build mode: approved execution and editing are available"}
+            ? "Plan mode: Ares may inspect and discuss, but cannot edit or execute. Click to switch to Build."
+            : "Build mode: approved execution and editing are available. Click to switch to Plan."}
+          aria-label={`Workflow mode: ${(active?.workflowMode ?? "build") === "plan" ? "plan" : "build"}. Click to switch.`}
         >
           {(active?.workflowMode ?? "build") === "plan" ? "PLAN MODE" : "BUILD MODE"}
-        </span>
+        </button>
         {prefs.uiStyle === "modern" ? (
           <div className="titleTools" onMouseDown={(ev) => ev.stopPropagation()}>
             <button className="titleIcon" onClick={() => setPaletteOpen(true)} title="Command palette (Ctrl+K)" aria-label="Command palette">

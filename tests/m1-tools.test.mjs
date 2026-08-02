@@ -430,16 +430,20 @@ test("Bash: non-zero exit preserves diagnostics and declares failure", async () 
 
 test("Bash: timeout preserves partial diagnostics and declares failure", async () => {
   const tmp = await makeTmp();
+  // 4s window, not 1s: `bash -lc` is a login shell, and its cold start under
+  // load routinely exceeds 1s on Windows — the markers then never print before
+  // the kill and this test flakes on empty output. The semantics under test
+  // (partial output survives a timeout) don't care how wide the window is.
   const r = await BashTool.call(
     {
-      command: "printf 'timeout-stdout'; printf 'timeout-stderr' >&2; sleep 5",
+      command: "printf 'timeout-stdout'; printf 'timeout-stderr' >&2; sleep 20",
       description: "test timeout diagnostics",
-      timeout: 1000,
+      timeout: 4000,
     },
     ctx(tmp),
   );
 
-  assert.equal(r.failure, "Bash timed out after 1000ms");
+  assert.equal(r.failure, "Bash timed out after 4000ms");
   assert.equal(r.output.timedOut, true);
   assert.ok(Object.hasOwn(r.output, "exitCode"));
   assert.match(r.output.stdout, /timeout-stdout/);

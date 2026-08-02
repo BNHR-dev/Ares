@@ -404,6 +404,10 @@ a:hover { border-bottom-color: var(--bronze-hi); }
   background: rgba(var(--accent-rgb), 0.12);
   box-shadow: 0 0 16px rgba(var(--accent-rgb), 0.1);
 }
+/* It is a real toggle now — read as one. */
+.workflowPill:hover { color: var(--text); border-color: var(--line-strong); background: rgba(var(--accent-rgb), 0.14); }
+.workflowPill[data-mode="plan"]:hover { color: var(--bronze-hi); border-color: var(--bronze); }
+.workflowPill:active { transform: translateY(1px); }
 
 .winControls { display: flex; align-self: stretch; }
 .winControls button {

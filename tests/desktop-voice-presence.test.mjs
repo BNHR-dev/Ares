@@ -27,7 +27,7 @@ test("hands-free capture defaults favor prompt wake and end-of-utterance respons
   const rust = read("tauri", "src-tauri", "src", "main.rs");
 
   assert.match(voice, /ARES_STT_VAD_SILENCE", "0\.62"/);
-  assert.match(voice, /CRIX_STT_MODEL", "base\.en"/);
+  assert.match(voice, /ARES_STT_MODEL", "base\.en"/);
   assert.match(voice, /heard\["last"\] >= 0\.32/);
   assert.match(app, /\}, 32\);/);
   assert.doesNotMatch(app, /const acks = \[/);

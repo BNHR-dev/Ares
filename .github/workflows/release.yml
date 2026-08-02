@@ -45,6 +45,17 @@ jobs:
       - name: Build workspace
         run: pnpm build
 
+      # The gate. CI only runs on push/PR to main, so a tag could previously
+      # ship an installer that CI would have failed. Tests run here too, before
+      # anything is signed or published — a red suite aborts the release.
+      # Lower concurrency than CI on purpose. A handful of tests assert on wall
+      # clock (Bash timeout, scheduler intervals, daemon/garrison boot) and go
+      # flaky under a full 16-way parallel run on a loaded runner — a release
+      # gate that fails at random is a gate people learn to bypass. Raise this
+      # back to the CI default once those assertions no longer race.
+      - name: Test
+        run: node --test --test-concurrency=2 tests/*.test.mjs
+
       # Bundle the embedded node + CLI runtime into tauri/src-tauri/runtime/.
       # tauri-build validates this resource path exists at compile time, and the
       # app launches the daemon/Garrison from it.
@@ -110,6 +121,15 @@ jobs:
 
       - name: Build workspace
         run: pnpm build
+
+      # Same gate as the Windows job — this one runs the suite on Linux.
+      # Lower concurrency than CI on purpose. A handful of tests assert on wall
+      # clock (Bash timeout, scheduler intervals, daemon/garrison boot) and go
+      # flaky under a full 16-way parallel run on a loaded runner — a release
+      # gate that fails at random is a gate people learn to bypass. Raise this
+      # back to the CI default once those assertions no longer race.
+      - name: Test
+        run: node --test --test-concurrency=2 tests/*.test.mjs
 
       - name: Build embedded runtime
         run: pnpm --filter ares-tauri build:runtime

@@ -10,7 +10,6 @@ import type { ContentBlock, Message } from "@ares/protocol";
  * most specific rule is last and can override broader repository guidance. */
 export const REPOSITORY_INSTRUCTION_FILES = [
   "ARES.md",
-  "CRIX.md",
   "AGENTS.md",
   "CLAUDE.md",
 ] as const;
@@ -243,7 +242,7 @@ export function repositoryInstructionClaimsFromMessages(
 ): RepositoryInstructionClaim[] {
   if (!messages?.length) return [];
   const claims = new Map<string, RepositoryInstructionClaim>();
-  const pattern = /^(?:Instructions from: |Loaded project instructions from )(.+?(?:ARES|CRIX|AGENTS|CLAUDE)\.md) \[sha256:([a-f0-9]{64})\]:?\s*$/gim;
+  const pattern = /^(?:Instructions from: |Loaded project instructions from )(.+?(?:ARES|AGENTS|CLAUDE)\.md) \[sha256:([a-f0-9]{64})\]:?\s*$/gim;
   for (const message of messages) {
     for (const text of textFromBlocks(message.content)) {
       pattern.lastIndex = 0;

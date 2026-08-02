@@ -32,14 +32,6 @@ import { telegramCommand } from "./entry/telegramWiring.js";
 import { loadSavedTheme, saveTheme } from "./entry/terminalLines.js";
 import { triageCommand } from "./entry/triage.js";
 
-function bridgeLegacyEnv(env: NodeJS.ProcessEnv = process.env): void {
-  for (const key of Object.keys(env)) {
-    if (!key.startsWith("CRIX_")) continue;
-    const aresKey = `ARES_${key.slice("CRIX_".length)}`;
-    if (env[aresKey] === undefined) env[aresKey] = env[key];
-  }
-}
-
 const INTERACTIVE_THEME_COMMANDS = new Set([
   "launcher",
   "menu",
@@ -50,9 +42,6 @@ const INTERACTIVE_THEME_COMMANDS = new Set([
 ]);
 
 async function main(): Promise<void> {
-  // Rebrand compat: mirror legacy CRIX_* env vars onto ARES_* before anything
-  // reads configuration.
-  bridgeLegacyEnv();
   const args = parseArgs(process.argv.slice(2));
   const requestedTheme = args.flags.get("theme");
   if (requestedTheme) {

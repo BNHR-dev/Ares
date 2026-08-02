@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import asyncio
@@ -25,7 +25,7 @@ app = FastAPI(title="Ares Voice Service", version="0.1.0")
 # Allow the standalone audition page (file:// / localhost) and the Tauri webview
 # (tauri://localhost) to call /voices and open the /tts socket.
 # Loopback-only service: allow the Tauri webview, localhost, and the file://
-# audition page (which reports a "null" origin) — but not arbitrary web pages.
+# audition page (which reports a "null" origin) â€” but not arbitrary web pages.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["null"],
@@ -36,7 +36,7 @@ app.add_middleware(
 
 # Per-launch auth token (set by the Rust shell via ARES_VOICE_TOKEN). CORS does
 # NOT protect WebSockets, so without this any web page could open ws://127.0.0.1
-# :8765 and drive the mic/TTS. The webview attaches ?token=… to every request.
+# :8765 and drive the mic/TTS. The webview attaches ?token=â€¦ to every request.
 # Empty token (e.g. running the sidecar standalone for dev) disables the gate.
 AUTH_TOKEN = os.environ.get("ARES_VOICE_TOKEN", "").strip()
 
@@ -70,14 +70,14 @@ async def _ws_authorized(websocket: WebSocket) -> bool:
     return False
 
 # Break a chunk into per-sentence segments for incremental streaming.
-SENTENCE_SPLIT = r"(?<=[.!?…。！？])\s+|\n+"
+SENTENCE_SPLIT = r"(?<=[.!?â€¦ã€‚ï¼ï¼Ÿ])\s+|\n+"
 
 # Canonical Kokoro-82M English voice catalog. `lang` is the KPipeline lang_code
 # derived from the id prefix (a = American, b = British); `tier` is the published
 # training grade (A best). These are the voices best suited to an English entity.
 VOICE_CATALOG: list[dict[str, Any]] = [
     # American English (lang_code 'a')
-    {"id": "af_heart", "label": "Heart", "gender": "female", "lang": "a", "accent": "US", "tier": "A", "character": "Warm, grounded — the flagship default."},
+    {"id": "af_heart", "label": "Heart", "gender": "female", "lang": "a", "accent": "US", "tier": "A", "character": "Warm, grounded â€” the flagship default."},
     {"id": "af_bella", "label": "Bella", "gender": "female", "lang": "a", "accent": "US", "tier": "A", "character": "Bright, expressive, lively."},
     {"id": "af_nicole", "label": "Nicole", "gender": "female", "lang": "a", "accent": "US", "tier": "B", "character": "Soft, intimate, close-mic."},
     {"id": "af_aoede", "label": "Aoede", "gender": "female", "lang": "a", "accent": "US", "tier": "B", "character": "Clear, musical, measured."},
@@ -85,15 +85,15 @@ VOICE_CATALOG: list[dict[str, Any]] = [
     {"id": "af_sarah", "label": "Sarah", "gender": "female", "lang": "a", "accent": "US", "tier": "B", "character": "Natural, conversational."},
     {"id": "af_nova", "label": "Nova", "gender": "female", "lang": "a", "accent": "US", "tier": "B", "character": "Cool, modern, assistant-like."},
     {"id": "af_sky", "label": "Sky", "gender": "female", "lang": "a", "accent": "US", "tier": "C", "character": "Light, airy."},
-    {"id": "am_michael", "label": "Michael", "gender": "male", "lang": "a", "accent": "US", "tier": "B", "character": "Steady, confident — a solid Jarvis base."},
-    {"id": "am_fenrir", "label": "Fenrir", "gender": "male", "lang": "a", "accent": "US", "tier": "B", "character": "Deep, commanding — Ultron-leaning."},
+    {"id": "am_michael", "label": "Michael", "gender": "male", "lang": "a", "accent": "US", "tier": "B", "character": "Steady, confident â€” a solid Jarvis base."},
+    {"id": "am_fenrir", "label": "Fenrir", "gender": "male", "lang": "a", "accent": "US", "tier": "B", "character": "Deep, commanding â€” Ultron-leaning."},
     {"id": "am_puck", "label": "Puck", "gender": "male", "lang": "a", "accent": "US", "tier": "B", "character": "Playful, agile, sharp."},
     {"id": "am_echo", "label": "Echo", "gender": "male", "lang": "a", "accent": "US", "tier": "C", "character": "Resonant, calm."},
     {"id": "am_onyx", "label": "Onyx", "gender": "male", "lang": "a", "accent": "US", "tier": "C", "character": "Dark, weighty."},
     # British English (lang_code 'b')
     {"id": "bf_emma", "label": "Emma", "gender": "female", "lang": "b", "accent": "UK", "tier": "B", "character": "Refined, warm British."},
     {"id": "bf_isabella", "label": "Isabella", "gender": "female", "lang": "b", "accent": "UK", "tier": "B", "character": "Elegant, articulate."},
-    {"id": "bm_george", "label": "George", "gender": "male", "lang": "b", "accent": "UK", "tier": "B", "character": "Distinguished, butler-grade — peak Jarvis."},
+    {"id": "bm_george", "label": "George", "gender": "male", "lang": "b", "accent": "UK", "tier": "B", "character": "Distinguished, butler-grade â€” peak Jarvis."},
     {"id": "bm_fable", "label": "Fable", "gender": "male", "lang": "b", "accent": "UK", "tier": "B", "character": "Storyteller, rich timbre."},
     {"id": "bm_lewis", "label": "Lewis", "gender": "male", "lang": "b", "accent": "UK", "tier": "C", "character": "Measured, formal."},
 ]
@@ -150,7 +150,7 @@ class KokoroSynth:
             except Exception:
                 device = "cpu"
         self.device = device
-        # One KPipeline per lang_code, built lazily — so any catalog voice (US or
+        # One KPipeline per lang_code, built lazily â€” so any catalog voice (US or
         # British) is pronounced with the right G2P backend, not a fixed lang.
         self._pipelines: dict[str, Any] = {}
         # Warm the default voice's pipeline + G2P so the first real reply is fast.
@@ -228,7 +228,7 @@ class STTSettings:
     sample_rate: int = 16_000
 
 
-# ── Voice-activity detection knobs (end-of-utterance auto-stop) ────────────
+# â”€â”€ Voice-activity detection knobs (end-of-utterance auto-stop) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # RMS of a float32 mic block above this counts as "someone is talking".
 VAD_ENERGY = float(os.environ.get("ARES_STT_VAD_ENERGY", "0.012"))
 # After speech has been heard, this much continuous silence ends the utterance.
@@ -236,9 +236,9 @@ VAD_ENERGY = float(os.environ.get("ARES_STT_VAD_ENERGY", "0.012"))
 # ordinary phrase pauses while returning the transcript roughly half a second
 # sooner; users can still tune it through ARES_STT_VAD_SILENCE.
 VAD_SILENCE_S = float(os.environ.get("ARES_STT_VAD_SILENCE", "0.62"))
-# Nobody said anything at all within this window → give up (don't hang forever).
+# Nobody said anything at all within this window â†’ give up (don't hang forever).
 VAD_NO_SPEECH_S = float(os.environ.get("ARES_STT_VAD_NOSPEECH", "8.0"))
-# Absolute utterance ceiling — send whatever we have even if they're still going.
+# Absolute utterance ceiling â€” send whatever we have even if they're still going.
 VAD_HARD_CAP_S = float(os.environ.get("ARES_STT_VAD_CAP", "22.0"))
 
 # The wake loop must never fight /stt for the microphone: /stt marks itself busy
@@ -247,7 +247,7 @@ MIC_BUSY = threading.Event()
 
 
 class MockSTT:
-    """Plumbing engine — no mic, no model. Returns a fixed transcript so the WS
+    """Plumbing engine â€” no mic, no model. Returns a fixed transcript so the WS
     wiring and UI can be exercised without faster-whisper/sounddevice installed."""
 
     name = "mock"
@@ -261,7 +261,7 @@ class MockSTT:
         self._t0 = time.monotonic()
 
     def should_autostop(self) -> bool:
-        # Mock "hears" one second of speech then goes silent — exercises the
+        # Mock "hears" one second of speech then goes silent â€” exercises the
         # auto-send plumbing end to end without a mic.
         return self._auto and (time.monotonic() - self._t0) > 1.0
 
@@ -363,7 +363,7 @@ class WhisperSTT:
             return ""
         audio = np.concatenate(self._frames, axis=0).flatten().astype(np.float32)
         self._frames = []
-        if audio.size < self.settings.sample_rate // 4:  # under ~0.25s — too short to be speech
+        if audio.size < self.settings.sample_rate // 4:  # under ~0.25s â€” too short to be speech
             return ""
         segments, _info = self.model.transcribe(audio, language=self.settings.language, beam_size=1, vad_filter=True)
         return "".join(segment.text for segment in segments).strip()
@@ -379,27 +379,27 @@ def build_stt(settings: STTSettings) -> MockSTT | WhisperSTT | None:
     try:
         return WhisperSTT(settings)
     except Exception as error:  # faster-whisper / sounddevice / model unavailable
-        print(f"[stt] whisper unavailable ({error}); /stt disabled — chat + TTS unaffected", flush=True)
+        print(f"[stt] whisper unavailable ({error}); /stt disabled â€” chat + TTS unaffected", flush=True)
         return None
 
 
 def parse_args() -> tuple[VoiceSettings, STTSettings]:
     parser = argparse.ArgumentParser(description="Ares local voice sidecar (Kokoro TTS + Whisper STT)")
-    parser.add_argument("--host", default=os.environ.get("ARES_TTS_HOST", os.environ.get("CRIX_TTS_HOST", "127.0.0.1")))
-    parser.add_argument("--port", type=int, default=int(os.environ.get("ARES_TTS_PORT", os.environ.get("CRIX_TTS_PORT", "8765"))))
-    parser.add_argument("--engine", choices=["kokoro", "mock"], default=os.environ.get("ARES_TTS_ENGINE", os.environ.get("CRIX_TTS_ENGINE", "kokoro")))
-    parser.add_argument("--voice", default=os.environ.get("ARES_TTS_VOICE", os.environ.get("CRIX_TTS_VOICE", "af_heart")))
-    parser.add_argument("--lang", default=os.environ.get("ARES_TTS_LANG", os.environ.get("CRIX_TTS_LANG", "a")))
-    parser.add_argument("--speed", type=float, default=float(os.environ.get("ARES_TTS_SPEED", os.environ.get("CRIX_TTS_SPEED", "1.15"))))
-    parser.add_argument("--device", default=os.environ.get("ARES_TTS_DEVICE", os.environ.get("CRIX_TTS_DEVICE", "cuda:0")))
-    parser.add_argument("--language", default=os.environ.get("ARES_TTS_LANGUAGE", os.environ.get("CRIX_TTS_LANGUAGE", "English")))
+    parser.add_argument("--host", default=os.environ.get("ARES_TTS_HOST", "127.0.0.1"))
+    parser.add_argument("--port", type=int, default=int(os.environ.get("ARES_TTS_PORT", "8765")))
+    parser.add_argument("--engine", choices=["kokoro", "mock"], default=os.environ.get("ARES_TTS_ENGINE", "kokoro"))
+    parser.add_argument("--voice", default=os.environ.get("ARES_TTS_VOICE", "af_heart"))
+    parser.add_argument("--lang", default=os.environ.get("ARES_TTS_LANG", "a"))
+    parser.add_argument("--speed", type=float, default=float(os.environ.get("ARES_TTS_SPEED", "1.15")))
+    parser.add_argument("--device", default=os.environ.get("ARES_TTS_DEVICE", "cuda:0"))
+    parser.add_argument("--language", default=os.environ.get("ARES_TTS_LANGUAGE", "English"))
     parser.add_argument("--mock", action="store_true")
     # Speech-to-text (push-to-talk). --mock forces the mock engine for both.
-    parser.add_argument("--stt-engine", choices=["whisper", "mock"], default=os.environ.get("ARES_STT_ENGINE", os.environ.get("CRIX_STT_ENGINE", "whisper")))
-    parser.add_argument("--stt-model", default=os.environ.get("ARES_STT_MODEL", os.environ.get("CRIX_STT_MODEL", "base.en")))
-    parser.add_argument("--stt-device", default=os.environ.get("ARES_STT_DEVICE", os.environ.get("CRIX_STT_DEVICE", "cuda:0")))
-    parser.add_argument("--stt-input-device", default=os.environ.get("ARES_STT_INPUT_DEVICE", os.environ.get("CRIX_STT_INPUT_DEVICE")))
-    parser.add_argument("--stt-lang", default=os.environ.get("ARES_STT_LANG", os.environ.get("CRIX_STT_LANG", "en")))
+    parser.add_argument("--stt-engine", choices=["whisper", "mock"], default=os.environ.get("ARES_STT_ENGINE", "whisper"))
+    parser.add_argument("--stt-model", default=os.environ.get("ARES_STT_MODEL", "base.en"))
+    parser.add_argument("--stt-device", default=os.environ.get("ARES_STT_DEVICE", "cuda:0"))
+    parser.add_argument("--stt-input-device", default=os.environ.get("ARES_STT_INPUT_DEVICE"))
+    parser.add_argument("--stt-lang", default=os.environ.get("ARES_STT_LANG", "en"))
     args = parser.parse_args()
     voice = VoiceSettings(
         host=args.host,
@@ -428,7 +428,7 @@ def build_synth(settings: VoiceSettings) -> MockSynth | KokoroSynth | None:
     try:
         return KokoroSynth(settings)
     except Exception as error:  # kokoro missing (e.g. Python >=3.13 install) / model unavailable
-        print(f"[tts] kokoro unavailable ({error}); /tts disabled — wake word + STT unaffected", flush=True)
+        print(f"[tts] kokoro unavailable ({error}); /tts disabled â€” wake word + STT unaffected", flush=True)
         return None
 
 
@@ -477,7 +477,7 @@ async def tts_socket(websocket: WebSocket) -> None:
     await websocket.send_json({
         "type": "ready",
         # available:false tells the client to use its fallback voice for this
-        # session (kokoro didn't install — Python >=3.13 refuses the wheel).
+        # session (kokoro didn't install â€” Python >=3.13 refuses the wheel).
         "available": synth is not None,
         "engine": settings.engine,
         "model": getattr(synth, "name", None),
@@ -529,8 +529,8 @@ async def tts_socket(websocket: WebSocket) -> None:
 @app.websocket("/stt")
 async def stt_socket(websocket: WebSocket) -> None:
     """Push-to-talk speech-to-text. The client holds a button/key:
-      listen_start → record the mic   |   listen_stop → transcribe + return text
-      listen_cancel → discard. One utterance at a time; the mic is owned here
+      listen_start â†’ record the mic   |   listen_stop â†’ transcribe + return text
+      listen_cancel â†’ discard. One utterance at a time; the mic is owned here
     (server side), so there is no WebView microphone-permission dance."""
     await websocket.accept()
     if not await _ws_authorized(websocket):
@@ -551,7 +551,7 @@ async def stt_socket(websocket: WebSocket) -> None:
     watcher: asyncio.Task | None = None
 
     async def finish(auto: bool) -> None:
-        """Stop capture → transcribe → send the transcript. Used by both an
+        """Stop capture â†’ transcribe â†’ send the transcript. Used by both an
         explicit listen_stop and the VAD auto-stop (tagged auto:true)."""
         state["listening"] = False
         MIC_BUSY.clear()
@@ -564,7 +564,7 @@ async def stt_socket(websocket: WebSocket) -> None:
 
     async def watch_vad() -> None:
         # End-of-utterance: poll the engine's VAD verdict; when the speaker goes
-        # quiet (or the caps hit), close the turn WITHOUT the client asking — the
+        # quiet (or the caps hit), close the turn WITHOUT the client asking â€” the
         # "talk, stop talking, it sends" behavior.
         try:
             while state["listening"]:
@@ -639,7 +639,7 @@ async def stt_socket(websocket: WebSocket) -> None:
                 pass
 
 
-# ── Wake word ("Hey Ares") ─────────────────────────────────────────────────
+# â”€â”€ Wake word ("Hey Ares") â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # No extra model or dependency: an energy gate arms only when someone actually
 # speaks near the mic, that short burst is transcribed by the SAME whisper model
 # /stt already loads, and a fuzzy match decides if it was the wake phrase. Idle
@@ -650,7 +650,7 @@ WAKE_RE = re.compile(r"\b(?:hey|hay|hei|hi|yo|a)?[\s,]*(?:ares|aries|eris|aris|a
 
 def wake_capture_once(stt: "WhisperSTT", stop_flag: threading.Event) -> str | None:
     """Block (in a worker thread) until one speech burst is captured, then
-    return its transcript — or None when stopped / mic busy / silence."""
+    return its transcript â€” or None when stopped / mic busy / silence."""
     sd = stt._sd
     sample_rate = stt.settings.sample_rate
     frames: list[Any] = []
@@ -700,7 +700,7 @@ def wake_capture_once(stt: "WhisperSTT", stop_flag: threading.Event) -> str | No
 
 @app.websocket("/wake")
 async def wake_socket(websocket: WebSocket) -> None:
-    """Hands-free wake word. Client sends {type:"wake_start"} → the server
+    """Hands-free wake word. Client sends {type:"wake_start"} â†’ the server
     listens for speech bursts and transcribes them; when one matches the wake
     phrase it emits {type:"wake", text} and PAUSES until {type:"wake_resume"}
     (so the follow-up command capture on /stt owns the mic). {type:"wake_stop"}
@@ -731,7 +731,7 @@ async def wake_socket(websocket: WebSocket) -> None:
                 await asyncio.sleep(0.2)
                 continue
             if was_blocked:
-                # Just got the mic back from /stt — give the audio stack a beat
+                # Just got the mic back from /stt â€” give the audio stack a beat
                 # to fully release the device before reopening it.
                 was_blocked = False
                 await asyncio.sleep(0.15)

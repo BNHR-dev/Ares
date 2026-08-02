@@ -76,6 +76,8 @@ export interface AresEvent {
   tokensBefore?: number;
   tokensAfter?: number;
   method?: "micro" | "summary" | "ledger";
+  /** workflow_mode_set — the mode the session ACTUALLY holds after the toggle. */
+  mode?: string;
   error?: unknown;
   event?: AresEvent;
   usage?: { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; reasoningTokens?: number; modelCalls?: number };

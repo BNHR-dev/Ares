@@ -104,14 +104,7 @@ export {
   type ReflectStoreLike,
   type MergeFactsResult,
 } from "./memory/conversationReflect.js";
-export {
-  mindPaths,
-  aresHome,
-  migrateLegacyHome,
-  bridgeLegacyEnv,
-  __resetHomeMigrationForTests,
-  type MindPaths,
-} from "./paths.js";
+export { mindPaths, aresHome, type MindPaths } from "./paths.js";
 export { MEMORY_SCHEMA_VERSION } from "./memory/types.js";
 export type { MemoryNode, MemoryKind, HypothesisStatus, CrucibleCheck, EvidenceEntry, ReflectionSurface, ReflectionResult } from "./memory/types.js";
 

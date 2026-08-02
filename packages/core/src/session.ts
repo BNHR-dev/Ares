@@ -525,16 +525,30 @@ export class Session {
     this.engine.setSystemPrompt(this.systemPromptWithActiveBuildPlan(systemPrompt));
   }
 
-  setWorkflowMode(mode: "plan" | "build"): void {
+  /**
+   * `ownerIntent` marks a transition the owner asked for directly (the desktop
+   * mode toggle, `/code`, `/plan`) as opposed to one the model drove.
+   *
+   * The guard below exists to stop the *model* from talking its way out of plan
+   * mode without approval, but it was also rejecting the owner's own click: a
+   * draft plan the model started and never proposed cannot be approved by
+   * `approvePendingPlan`, so the throw left the session stuck in plan mode with
+   * no way out. An owner transition supersedes that un-approved draft instead —
+   * the plan is discarded, never approved, so no write authority is smuggled in.
+   */
+  setWorkflowMode(mode: "plan" | "build", opts: { ownerIntent?: boolean } = {}): void {
     if (this.kernel && mode === "build") {
       const plan = this.kernel.getActivePlan(this.meta.id);
       if (plan?.status === "draft" || plan?.status === "awaiting_approval") {
-        throw new PlanConflictError("Cannot enter build mode without exact approval of the active plan", {
-          sessionId: this.meta.id,
-          planRevisionId: plan.id,
-          planHash: plan.planHash,
-          status: plan.status,
-        });
+        if (!opts.ownerIntent) {
+          throw new PlanConflictError("Cannot enter build mode without exact approval of the active plan", {
+            sessionId: this.meta.id,
+            planRevisionId: plan.id,
+            planHash: plan.planHash,
+            status: plan.status,
+          });
+        }
+        this.kernel.supersedeActivePlan(this.meta.id, "owner-workflow-toggle");
       }
     }
     this.kernel?.setWorkflowMode(this.meta.id, mode);

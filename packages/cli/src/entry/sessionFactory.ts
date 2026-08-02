@@ -634,9 +634,11 @@ export async function createSessionWithSelection(
   };
   const sessionKernel = await openWorkspaceSessionKernel(context.workspace);
   if (resumeSessionId) {
+    // Resume the mode the owner last chose. Deliberately NOT inferred from an
+    // un-approved plan revision: a leftover draft used to force plan mode on
+    // every resume, overriding an explicit switch to build.
     const durableSession = sessionKernel.getSession(resumeSessionId);
-    const durablePlan = durableSession ? sessionKernel.getActivePlan(resumeSessionId) : null;
-    if (durableSession?.workflowMode === "plan" || durablePlan?.status === "draft" || durablePlan?.status === "awaiting_approval") {
+    if (durableSession?.workflowMode === "plan") {
       runtime.permissionMode = "plan";
     }
   }
@@ -764,9 +766,9 @@ export async function createSessionWithSelection(
     sessionRef = session;
     shellRegistry.configureDurability({ kernel: sessionKernel, workspace: context.workspace });
     shellRegistry.registerSession(session.meta.id);
-    runtime.onPermissionModeChanged = async (mode) => {
+    runtime.onPermissionModeChanged = async (mode, opts) => {
       if (mode !== "plan") await session.approvePendingPlan();
-      session.setWorkflowMode(mode === "plan" ? "plan" : "build");
+      session.setWorkflowMode(mode === "plan" ? "plan" : "build", { ownerIntent: opts?.ownerIntent });
       session.setSystemPrompt(composeCurrentSystemPrompt());
     };
     runtime.onPlanStarted = (reason) => session.beginPlanDraft(reason);
@@ -843,9 +845,9 @@ export async function createSessionWithSelection(
   sessionRef = session;
   shellRegistry.configureDurability({ kernel: sessionKernel, workspace: context.workspace });
   shellRegistry.registerSession(session.meta.id);
-  runtime.onPermissionModeChanged = async (mode) => {
+  runtime.onPermissionModeChanged = async (mode, opts) => {
     if (mode !== "plan") await session.approvePendingPlan();
-    session.setWorkflowMode(mode === "plan" ? "plan" : "build");
+    session.setWorkflowMode(mode === "plan" ? "plan" : "build", { ownerIntent: opts?.ownerIntent });
     session.setSystemPrompt(composeCurrentSystemPrompt());
   };
   runtime.onPlanStarted = (reason) => session.beginPlanDraft(reason);

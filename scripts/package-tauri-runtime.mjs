@@ -58,6 +58,23 @@ await build({
   legalComments: "none",
 });
 
+// The detached shell supervisor is spawned BY PATH at runtime
+// (ShellRegistry resolves `./ShellSupervisor.js` against import.meta.url,
+// which inside the bundle is runtime/cli/ares-cli.mjs). It is not an import,
+// so esbuild never pulls it into the CLI bundle — without this second build
+// every background shell in the packaged app dies instantly with
+// "Background shell failed to launch" while dev keeps working.
+await build({
+  entryPoints: [path.join(root, "packages", "tools", "src", "ShellSupervisor.ts")],
+  outfile: path.join(runtime, "cli", "ShellSupervisor.js"),
+  bundle: true,
+  platform: "node",
+  target: "node22",
+  format: "esm",
+  sourcemap: false,
+  legalComments: "none",
+});
+
 await cp(path.join(root, "packages", "agent", "templates"), templatesOut, {
   recursive: true,
 });
@@ -108,6 +125,9 @@ for (const [packageName, packageDir, excluded = []] of runtimePackages) {
 
 const outputs = [
   cliOut,
+  // Spawned by path from ShellRegistry — a missing supervisor is every
+  // background shell dead in the packaged app, not a degraded feature.
+  path.join(runtime, "cli", "ShellSupervisor.js"),
   path.join(binOut, nodeName),
   path.join(voiceServiceOut, "server.py"),
   path.join(modulesOut, "playwright", "package.json"),

@@ -15,6 +15,9 @@ import {
 } from "./_shared.js";
 
 const MAX_OUTPUT_CHARS = 30_000;
+// After the shell process exits, how long its stdio pipes may stay open
+// (draining a grandchild's inherited handles) before we force-close them.
+const EXIT_STREAM_GRACE_MS = 1_500;
 
 const inputSchema = shellInputSchema("Bash command line. Quote paths with spaces.");
 
@@ -257,6 +260,27 @@ export async function runShell(
       signal.removeEventListener("abort", onAbort);
       capture?.destroy();
       reject(err);
+    });
+    child.on("exit", () => {
+      // Natural exit only: the shell finished on its own, but a grandchild it
+      // launched (Start-Process dev server, nohup daemon) inherited its pipe
+      // handles on Windows and can hold them open FOREVER — `close` would
+      // never fire and this promise would hang past every timeout, because
+      // the timeout's taskkill targets the already-dead shell pid and reaps
+      // nothing (the 656-second "checking the port" session). Give the pipes
+      // a short grace to flush buffered output, then force-close our read
+      // ends; `close` fires and the tool settles with the output it has.
+      //
+      // On the timeout/abort path we DID kill the tree — `close` arrives when
+      // the tree actually dies, and settling early would race the reap (the
+      // caller must be able to trust that a timed-out tree is gone).
+      if (timedOut || signal.aborted) return;
+      const grace = setTimeout(() => {
+        child.stdout.destroy();
+        child.stderr.destroy();
+      }, EXIT_STREAM_GRACE_MS);
+      grace.unref();
+      child.once("close", () => clearTimeout(grace));
     });
     child.on("close", (code) => {
       void (async () => {

@@ -2292,6 +2292,39 @@ export class SessionKernelStore {
     return row ? mapPlan(row) : null;
   }
 
+  /**
+   * Retire an un-approved plan so an explicit owner mode change is never
+   * blocked by a draft the model left behind.
+   *
+   * Only `draft` and `awaiting_approval` are retired — an `approved` or
+   * `executing` plan is real committed work and is left alone. This is
+   * deliberately NOT an approval path: the plan is superseded, never treated
+   * as accepted, so the model can gain no write authority through it.
+   */
+  supersedeActivePlan(sessionId: string, reason: string): PlanRevisionRecord | null {
+    assertIdentifier(sessionId, "session id");
+    const now = this.now();
+    return this.immediate(() => {
+      this.requireSessionRow(sessionId);
+      const row = this.db
+        .prepare(
+          `SELECT * FROM plan_revisions
+           WHERE session_id = ? AND status IN ('draft','awaiting_approval')
+           ORDER BY revision DESC LIMIT 1`,
+        )
+        .get<PlanRow>(sessionId);
+      if (!row) return null;
+      this.transitionPlanTx(row, "superseded", now);
+      this.appendEventTx(sessionId, null, "plan.superseded", {
+        planRevisionId: row.id,
+        revision: row.revision,
+        planHash: row.plan_hash,
+        reason,
+      }, now);
+      return mapPlan(this.requirePlanRow(row.id));
+    });
+  }
+
   appendEvent(fence: RunFence, type: string, payload: JsonValue): SessionEventRecord {
     assertIdentifier(type, "event type");
     const now = this.now();

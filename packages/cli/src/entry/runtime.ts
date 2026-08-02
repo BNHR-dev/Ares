@@ -46,7 +46,10 @@ export interface AresRuntimeState {
   permissions?: PermissionSettings;
   /** Session-owned transition hook. Mode changes are workflow state, not just
    * a mutable UI bit: this recomposes the prompt and persists the transition. */
-  onPermissionModeChanged?(mode: PermissionMode): Promise<void> | void;
+  onPermissionModeChanged?(
+    mode: PermissionMode,
+    opts?: { ownerIntent?: boolean },
+  ): Promise<void> | void;
   onPlanStarted?(reason: string): Promise<void> | void;
   onPlanDraftUpdated?(plan: string): Promise<void> | void;
   currentPlan?(): Promise<string | null> | string | null;
@@ -54,14 +57,18 @@ export interface AresRuntimeState {
   onPlanApproved?(plan: string): Promise<void> | void;
 }
 
+/** The owner's own transition (`/plan`, `/code`, the desktop mode toggle).
+ *  Model-driven transitions go through the PlanMode tool instead, which does
+ *  NOT carry owner intent and so stays subject to the plan-approval guard. */
 export async function transitionPermissionMode(
   runtime: AresRuntimeState,
   mode: PermissionMode,
+  opts: { ownerIntent?: boolean } = { ownerIntent: true },
 ): Promise<void> {
   const previous = runtime.permissionMode;
   runtime.permissionMode = mode;
   try {
-    await runtime.onPermissionModeChanged?.(mode);
+    await runtime.onPermissionModeChanged?.(mode, opts);
   } catch (error) {
     runtime.permissionMode = previous;
     throw error;

@@ -6,7 +6,13 @@ import type { PermissionMode } from "@ares/protocol";
 
 export interface PlanModeState {
   permissionMode: PermissionMode;
-  onPermissionModeChanged?(mode: PermissionMode): Promise<void> | void;
+  /** `opts.ownerIntent` is set only when the owner drove the change directly.
+   *  The PlanMode tools below never set it — a model-driven transition must
+   *  stay subject to the host's plan-approval guard. */
+  onPermissionModeChanged?(
+    mode: PermissionMode,
+    opts?: { ownerIntent?: boolean },
+  ): Promise<void> | void;
   /** Create or recover the durable draft as soon as planning starts. */
   onPlanStarted?(reason: string): Promise<void> | void;
   /** Persist a living revision while the planning conversation continues. */
