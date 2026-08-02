@@ -742,6 +742,70 @@ export interface WorkspaceSetup {
   hasPytest: boolean;
   hasCargo: boolean;
   hasGoMod: boolean;
+  /** Root holds a .sln/.csproj AND the dotnet CLI is on PATH. Incremental
+   *  `dotnet build` is debounce-fast, so C# projects get real continuous
+   *  verification instead of falling straight to manual proof. */
+  hasDotnet?: boolean;
+}
+
+// ─── Project-aware proof hint ──────────────────────────────────────────
+//
+// The completion gate's nag used to say "run the narrowest meaningful affected
+// tests" in every project — including ones with NO tests, where that sentence
+// is a dead instruction (an Unreal project ground through 20+ unverified turns
+// this way). This resolves what would actually count as proof for THE PROJECT
+// AT HAND, so the nag can name a runnable command instead of an ideal.
+
+const verificationHintCache = new Map<string, { at: number; hint: string }>();
+const VERIFICATION_HINT_TTL_MS = 5 * 60_000;
+
+export async function verificationHintFor(workspace: string): Promise<string> {
+  const key = path.resolve(workspace);
+  const cached = verificationHintCache.get(key);
+  if (cached && Date.now() - cached.at < VERIFICATION_HINT_TTL_MS) return cached.hint;
+  const hint = await deriveVerificationHint(key).catch(() => "");
+  verificationHintCache.set(key, { at: Date.now(), hint });
+  if (verificationHintCache.size > 32) {
+    const oldest = [...verificationHintCache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+    if (oldest) verificationHintCache.delete(oldest[0]);
+  }
+  return hint;
+}
+
+async function deriveVerificationHint(workspace: string): Promise<string> {
+  const exists = (rel: string) => fs.stat(path.join(workspace, rel)).then(() => true, () => false);
+  const listRoot = () => fs.readdir(workspace).catch(() => [] as string[]);
+  const setup = await detectWorkspaceSetup(workspace);
+
+  // Best: the project's own test entry point.
+  if (setup.hasTestScript) {
+    return `This project defines a test script — a green \`${setup.hasPnpm ? "pnpm" : "npm"} test\` run is the proof this gate accepts.`;
+  }
+  if (setup.hasPytest) return "A green `pytest` run is the proof this gate accepts.";
+  if (setup.hasCargo) return "A green `cargo test` run counts as proof; `cargo build` counts when no tests exist.";
+  if (setup.hasGoMod) return "A green `go test ./...` run counts as proof; `go build ./...` counts when no tests exist.";
+
+  const rootEntries = await listRoot();
+  const has = (re: RegExp) => rootEntries.some((entry) => re.test(entry));
+  if (has(/\.uproject$/i)) {
+    return "Unreal project with no test suite: a GREEN engine build is the verification floor — run Build.bat (via its full path) for the project target and let it finish clean. A screenshot of the running editor/game covers the visual claim.";
+  }
+  if (has(/\.sln$|\.csproj$/i)) {
+    return "A green `dotnet test` run is the proof this gate accepts; `dotnet build` counts when the solution has no test projects.";
+  }
+  if (await exists("CMakeLists.txt")) {
+    return "A green `cmake --build <builddir>` (plus `ctest` if tests are configured) is the proof this gate accepts.";
+  }
+  if (await exists("Makefile")) return "A green `make` (or `make test` if the target exists) is the proof this gate accepts.";
+  if (has(/^build\.gradle(?:\.kts)?$/i) || (await exists("gradlew"))) {
+    return "A green `gradlew build` (or `gradlew test`) run is the proof this gate accepts.";
+  }
+  if (await exists("pom.xml")) return "A green `mvn verify` (or `mvn test`) run is the proof this gate accepts.";
+  if (setup.hasTsconfig || setup.hasPackageJson) {
+    return "No test script exists here: a green typecheck/build plus ONE real runtime reproduction (run the actual entry point and show its output) is the proof this gate accepts.";
+  }
+  // No recognizable toolchain at all (static site, scripts, content).
+  return "No test or build toolchain detected: prove behavior directly — execute the artifact (run the script, serve and probe the page, take the screenshot) and show what you observed.";
 }
 
 /** Is a binary resolvable on PATH? Used so we never emit a verify command for a
@@ -808,6 +872,10 @@ async function detectWorkspaceSetup(workspace: string): Promise<WorkspaceSetup> 
     ? await Promise.all([onPath("ruff"), onPath("pytest")])
     : [false, false];
   const hasTsc = await exists("node_modules/typescript/bin/tsc");
+  // .NET: solution/project file at the root + the CLI actually installed.
+  const rootEntries = await fs.readdir(workspace).catch(() => [] as string[]);
+  const hasDotnetProject = rootEntries.some((entry) => /\.(?:sln|csproj|fsproj)$/i.test(entry));
+  const hasDotnet = hasDotnetProject ? await onPath("dotnet") : false;
 
   return {
     hasTsconfig: tsc,
@@ -823,6 +891,7 @@ async function detectWorkspaceSetup(workspace: string): Promise<WorkspaceSetup> 
     hasPytest,
     hasCargo: cargo,
     hasGoMod: goMod,
+    hasDotnet,
   };
 }
 
@@ -1160,6 +1229,20 @@ export function deriveNarrowVerify(
       args: ["test", "./..."],
       cwd: workspace,
       label: "go-test",
+    });
+  }
+
+  // C#/.NET: an incremental `dotnet build` is fast enough for the edit
+  // debounce and catches the compile-level regressions that used to sail
+  // straight to "no_checks" in C#/Unity projects. Static strength on purpose —
+  // a compile is not behavior; `dotnet test` remains the manual/behavioral bar.
+  const csFiles = files.filter((f) => /\.(?:cs|csproj|fsproj|sln)$/i.test(f));
+  if (csFiles.length > 0 && setup.hasDotnet) {
+    cmds.push({
+      program: "dotnet",
+      args: ["build", "--nologo", "-v", "q"],
+      cwd: workspace,
+      label: "dotnet-build",
     });
   }
 

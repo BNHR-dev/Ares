@@ -32,6 +32,7 @@ import { createHash, randomUUID } from "node:crypto";
 import * as path from "node:path";
 import { promises as fs } from "node:fs";
 import type { HookInvocation, HookManager } from "./hooks.js";
+import { verificationHintFor } from "./verifier.js";
 import {
   RepositoryInstructionResolver,
   renderRepositoryInstructions,
@@ -2743,7 +2744,10 @@ export class QueryEngine {
             proofGateFired = true;
             const sample = [...changedFiles].slice(0, 8).map((file) => file.startsWith("<") ? file : path.relative(this.cfg.workspace, file)).join(", ");
             const scope = changedFiles.size > 0 ? `You changed ${changedFiles.size} file(s)` : "This long-running coding task still has unverified persisted changes";
-            const text = `${scope}, but Ares has no complete all-green behavior-capable verifier run for the newest mutation generation${sample ? ` (${sample})` : ""}. Static syntax/type/lint checks are useful but do not prove requested behavior. Run the narrowest meaningful affected tests or real reproduction now. A skipped tool, an older run, one passing command inside a red run, or a verbal claim is not proof.`;
+            // Name what would actually count for THIS project — "run the
+            // affected tests" is a dead instruction in a project with none.
+            const projectHint = await verificationHintFor(this.cfg.workspace).catch(() => "");
+            const text = `${scope}, but Ares has no complete all-green behavior-capable verifier run for the newest mutation generation${sample ? ` (${sample})` : ""}. Static syntax/type/lint checks are useful but do not prove requested behavior.${projectHint ? ` ${projectHint}` : " Run the narrowest meaningful affected tests or real reproduction now."} A skipped tool, an older run, one passing command inside a red run, or a verbal claim is not proof.`;
             this.messages.push({
               id: cryptoId(),
               role: "user",
@@ -4901,20 +4905,67 @@ const PROGRESS_TOOLS = new Set([
   "ComputerUse",
 ]);
 
+/** The anchored verification-command grammar shared by acceptance and family
+ *  extraction. One alternation, one place to extend — the two regexes drifting
+ *  apart is how a command could count as proof yet have no family (or vice
+ *  versa). Covers the ecosystems real users ship in: JS/TS, Python, Rust, Go,
+ *  .NET/C#, C/C++ (CMake/make/ctest), JVM (Gradle/Maven), Swift, Zig. */
+const VERIFICATION_COMMAND_GRAMMAR =
+  "node\\s+--test|" +
+  "(?:pnpm|yarn)\\s+(?:test|check|lint|build|typecheck)|" +
+  "npm\\s+(?:test|run\\s+(?:check|lint|build|typecheck))|" +
+  "npx\\s+(?:tsc|eslint|vitest|jest)|" +
+  "(?:vitest|jest|pytest|ruff|mypy|tsc|eslint)|" +
+  "cargo\\s+(?:test|check|clippy|build)|" +
+  "go\\s+(?:test|build|vet)|" +
+  "dotnet\\s+(?:test|build)|" +
+  "msbuild|" +
+  "cmake\\s+--build|" +
+  "ctest|" +
+  "make|" +
+  "(?:\\.[\\\\/])?gradlew?\\s+(?:test|build|check|assemble)|" +
+  "mvn\\s+(?:test|verify|compile|package)|" +
+  "python3?\\s+-m\\s+(?:pytest|unittest|compileall|py_compile)|" +
+  "swift\\s+(?:build|test)|" +
+  "zig\\s+build";
+
+const VERIFICATION_ACCEPT_RE = new RegExp(`^(?:${VERIFICATION_COMMAND_GRAMMAR})(?:\\s+[^\\r\\n]*)?$`, "i");
+const VERIFICATION_FAMILY_RE = new RegExp(`^(${VERIFICATION_COMMAND_GRAMMAR})\\b`, "i");
+
+/** Unreal (and friends) build via an invoked script: PowerShell's call operator
+ *  on a quoted path. `& "C:\...\Build.bat" Target Win64 Development` is ONE
+ *  command, not a chain — normalize it to its script basename so the grammar
+ *  and the chain filter below can treat it like any other verification tool. */
+const CALL_OPERATOR_SCRIPT_RE = /^&\s+(['"])([^'"]+\.(?:bat|cmd|ps1|sh))\1(\s+[^\r\n]*)?$/i;
+const VERIFICATION_SCRIPT_BASENAMES = /^(?:build|rebuild|runuat|rununrealbuildtool|buildgraph|verify|check|test|run-?tests?)\b/i;
+
 function manualVerificationCommand(name: string, input: unknown): string | null {
   if (name !== "Bash" && name !== "PowerShell") return null;
   const request = (input ?? {}) as Record<string, unknown>;
   if (request.run_in_background === true) return null;
-  const command = String(request.command ?? "").trim().replace(/\s+/g, " ");
+  let command = String(request.command ?? "").trim().replace(/\s+/g, " ");
+  // A call-operator script invocation (Unreal's Build.bat / RunUAT.bat, a repo
+  // verify.ps1) is proof-shaped when the script NAME says so. Normalized to
+  // `script:<basename>` before the chain filter, which would otherwise read
+  // the call operator itself as a chain.
+  const script = command.match(CALL_OPERATOR_SCRIPT_RE);
+  if (script) {
+    const basename = script[2].split(/[\\/]/).at(-1) ?? "";
+    if (!VERIFICATION_SCRIPT_BASENAMES.test(basename)) return null;
+    const tail = (script[3] ?? "").trim();
+    if (/[;&|><`]|\$\(/.test(tail)) return null;
+    return `script:${basename.toLowerCase()}${tail ? ` ${tail.toLowerCase()}` : ""}`;
+  }
   // Manual proof is a fallback only when no structured host verifier exists.
   // Accept one anchored check command, never a substring or shell chain: this
   // rejects `echo test`, `pnpm test; exit 0`, pipelines, and verify-then-mutate.
   if (/[;&|><`]|\$\(/.test(command)) return null;
   if (/(?:^|\s)(?:--collect-only|--co|--no-run|--listtests|--list-tests|--dry-run|--help|--version|--showconfig|--show-config|--print-config|--passwithnotests|--allow-no-tests)(?:\s|$)/i.test(command)) return null;
   if (/^(?:npx\s+)?(?:tsc|eslint|vitest|jest)\s+-(?:v|h)$/i.test(command)) return null;
-  if (!/^(?:node\s+--test\b|(?:pnpm|yarn)\s+(?:test|check|lint|build|typecheck)\b|npm\s+(?:test|run\s+(?:check|lint|build|typecheck))\b|npx\s+(?:tsc|eslint|vitest|jest)\b|(?:vitest|jest|pytest|ruff|mypy|tsc|eslint)\b|cargo\s+(?:test|check|clippy)\b|go\s+(?:test|build)\b)(?:\s+[^\r\n]*)?$/i.test(command)) {
-    return null;
-  }
+  // `make clean` / `make install` mutate, they don't verify. Everything else
+  // that reaches the grammar as `make [target]` is a build.
+  if (/^make\s+(?:clean|distclean|install|uninstall)\b/i.test(command)) return null;
+  if (!VERIFICATION_ACCEPT_RE.test(command)) return null;
   return command.toLowerCase();
 }
 
@@ -4923,7 +4974,11 @@ function isManualVerificationCall(name: string, input: unknown): boolean {
 }
 
 function verificationCommandFamily(command: string): string | null {
-  const match = command.match(/^(node\s+--test|(?:pnpm|yarn)\s+(?:test|check|lint|build|typecheck)|npm\s+(?:test|run\s+(?:check|lint|build|typecheck))|npx\s+(?:tsc|eslint|vitest|jest)|(?:vitest|jest|pytest|ruff|mypy|tsc|eslint)|cargo\s+(?:test|check|clippy)|go\s+(?:test|build))\b/i);
+  // Script-invoked proof (Unreal Build.bat and friends): the family is the
+  // script itself — a green `script:build.bat` covers a red `script:build.bat`.
+  const script = command.match(/^(script:[^\s]+)/i);
+  if (script) return script[1].toLowerCase();
+  const match = command.match(VERIFICATION_FAMILY_RE);
   return match?.[1].toLowerCase().replace(/\s+/g, " ") ?? null;
 }
 
