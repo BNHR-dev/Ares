@@ -1957,6 +1957,38 @@ export class QueryEngine {
     const hasPersistedVerificationDebt = (): boolean => this.cfg.persistedVerificationDebt?.() === true;
     const hasCompletePersistedVerificationScope = (): boolean => this.cfg.persistedVerificationScopeComplete?.() !== false;
     const requiresVerification = (): boolean => changedFiles.size > 0 || hasOutstandingVerification();
+    // The opencode reminder doctrine: remind on TRANSITION, stay silent on
+    // standing state. Persisted debt from an old objective used to re-fire the
+    // full verification nag on EVERY later turn — including pure conversation
+    // ("do I serve it for webgpu?" earned a wall of proof demands). A turn
+    // engages the gate only when IT did coding work: mutated files, observed a
+    // durable mutation, or ran verification. Standing debt stays visible in
+    // the durable-coding-state block and the journal without per-turn nagging.
+    const hasCurrentTurnEngagement = (): boolean => {
+      if (changedFiles.size > 0) return true;
+      if ((this.cfg.observedMutationAt?.() ?? 0) > 0) return true;
+      if (manualVerificationAt > 0) return true;
+      // Fail closed on LOST scope: debt whose touched-file set didn't survive
+      // (crash window, legacy restart) can't be silently adjudicated — we
+      // don't even know what's owed, so every turn stays engaged until the
+      // owner or the model re-establishes the scope.
+      if (
+        (this.cfg.persistedVerificationDebt?.() ?? false) &&
+        !(this.cfg.persistedVerificationScopeComplete?.() ?? true)
+      ) {
+        return true;
+      }
+      // A verifier run that SETTLED against the current mutation generation is
+      // engagement too — checks completing during this turn mean the coding
+      // objective is actively being adjudicated, even without a fresh edit.
+      // An idle verifier (stale generation, or no_checks echo) is not.
+      const evidence = this.cfg.verificationEvidence?.();
+      return Boolean(
+        evidence &&
+        evidence.latestRunGeneration === evidence.mutationGeneration &&
+        (evidence.latestRunStatus === "passed" || evidence.latestRunStatus === "failed"),
+      );
+    };
     const hasPostMutationProof = (): boolean => {
       const evidence = this.cfg.verificationEvidence?.();
       if (evidence) {
@@ -2007,6 +2039,10 @@ export class QueryEngine {
     const resolvedWorkStatus = (): WorkStatus => {
       if (workStatus === "blocked") return "blocked";
       if (!requiresVerification()) return "not_applicable";
+      // A turn that did no coding work makes no claims to verify — its status
+      // is not_applicable even while the JOURNAL still carries an old
+      // objective's debt. Statuses describe turns; the journal describes work.
+      if (!hasCurrentTurnEngagement()) return "not_applicable";
       // A GUI artifact without post-mutation visual proof can NEVER resolve
       // verified, no matter how green the headless checks are.
       if (guiNeedsVisualProof()) return "unverified";
@@ -2709,6 +2745,7 @@ export class QueryEngine {
             this.cfg.requireVerificationEvidence &&
             workStatus !== "blocked" &&
             requiresVerification() &&
+            hasCurrentTurnEngagement() &&
             specDocs.length > 0 &&
             !specGateFired &&
             !this.liveSignal().aborted
@@ -2736,6 +2773,7 @@ export class QueryEngine {
           this.cfg.requireVerificationEvidence &&
           workStatus !== "blocked" &&
           requiresVerification() &&
+          hasCurrentTurnEngagement() &&
           !hasPostMutationProof() &&
           !this.liveSignal().aborted
         ) {

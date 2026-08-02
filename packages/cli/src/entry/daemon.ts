@@ -2875,16 +2875,19 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
               markProviderDead(providerFamilyForSelection(entry.live.selection));
             }
             const routingMode = (await loadUiSettings().catch(() => ({ routingMode: "manual" as const }))).routingMode;
-            // Capacity pressure gets a same-provider sibling FIRST, even on
-            // manual routing: the engine already rode out ~95s of Overloadeds,
-            // and sliding Opus→Sonnet inside the owner's own account respects
-            // the pin far better than losing the turn (or jumping providers).
             const overloaded = /overloaded|capacity|\b529\b|server is busy|service unavailable|temporarily unavailable/i.test(turnState.fatalProvider);
-            const fallback =
-              (overloaded ? await pickCapacitySibling(entry.live.selection).catch(() => null) : null) ??
-              (await pickHealthyFallback(entry.live.selection, liveDeadProviders(), {
-                allowCrossProvider: routingMode === "auto",
-              }).catch(() => null));
+            // The pin is SACRED on manual routing (the opencode doctrine: retry
+            // patiently, surface the wait, and let the OWNER decide any model
+            // change). The old capacity-sibling slide "respected the pin" by
+            // switching it — which read as the model changing on its own. The
+            // engine already rode out its ~95s capacity ladder before reaching
+            // here; on manual we stop and say so instead of switching.
+            const fallback = routingMode !== "auto"
+              ? null
+              : (overloaded ? await pickCapacitySibling(entry.live.selection).catch(() => null) : null) ??
+                (await pickHealthyFallback(entry.live.selection, liveDeadProviders(), {
+                  allowCrossProvider: true,
+                }).catch(() => null));
             if (!fallback) {
               const onAres = providerFamilyForSelection(entry.live.selection) === "ares";
               tagEmit(sid, {
@@ -2908,14 +2911,12 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
             });
             const overloadedModel = entry.live.selection.model;
             entry.live.selection = fallback;
-            // A DEAD provider (no balance, bad key) is persisted as the session
-            // default so the next message doesn't re-run the gauntlet. Capacity
-            // is different: the owner's pinned model isn't broken, it was busy —
-            // so keep the pin and let the next turn try it again.
-            if (!overloaded) {
-              mainSelection = fallback;
-              mainProviderFamily = providerFamilyForSelection(fallback);
-            }
+            // Deliberately NOT persisted to mainSelection: a failover is a
+            // per-session rescue, never a change to the owner's default. The
+            // old persistence is how "models switch by themselves" happened —
+            // one bad night rewrote the daemon default, and every later card
+            // inherited the switch. Dead-provider memory (markProviderDead)
+            // already prevents re-running the gauntlet on every turn.
             // An auth/key death deserves a plain-language diagnosis, not the raw
             // upstream JSON blob — the owner's next action is "fix the key in
             // Settings", and the message should say so (the mid-landscape
