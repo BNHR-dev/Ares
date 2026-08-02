@@ -153,3 +153,51 @@ test("shell-regex edit: PowerShell -replace + Set-Content trips ONE hint", async
   const hits = events.filter((e) => e.type === "system_reminder_injected" && /shell-regex file edit/.test(e.text));
   assert.equal(hits.length, 1, "hint fires exactly once per turn");
 });
+
+// -- 7. grind breaker: the edit-build-fail treadmill ---------------------------
+
+test("grind breaker: the SAME failure separated by productive rounds trips strategy nudges at 4 and 8, without turn-kill", async () => {
+  // The FPSgame shape: a build fails, the model reads/edits (successful,
+  // distinct rounds), re-runs the build, fails again -- 14 times over two
+  // hours. The consecutive streak resets every time, so before the grind
+  // breaker NOTHING intervened. Alternate fail/success here and assert the
+  // cumulative counter still escalates.
+  const buildFail = {
+    schema: { name: "PowerShell", description: "fails", inputJsonSchema: { type: "object", properties: {} }, safety: "read-only", concurrency: "parallel-safe", watchdogTimeoutMs: 0 },
+    async call() { throw new Error("PowerShell exited with code 1"); },
+  };
+  const provider = scriptedProvider(
+    (i) => (i % 2 === 0
+      ? { name: "PowerShell", input: { command: "cargo build --release" } }
+      : { name: "Step", input: { n: i } }),
+    18, // 9 failures interleaved with 9 successes
+  );
+  const events = await collect(makeEngine(provider, [buildFail, okTool("Step")]));
+  const nudges = events.filter((e) => e.type === "system_reminder_injected" && /grind-breaker/.test(e.text));
+  assert.equal(nudges.length, 2, "one nudge at 4 cumulative failures, one at 8");
+  assert.match(nudges[0].text, /4/, "first nudge names the 4th failure");
+  assert.match(nudges[1].text, /8/, "second nudge names the 8th failure");
+  assert.ok(!events.some((e) => e.type === "error" && e.error?.code === "loop_detected"), "a grind is pressured, not killed");
+  const end = events.at(-1);
+  assert.equal(end.type, "turn_end");
+  assert.equal(end.status, "completed", "the turn still finishes normally");
+});
+
+test("grind breaker: different failing commands do not pool into one bucket", async () => {
+  // A failing build and a failing test run share the error text "exited with
+  // code 1" -- the command HEAD keys them apart, so 3 of each (6 total
+  // failures) stays below every threshold.
+  const anyFail = {
+    schema: { name: "PowerShell", description: "fails", inputJsonSchema: { type: "object", properties: {} }, safety: "read-only", concurrency: "parallel-safe", watchdogTimeoutMs: 0 },
+    async call() { throw new Error("PowerShell exited with code 1"); },
+  };
+  const provider = scriptedProvider(
+    (i) => (i % 2 === 0
+      ? { name: "PowerShell", input: { command: `cargo build --p${i}` } }
+      : { name: "PowerShell", input: { command: `cargo test --p${i}` } }),
+    6,
+  );
+  const events = await collect(makeEngine(provider, [anyFail]));
+  const nudges = events.filter((e) => e.type === "system_reminder_injected" && /grind-breaker/.test(e.text));
+  assert.equal(nudges.length, 0, "3 failures per distinct command head stays below the 4-threshold");
+});

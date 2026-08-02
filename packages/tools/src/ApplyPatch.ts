@@ -20,7 +20,7 @@ import {
   type WorkspaceMutationOperation,
   type WorkspaceMutationReceipt,
 } from "@ares/core";
-import { buildTool, contentHash, mutationInstructionBlock, toolError } from "./_shared.js";
+import { buildTool, contentHash, mutationInstructionBlock, mutationWorkspaceForPaths, resolveWorkspacePath, toolError } from "./_shared.js";
 import { appendMutationFeedback, collectMutationFeedback } from "./postMutationFeedback.js";
 
 const inputSchema = z
@@ -46,7 +46,7 @@ export interface ApplyPatchOutput {
 export const ApplyPatchTool = buildTool({
   name: "ApplyPatch",
   description:
-    "Apply one atomic, multi-file patch. Use *** Add File, *** Update File, optional *** Move to, and *** Delete File hunks between *** Begin Patch / *** End Patch. Paths are workspace-relative. All hunks are validated before any project file changes; stale or ambiguous patches fail without partial edits.",
+    "Apply one atomic, multi-file patch. Use *** Add File, *** Update File, optional *** Move to, and *** Delete File hunks between *** Begin Patch / *** End Patch. Paths are workspace-relative; absolute paths into another project directory are also accepted (same permission rules as Write/Edit). All hunks are validated before any project file changes; stale or ambiguous patches fail without partial edits.",
   safety: "workspace-write",
   concurrency: "exclusive",
   maxResultSizeChars: 24_000,
@@ -86,6 +86,20 @@ export const ApplyPatchTool = buildTool({
       const parsed = parsePatch(input.patch);
       if (parsed.hunks.length === 0) throw new Error("The patch contains no file hunks.");
 
+      // Settle out-of-workspace permission FIRST, before any file reads: the
+      // same gate Write/Edit use (bypass mode passes instantly; guarded mode
+      // prompts once per directory). Every target is known up front, so a
+      // denial aborts before anything is read or computed.
+      const allTargets = parsed.hunks.flatMap((hunk) => [
+        resolvePatchPath(ctx.workspace, hunk.path),
+        ...(hunk.kind === "update" && hunk.movePath
+          ? [resolvePatchPath(ctx.workspace, hunk.movePath)]
+          : []),
+      ]);
+      for (const target of allTargets) {
+        await resolveWorkspacePath(ctx, target, "patch path", "write");
+      }
+
       // Compute every new byte sequence before entering the mutation service.
       // The service's expectedHash checks close the read-to-commit race.
       const operations: WorkspaceMutationOperation[] = [];
@@ -120,7 +134,10 @@ export const ApplyPatchTool = buildTool({
         }
       }
 
-      const receipt = await new WorkspaceMutationService(ctx.workspace).apply(operations, {
+      // The transaction root follows the TARGETS (an external project keeps its
+      // own CAS/recovery journal), exactly like Write/Edit.
+      const mutationWorkspace = await mutationWorkspaceForPaths(ctx.workspace, allTargets);
+      const receipt = await new WorkspaceMutationService(mutationWorkspace).apply(operations, {
         label: "ApplyPatch",
         transactionId: ctx.mutationTransactionId,
       });
@@ -290,13 +307,18 @@ async function readPatchFile(filePath: string, action: string): Promise<Buffer> 
   }
 }
 
+/** Syntactic resolution only. Out-of-workspace targets are a PERMISSION
+ *  question (settled at call time through the same resolveWorkspacePath gate
+ *  Write/Edit use), not a validity one — the old inside-the-root rejection made
+ *  ApplyPatch the one mutation tool that refused an owner-approved external
+ *  project, forcing lossy full-file Write fallbacks mid-task. */
 function resolvePatchPath(workspace: string, rawPath: string): string {
   const root = path.resolve(workspace);
   const cleaned = rawPath.trim();
+  if (!cleaned) throw new Error(`Patch path must name one concrete file: ${JSON.stringify(rawPath)}`);
   const absolute = path.resolve(root, cleaned);
-  const relative = path.relative(root, absolute);
-  if (!cleaned || relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) {
-    throw new Error(`Patch path must name one file inside the workspace: ${JSON.stringify(rawPath)}`);
+  if (absolute === root || absolute === path.parse(absolute).root) {
+    throw new Error(`Patch path must name one concrete file, not a directory root: ${JSON.stringify(rawPath)}`);
   }
   return absolute;
 }

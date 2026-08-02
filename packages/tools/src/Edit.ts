@@ -685,13 +685,21 @@ export function nearMissHint(content: string, oldString: string): string {
   }
   // Require a real overlap (more than half the tokens) before claiming a near miss.
   if (bestLine < 0 || bestScore * 2 <= tokens.length) return "";
+  // Window spans the FULL probable region (the needle's line count, capped),
+  // not just ±2 lines around the anchor — the point is that the model can copy
+  // the exact current text from this excerpt and retry WITHOUT a Read
+  // round-trip, which a 5-line window couldn't offer for a multi-line target.
+  const span = Math.min(Math.max(n + 4, 5), 40);
   const from = Math.max(0, bestLine - 2);
-  const to = Math.min(contentLines.length, bestLine + 3);
+  const to = Math.min(contentLines.length, from + span);
   const excerpt = contentLines
     .slice(from, to)
     .map((line, idx) => `${(from + idx + 1).toString().padStart(5, " ")}\t${line}`)
     .join("\n");
-  return `Closest near-miss in the file is around line ${bestLine + 1}:\n${excerpt}`;
+  return (
+    `Closest near-miss in the file is around line ${bestLine + 1} — the CURRENT text there is:\n${excerpt}\n` +
+    `Copy your old_string from this excerpt (strip the line-number prefixes) and retry without re-Reading.`
+  );
 }
 
 function countOccurrences(haystack: string, needle: string): number {

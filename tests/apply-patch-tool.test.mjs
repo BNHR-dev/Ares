@@ -83,12 +83,47 @@ test("ApplyPatch computes every hunk before mutation, so a late bad hunk applies
   assert.equal(await fs.readFile(path.join(ctx.workspace, "existing.txt"), "utf8"), "actual\n");
 });
 
-test("ApplyPatch rejects workspace escapes during semantic validation", async (t) => {
+test("ApplyPatch reaches an out-of-workspace project under bypass, like Write/Edit", async (t) => {
+  // The FPSgame regression: workspace on the Desktop, project at D:\FPSgame —
+  // ApplyPatch was the ONE mutation tool refusing owner-approved external
+  // paths, forcing lossy full-file Write fallbacks.
   const ctx = await setup(t);
-  const verdict = await ApplyPatchTool.validateInput(
-    { patch: "*** Begin Patch\n*** Add File: ../escape.txt\n+no\n*** End Patch" },
-    ctx,
+  ctx.permissionMode = "bypass";
+  const external = await fs.mkdtemp(path.join(os.tmpdir(), "ares-apply-patch-ext-"));
+  t.after(() => fs.rm(external, { recursive: true, force: true }));
+  // A real external project (repo marker), like D:\FPSgame — the transaction
+  // root resolves to the project, not the workspace.
+  await fs.mkdir(path.join(external, ".git"), { recursive: true });
+  const target = path.join(external, "Weapons", "WeaponDefinition.h");
+  const patch = [
+    "*** Begin Patch",
+    `*** Add File: ${target}`,
+    "+#pragma once",
+    "*** End Patch",
+  ].join("\n");
+
+  const verdict = await ApplyPatchTool.validateInput({ patch }, ctx);
+  assert.equal(verdict.ok, true, `validation should pass: ${verdict.message ?? ""}`);
+  await ApplyPatchTool.call({ patch }, ctx);
+  assert.equal(await fs.readFile(target, "utf8"), "#pragma once\n");
+});
+
+test("ApplyPatch denies out-of-workspace targets when no permission channel exists", async (t) => {
+  // Guarded mode without a prompt (subagent/deny-stub posture): the same
+  // refusal contract as resolveWorkspacePath everywhere else — denied at the
+  // permission layer, before any file is read or computed.
+  const ctx = await setup(t);
+  const external = await fs.mkdtemp(path.join(os.tmpdir(), "ares-apply-patch-deny-"));
+  t.after(() => fs.rm(external, { recursive: true, force: true }));
+  const patch = [
+    "*** Begin Patch",
+    `*** Add File: ${path.join(external, "escape.txt")}`,
+    "+no",
+    "*** End Patch",
+  ].join("\n");
+  await assert.rejects(
+    ApplyPatchTool.call({ patch }, ctx),
+    (error) => /escapes workspace|denied outside workspace/.test(error.message),
   );
-  assert.equal(verdict.ok, false);
-  assert.match(verdict.message, /inside the workspace/);
+  await assert.rejects(fs.stat(path.join(external, "escape.txt")), { code: "ENOENT" });
 });

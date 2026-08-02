@@ -1894,6 +1894,13 @@ export class QueryEngine {
     // it loop for minutes (e.g. retrying a missing browser install forever).
     const failStreak = new Map<string, number>();
     let breakerFired = false;
+    // CUMULATIVE per-turn failure totals — never reset on non-recurrence. The
+    // consecutive streak above catches tight loops; this catches the long
+    // edit-build-fail treadmill it is blind to: a real session re-ran the same
+    // failing build 14 times over two hours, each attempt separated by reads
+    // and edits, so the streak reset every round and nothing ever intervened.
+    const failTotal = new Map<string, number>();
+    const grindNudgesFired = new Set<string>();
     // Failure signatures we've already asked memory about this turn (recall fires
     // at most once per distinct signature — no repeated lookups on every round).
     const recalledFailureSigs = new Set<string>();
@@ -3006,11 +3013,47 @@ export class QueryEngine {
           seenThisRound.add(sig);
           errorTextBySig.set(sig, errText);
           failStreak.set(sig, (failStreak.get(sig) ?? 0) + 1);
+          // Cumulative grind counter. Shell failures get the command HEAD in
+          // the key so a failing build and a failing test run don't pool into
+          // one "exited with code #" bucket.
+          const input = use.input as { command?: unknown } | undefined;
+          const shellHead =
+            (use.name === "Bash" || use.name === "PowerShell") && typeof input?.command === "string"
+              ? `::${input.command.trim().split(/\s+/).slice(0, 2).join(" ").toLowerCase().slice(0, 48)}`
+              : "";
+          const grindKey = `${sig}${shellHead}`;
+          failTotal.set(grindKey, (failTotal.get(grindKey) ?? 0) + 1);
         }
       }
       // reset streaks for signatures that did NOT recur this round
       for (const sig of [...failStreak.keys()]) {
         if (!seenThisRound.has(sig)) failStreak.delete(sig);
+      }
+      // ── grind breaker: the SAME failure accumulating across the turn ──────
+      // Not a tight loop (edits and reads happen between attempts), so no
+      // turn-kill — escalating strategy pressure instead. Fires once per
+      // threshold per signature.
+      for (const [grindKey, total] of failTotal.entries()) {
+        const threshold = total >= 8 ? 8 : total >= 4 ? 4 : 0;
+        if (threshold === 0) continue;
+        const onceKey = `${grindKey}@${threshold}`;
+        if (grindNudgesFired.has(onceKey)) continue;
+        grindNudgesFired.add(onceKey);
+        const text =
+          threshold === 4
+            ? `GRIND ALERT: this exact failure has now occurred 4 times this turn (${grindKey.split("::")[0]}). Tweaking and re-running is not converging. Before the next attempt: (1) read the COMPLETE error output — not the last lines, the first error; (2) reduce scope: reproduce the failure in the smallest unit (one file, one target, one test) instead of the full build; (3) state, in one sentence, what is different about the next attempt and why that difference addresses the actual error. If you cannot name a difference, the approach is wrong — change it.`
+            : `GRIND STOP: 8 attempts have failed with this same signature. This approach is exhausted. Stop re-running it. Either take a fundamentally different route (different tool, different layer, question an assumption you have not verified), or report honestly to the user: what you tried, the exact error, and what you need from them. Continuing to grind the same failure is the one option that is no longer acceptable.`;
+        this.messages.push({
+          id: cryptoId(),
+          role: "user",
+          content: [{ type: "system_reminder", text }],
+          createdAt: new Date().toISOString(),
+        });
+        yield {
+          type: "system_reminder_injected",
+          text: `grind-breaker: same failure ×${total} this turn — forcing a strategy re-think`,
+          source: "instructions",
+        };
       }
       // ── failure-signature recall ──────────────────────────────────────────
       // The SECOND identical failure is the moment to intervene — the model is
