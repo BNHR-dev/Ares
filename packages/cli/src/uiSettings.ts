@@ -5,6 +5,7 @@ import type { ReasoningLevel } from "@ares/protocol";
 import type { RouteAssignments } from "@ares/core";
 import type { ThemeName } from "./terminalUi.js";
 import type { PermissionSettings } from "./permissionPolicy.js";
+import type { PersonaStyle } from "./entry/prompt/persona.js";
 import { encryptSecret, decryptSecret } from "./keyVault.js";
 
 /** Settings fields that hold secrets — encrypted at rest, decrypted on load. */
@@ -47,6 +48,13 @@ export interface UiSettings {
   dangerousBypass?: boolean;
   /** Owner-selected reasoning dial (low→max). Applies across providers. */
   reasoningLevel?: ReasoningLevel;
+  /** Voice layer composed above the shared craft core. "ares" is the default
+   *  swagger; "neutral" is plain and factual; "custom" uses personaCustom
+   *  verbatim (empty string = no persona at all). Personality is a colour on
+   *  top of the engineering doctrine, never a replacement for it. */
+  personaStyle?: PersonaStyle;
+  /** Verbatim persona text when personaStyle is "custom". */
+  personaCustom?: string;
   /** Owner-assigned per-lane model routing (chat/coding/research/tool-use). */
   routing?: RouteAssignments;
   /** Explicit model selection mode. Auto applies routing lanes per turn. */

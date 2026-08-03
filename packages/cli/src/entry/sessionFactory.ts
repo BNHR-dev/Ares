@@ -696,10 +696,28 @@ export async function createSessionWithSelection(
   // changed, instead of half-rebuilding it and silently dropping the mind or
   // git context.
   const promptTail = (await loadLiveMindContext(context)) + (await loadGitContext(context));
+  // The per-model coding overlay is resolved from the LIVE selection, and read
+  // at compose time rather than captured — a mid-session model switch (owner
+  // pick or failover mutates `live.selection`) recomposes with the right
+  // overlay on the next turn.
+  //
+  // Late-bound through a ref on purpose: `live` is constructed further down, so
+  // naming it directly here put the closure in its temporal dead zone and every
+  // daemon/session path threw "Cannot access 'live' before initialization" the
+  // moment it composed a prompt.
+  let liveRef: LiveSession | undefined;
+  const promptModelOpts = () => {
+    const active = liveRef?.selection ?? selection;
+    return {
+      providerFamily: providerFamilyForSelection(active),
+      model: active.model,
+      persona: { style: settings.personaStyle, custom: settings.personaCustom },
+    };
+  };
   const composeCurrentSystemPrompt = () =>
-    agent.composeSystemPrompt(buildSystemPrompt(runtime.permissionMode, context)) + promptTail;
+    agent.composeSystemPrompt(buildSystemPrompt(runtime.permissionMode, context, promptModelOpts())) + promptTail;
   runtime.composeChildSystemPrompt = async () =>
-    agent.composeSystemPrompt(buildSystemPrompt(runtime.permissionMode, context)) +
+    agent.composeSystemPrompt(buildSystemPrompt(runtime.permissionMode, context, promptModelOpts())) +
     (await loadLiveMindContext(context)) +
     (await loadGitContext(context));
   const toolCatalogHash = contextSourceHash(JSON.stringify(tools.map((tool) => tool.schema)));
@@ -802,6 +820,7 @@ export async function createSessionWithSelection(
       adoptPersona: makePersonaSwap(session),
       activePersona: () => agent.activePersona(),
     };
+    liveRef = live;
     live.agentRuntime = new AresAgentRuntime(agent, {
       workspace: context.workspace,
       sessionId: session.meta.id,
@@ -871,6 +890,7 @@ export async function createSessionWithSelection(
   codingJournal = await CodingJournal.open({ workspace: context.workspace, sessionId: session.meta.id });
   session.observeEvents((event) => codingJournal?.recordTurnEvent(event));
   const live: LiveSession = { session, selection, context, runtime, verifier, hooks, shellRegistry, todoStore, tools, queueSystemReminder, reasoningLevel: resolveReasoningLevel(settings), codingJournal, adoptPersona: makePersonaSwap(session), activePersona: () => agent.activePersona() };
+  liveRef = live;
   live.agentRuntime = new AresAgentRuntime(agent, {
     workspace: context.workspace,
     sessionId: session.meta.id,
