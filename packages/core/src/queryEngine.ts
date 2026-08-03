@@ -192,6 +192,17 @@ export interface ToolPermissionRequest {
   input: unknown;
   reason: string;
   suggestion?: PermissionPromptSuggestion;
+  /**
+   * This asks the owner to make a WORKFLOW decision, not to authorise a risky
+   * effect — the plan→build crossing is the only one today.
+   *
+   * Free/YOLO mode blanket-approves permissions so Ares stops asking before
+   * every write and shell call. That is right for safety gates and wrong here:
+   * a request marked `ownerDecision` must reach a human even under YOLO,
+   * because nobody turned on "auto-approve my judgement calls". Hosts that
+   * auto-approve MUST honour this flag.
+   */
+  ownerDecision?: boolean;
   /** Host waiters must detach when this unanswered request loses authority.
    * The signal never aborts an effect after approval; it scopes only the
    * pending prompt. */

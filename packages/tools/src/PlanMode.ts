@@ -161,11 +161,22 @@ export function makeExitPlanModeTool(source: PlanModeStateSource) {
           display: "[PLAN] plan saved — explicit user approval is required to build",
         };
       }
+      // `ownerDecision` marks this as a WORKFLOW question, not a safety gate.
+      //
+      // Free/YOLO mode exists so Ares stops asking permission to write files and
+      // run commands — it must not also answer "is this plan good enough to
+      // start building?" on the owner's behalf. It did: a real session showed
+      // this request auto-approved 11 MILLISECONDS after it was raised, so the
+      // model called ExitPlanMode itself and the session flipped straight into
+      // build with nobody consulted. That makes this tool's own contract — "only
+      // an explicit approval switches the session to build mode" — a lie, and it
+      // is exactly the "it flipped into build on its own" the owner reported.
       const decision = await ctx.requestPermission({
         toolName: "ExitPlanMode",
         input: { plan },
         reason: "Ready to build? Approve this exact plan to enter build mode and allow execution.",
         suggestion: "allow_once",
+        ownerDecision: true,
       });
       if (decision === "deny") {
         return {

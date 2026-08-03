@@ -627,6 +627,15 @@ const ALLOWED_DAEMON_COMMANDS: &[&str] = &[
     "sessions_list", "set_permissions", "skill_invoke", "skill_toggle",
     "skillhub_install", "skillhub_list", "skillhub_publish", "skills_list",
     "steer", "undo", "usage_stats", "webview_result",
+    // The roster + workflow surfaces. These were MISSING for their whole
+    // lifetime: the UI sent them, this list rejected them with a Result::Err
+    // the frontend discards, and every one of those buttons was silently dead
+    // in the packaged app — the persona gallery, "Wear <persona>", the
+    // Plan/Build pill, and the Mind cockpit's state read. A test now diffs the
+    // UI's command vocabulary against this list so a new button cannot ship
+    // unroutable again.
+    "cognitive_state", "persona_adopt", "persona_delete", "persona_style",
+    "persona_write", "roster_list", "workflow_mode",
 ];
 
 #[tauri::command]

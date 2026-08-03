@@ -1270,6 +1270,25 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
         process.stdout.write(JSON.stringify({ type: "routing_mode_set", routingMode }) + "\n");
         continue;
       }
+      if (command.type === "persona_style") {
+        // The VOICE dial: which persona layer sits above the shared craft core.
+        // Separate from persona_adopt (which wears a roster specialist) —
+        // this is "how does Ares talk", and it survives restarts because it
+        // lives in ui.json like every other owner preference.
+        const raw = typeof command.name === "string" ? command.name.trim().toLowerCase() : "";
+        const style = raw === "neutral" || raw === "custom" ? raw : "ares";
+        const custom = typeof command.body === "string" ? command.body : undefined;
+        await updateUiSettings({
+          personaStyle: style,
+          ...(custom !== undefined ? { personaCustom: custom } : {}),
+        });
+        process.stdout.write(JSON.stringify({
+          type: "persona_style_set",
+          style,
+          custom: custom ?? null,
+        }) + "\n");
+        continue;
+      }
       if (command.type === "workflow_mode") {
         // The owner's own Plan/Build toggle, per session. Carries ownerIntent,
         // so it supersedes an un-approved plan draft instead of being rejected

@@ -78,6 +78,8 @@ export interface AresEvent {
   method?: "micro" | "summary" | "ledger";
   /** workflow_mode_set — the mode the session ACTUALLY holds after the toggle. */
   mode?: string;
+  /** persona_style_set — the voice layer the daemon persisted. */
+  style?: string;
   error?: unknown;
   event?: AresEvent;
   usage?: { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; reasoningTokens?: number; modelCalls?: number };

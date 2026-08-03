@@ -456,6 +456,9 @@ function App() {
   const [roster, setRoster] = useState<PersonaVm[]>(() => (native ? [] : demoRoster()));
   const [cognitive, setCognitive] = useState<CognitiveStateVm | null>(() => (native ? null : demoCognitive()));
   const [activePersona, setActivePersona] = useState<PersonaVm | null>(null);
+  // The voice layer above Ares's craft doctrine. Echoed back by the daemon
+  // as persona_style_set so a change made elsewhere still lands here.
+  const [personaStyle, setPersonaStyle] = useState<string>("ares");
   // Which HELM tab is showing. Lifted out of HelmView so the status bar's
   // persona chip can jump straight to the gallery.
   const [helmTab, setHelmTab] = useState<"overview" | "agents" | "mind">("overview");
@@ -1411,6 +1414,10 @@ function App() {
           }
           return true;
         }
+        case "persona_style_set":
+          // Authoritative echo — the daemon persisted it to ui.json.
+          if (typeof e.style === "string") setPersonaStyle(e.style);
+          return true;
         case "persona_suggested":
           setPersonaSuggestion({
             persona: e.persona as PersonaVm,
@@ -3168,6 +3175,8 @@ function App() {
             onAdoptPersona={adoptPersona}
             onDeletePersona={(name) => daemonCmd({ type: "persona_delete", name })}
             onWritePersona={(draft) => daemonCmd({ type: "persona_write", ...draft })}
+            personaStyle={personaStyle}
+            onPersonaStyle={(style) => { setPersonaStyle(style); daemonCmd({ type: "persona_style", name: style }); }}
           />
         ) : view === "artifacts" ? (
           <ArtifactsPage
@@ -4861,6 +4870,8 @@ function HelmModern({
   onAdoptPersona,
   onDeletePersona,
   onWritePersona,
+  personaStyle,
+  onPersonaStyle,
 }: {
   daemon: DaemonState;
   opStatus: { activeCount: number; goals: Array<{ id: string; statement: string; status: string; progress: number }>; autotick: boolean; trust?: Array<{ domain: string; level: number; proven: number }> } | null;
@@ -4881,6 +4892,8 @@ function HelmModern({
   onAdoptPersona: (name: string | null) => void;
   onDeletePersona: (name: string) => void;
   onWritePersona: (draft: PersonaDraft) => void;
+  personaStyle?: string;
+  onPersonaStyle: (style: "ares" | "neutral") => void;
 }) {
   const setTab = onTab;
   // Anything the owner would want to notice without going looking. Drives the
@@ -4953,6 +4966,8 @@ function HelmModern({
         <HelmAgents
           roster={roster}
           activePersona={activePersona}
+          personaStyle={personaStyle}
+          onPersonaStyle={onPersonaStyle}
           onAdopt={onAdoptPersona}
           onDelete={onDeletePersona}
           onWrite={onWritePersona}
@@ -5276,12 +5291,16 @@ const PERSONA_GLYPHS = ["helm", "forge", "shield", "search", "scroll", "skills",
 function HelmAgents({
   roster,
   activePersona,
+  personaStyle,
+  onPersonaStyle,
   onAdopt,
   onDelete,
   onWrite,
 }: {
   roster: PersonaVm[];
   activePersona: PersonaVm | null;
+  personaStyle?: string;
+  onPersonaStyle: (style: "ares" | "neutral") => void;
   onAdopt: (name: string | null) => void;
   onDelete: (name: string) => void;
   onWrite: (draft: PersonaDraft) => void;
@@ -5304,6 +5323,33 @@ function HelmAgents({
           <Sigil name={asSigilName("forge")} size={16} />
           {composing !== null ? "Close" : "Forge a persona"}
         </button>
+      </div>
+
+      {/* The VOICE dial — distinct from wearing a persona. This sets the tone
+          layer above Ares's engineering doctrine; the doctrine itself never
+          changes, whichever voice is chosen. */}
+      <div className="hmVoice">
+        <span className="hmVoiceLabel">Voice</span>
+        <div className="segment mini">
+          {([
+            { id: "ares", label: "Ares", hint: "Direct with an edge — the default." },
+            { id: "neutral", label: "Neutral", hint: "Plain and factual, no swagger." },
+          ] as const).map((v) => (
+            <button
+              key={v.id}
+              data-on={(personaStyle ?? "ares") === v.id ? "1" : "0"}
+              title={v.hint}
+              onClick={() => onPersonaStyle(v.id)}
+            >
+              {v.label}
+            </button>
+          ))}
+        </div>
+        <span className="hmVoiceHint">
+          {(personaStyle ?? "ares") === "neutral"
+            ? "Plain and factual. How Ares works is unchanged."
+            : "Direct with an edge. How Ares works is unchanged."}
+        </span>
       </div>
 
       {activePersona ? (
@@ -5581,6 +5627,8 @@ function HelmView({
   onAdoptPersona,
   onDeletePersona,
   onWritePersona,
+  personaStyle,
+  onPersonaStyle,
 }: {
   daemon: DaemonState;
   opStatus: { activeCount: number; goals: Array<{ id: string; statement: string; status: string; progress: number }>; autotick: boolean; trust?: Array<{ domain: string; level: number; proven: number }> } | null;
@@ -5599,6 +5647,8 @@ function HelmView({
   onAdoptPersona: (name: string | null) => void;
   onDeletePersona: (name: string) => void;
   onWritePersona: (draft: PersonaDraft) => void;
+  personaStyle?: string;
+  onPersonaStyle: (style: "ares" | "neutral") => void;
 }) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const modern = useUiStyle() === "modern";
@@ -5672,6 +5722,8 @@ function HelmView({
         onAdoptPersona={onAdoptPersona}
         onDeletePersona={onDeletePersona}
         onWritePersona={onWritePersona}
+        personaStyle={personaStyle}
+        onPersonaStyle={onPersonaStyle}
       />
     );
   }

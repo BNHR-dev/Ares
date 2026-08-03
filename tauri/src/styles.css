@@ -4508,3 +4508,16 @@ html[data-perf="lite"] .brandBtn, html[data-perf="lite"] .hudVersion { animation
   .starters .starter { animation: none; }
   .send, .send:hover:not(:disabled), .send:active:not(:disabled) { transform: none; }
 }
+
+/* ── the voice dial (HELM → Agents) ─────────────────────────────────────── */
+.hmVoice {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 12px 14px; margin-bottom: 14px;
+  border: 1px solid var(--line); border-radius: var(--r-md);
+  background: rgba(0, 0, 0, 0.16);
+}
+.hmVoiceLabel {
+  font: 700 9px/1 var(--mono); letter-spacing: 0.16em; text-transform: uppercase;
+  color: var(--faint);
+}
+.hmVoiceHint { font: 450 11.5px/1.4 var(--body); color: var(--faint); flex: 1 1 220px; }
