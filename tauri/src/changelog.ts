@@ -38,6 +38,38 @@ export interface ChangelogEntry {
 // from the "earlier updates" strip.
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.34.1",
+    date: "August 2026",
+    title: "The buttons that never worked",
+    tagline: "Six buttons in the app had never done anything — the whole persona feature, the Plan/Build switch, and the Mind panel's status. A bridge in the desktop shell was silently dropping them.",
+    highlights: [
+      {
+        icon: "◼",
+        title: "Plan / Build actually switches",
+        blurb: "The badge in the title bar is a real switch now. It was sending a command the app was quietly throwing away.",
+        tag: "New",
+      },
+      {
+        icon: "👤",
+        title: "Personas work at all",
+        blurb: "Wearing a persona, forging one, deleting one — none of it ever reached Ares. All of it works now.",
+        tag: "New",
+      },
+      {
+        icon: "🔒",
+        title: "Plan mode stays plan mode",
+        blurb: "With permissions on YOLO, Ares could approve its own jump from planning into building. Crossing that line is your call again — YOLO still skips everything else.",
+        tag: "Safer",
+      },
+      {
+        icon: "☺",
+        title: "Set Ares's voice",
+        blurb: "HELM → Agents now has a Voice dial: keep the edge, or switch to plain and factual. How Ares works doesn't change either way.",
+        tag: "New",
+      },
+    ],
+  },
+  {
     version: "0.34.0",
     date: "August 2026",
     title: "Sharper instructions, your personality",
