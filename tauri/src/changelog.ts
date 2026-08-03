@@ -38,6 +38,38 @@ export interface ChangelogEntry {
 // from the "earlier updates" strip.
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.34.0",
+    date: "August 2026",
+    title: "Sharper instructions, your personality",
+    tagline: "Ares's instructions were four times longer than they needed to be, with the same rules repeated six different ways — so nothing stood out. They're now a third shorter, tuned to whichever model you're running, and the personality is yours to set.",
+    highlights: [
+      {
+        icon: "✂",
+        title: "A third less noise",
+        blurb: "The same guidance said six different ways meant none of it landed. Merged and tightened, so the rules that matter actually stand out.",
+        tag: "Faster",
+      },
+      {
+        icon: "◎",
+        title: "Tuned per model",
+        blurb: "Each model is now coached on its own weak spot — one is told to build instead of describe, another to keep changes small. Switching models switches the coaching.",
+        tag: "New",
+      },
+      {
+        icon: "☺",
+        title: "Personality is yours",
+        blurb: "Keep the god-of-war edge, switch to plain and factual, or write your own voice — without touching how Ares actually works.",
+        tag: "New",
+      },
+      {
+        icon: "⚖",
+        title: "Nothing was watered down",
+        blurb: "Every standard about verifying work and reporting failure honestly survived the trim, and there's now a test that fails if a future cleanup drops one.",
+        tag: "Safer",
+      },
+    ],
+  },
+  {
     version: "0.33.0",
     date: "August 2026",
     title: "Everything that was quietly broken",

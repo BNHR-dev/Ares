@@ -75,15 +75,12 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: "Ares ${{ github.ref_name }}"
           releaseBody: |
-            Ares 0.33.0 fixes what a sweep of real sessions showed was quietly broken.
+            Ares 0.34.0 rebuilds the system prompt: leaner, per-model, and with the personality separated from the craft.
 
-            - Background commands run again: the packaged app never shipped the shell supervisor, so every `run_in_background` command failed on arrival.
-            - A command that left a process running behind it no longer hangs the turn past its own timeout.
-            - Completion can be proven in real projects: Unreal, .NET/C#, CMake, Make, Gradle, Maven, Swift and Zig builds now count as verification, and the prompt names the command that would satisfy the gate for the project at hand.
-            - Memory no longer spends the context window replaying past tool errors; injection is capped and errors stay in telemetry where they belong.
-            - Plan/Build is an owner-held toggle in the title bar that stays where it is put, and a pinned model is never silently switched or persisted as a new default.
-            - Personas apply on click and survive a restart; patches apply to projects outside the open workspace; repeated identical build failures trigger a rethink instead of a grind.
-            - Large content can be spliced into a file by reference, so oversized edits no longer truncate.
+            - The prompt was one 33,819-character string sent to every model, with six sections restating the same doctrine. It is now composed from a configurable persona, a shared craft core, a per-model overlay, and the environment surfaces - 34% smaller with an overlay applied.
+            - Per-model coding overlays target each family's real failure mode: Kimi is told to act rather than describe, GPT to prefer the smallest correct change, Anthropic gets URL discipline, DeepSeek gets convergence. Resolution reads the model id as well as the provider, so an aggregator-served model still gets the right overlay.
+            - Personality is now owner-configurable: the default Ares voice, a neutral factual voice, or your own - with the engineering doctrine untouched either way.
+            - Nothing was softened. A test asserts all 25 load-bearing rules survive the cut, from "reading the code is not verification" to the ComputerUse coordinate contract.
           releaseDraft: false
           prerelease: false
           args: --bundles nsis
@@ -147,15 +144,12 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: "Ares ${{ github.ref_name }}"
           releaseBody: |
-            Ares 0.33.0 fixes what a sweep of real sessions showed was quietly broken.
+            Ares 0.34.0 rebuilds the system prompt: leaner, per-model, and with the personality separated from the craft.
 
-            - Background commands run again: the packaged app never shipped the shell supervisor, so every `run_in_background` command failed on arrival.
-            - A command that left a process running behind it no longer hangs the turn past its own timeout.
-            - Completion can be proven in real projects: Unreal, .NET/C#, CMake, Make, Gradle, Maven, Swift and Zig builds now count as verification, and the prompt names the command that would satisfy the gate for the project at hand.
-            - Memory no longer spends the context window replaying past tool errors; injection is capped and errors stay in telemetry where they belong.
-            - Plan/Build is an owner-held toggle in the title bar that stays where it is put, and a pinned model is never silently switched or persisted as a new default.
-            - Personas apply on click and survive a restart; patches apply to projects outside the open workspace; repeated identical build failures trigger a rethink instead of a grind.
-            - Large content can be spliced into a file by reference, so oversized edits no longer truncate.
+            - The prompt was one 33,819-character string sent to every model, with six sections restating the same doctrine. It is now composed from a configurable persona, a shared craft core, a per-model overlay, and the environment surfaces - 34% smaller with an overlay applied.
+            - Per-model coding overlays target each family's real failure mode: Kimi is told to act rather than describe, GPT to prefer the smallest correct change, Anthropic gets URL discipline, DeepSeek gets convergence. Resolution reads the model id as well as the provider, so an aggregator-served model still gets the right overlay.
+            - Personality is now owner-configurable: the default Ares voice, a neutral factual voice, or your own - with the engineering doctrine untouched either way.
+            - Nothing was softened. A test asserts all 25 load-bearing rules survive the cut, from "reading the code is not verification" to the ComputerUse coordinate contract.
           releaseDraft: false
           prerelease: false
           args: --bundles appimage,deb
