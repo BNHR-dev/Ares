@@ -90,6 +90,7 @@ export {
 } from "./ShellRegistry.js";
 export { makeBashOutputTool, type BashOutputResult } from "./BashOutput.js";
 export { makeKillShellTool, type KillShellOutput } from "./KillShell.js";
+export { makeBackgroundTasksTool, type BackgroundTasksOutput } from "./BackgroundTasks.js";
 export { McpListToolsTool, McpCallTool, HttpMcpClient, listMcpServerTools, type McpListOutput, type McpCallOutput } from "./Mcp.js";
 export { SkillsListTool, SkillReadTool, type SkillsListOutput, type SkillReadOutput, type SkillSummary } from "./Skills.js";
 export {

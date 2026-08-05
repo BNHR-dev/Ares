@@ -36,6 +36,10 @@ export interface ShellLaunchOptions {
   invocationKey?: string;
   /** Soft timeout (kill after). Optional — backgrounded shells often run forever. */
   timeoutMs?: number;
+  /** Relaunch lineage: the job this one is a resumption of. */
+  resumedFrom?: string;
+  /** Which relaunch this is. 1 = the original launch. */
+  attempt?: number;
 }
 
 export interface ShellSnapshot {
@@ -53,6 +57,15 @@ export interface ShellSnapshot {
   pid?: number | null;
   outputPath?: string;
   recovered?: boolean;
+  /** Stopped because the host was going away (Stop, or the app closing) rather
+   *  than because the work finished or the user killed it. */
+  suspended?: boolean;
+  /** Why it stopped, in words — shown in the UI and handed to the model. */
+  stoppedReason?: string;
+  /** A suspended job can be relaunched exactly as it was. */
+  resumable?: boolean;
+  /** Lineage when this job is a relaunch of an earlier one. */
+  resumedFrom?: string;
 }
 
 export interface ShellRegistryDurability {
@@ -97,7 +110,56 @@ export class ShellRegistry {
   /** Register one canonical session with this registry. This never shares jobs:
    * every durable lookup still predicates on the caller's session id. */
   registerSession(sessionId: string): void {
-    if (sessionId.trim()) this.knownSessionIds.add(sessionId);
+    if (!sessionId.trim()) return;
+    const fresh = !this.knownSessionIds.has(sessionId);
+    this.knownSessionIds.add(sessionId);
+    // Sweep this session's durable jobs the first time we see it — i.e. at
+    // session start and after every restart.
+    if (fresh) this.sweepDurableJobs(sessionId);
+  }
+
+  /**
+   * Settle every job whose process is gone, and reap any tree still alive
+   * behind a job that is no longer being watched.
+   *
+   * Reconciliation used to be PULL-ONLY: `reconcileDurableJob` ran when the
+   * model polled a job, so a turn that fired background work and never polled
+   * left the record at `running` forever. A real session accumulated FOURTEEN
+   * jobs stuck in `running` — thirteen of them long-dead processes — because
+   * nothing ever looked. The live one was an orphaned dev server the owner
+   * never asked to keep, still respawning a game every few minutes.
+   *
+   * Best-effort by construction: a sweep must never break a turn, so every
+   * failure here is swallowed.
+   */
+  sweepDurableJobs(sessionId: string): { settled: number; reaped: number } {
+    const result = { settled: 0, reaped: 0 };
+    if (!this.durability) return result;
+    let jobs: BackgroundJobRecord[];
+    try {
+      jobs = this.durability.kernel.listBackgroundJobs(sessionId, { kind: "shell" });
+    } catch {
+      return result;
+    }
+    for (const job of jobs) {
+      if (isTerminalJob(job)) continue;
+      try {
+        const before = job.status;
+        const after = this.reconcileDurableJob(job);
+        if (after.status !== before && isTerminalJob(after)) {
+          result.settled++;
+          // A settled job must not leave a live process behind. The supervisor
+          // is detached and unref'd, so nothing else will ever reap it.
+          if (after.pid && processAlive(after.pid)) {
+            void killProcessTree(after.pid, () => false).catch(() => false);
+            result.reaped++;
+          }
+        }
+      } catch {
+        // One unreadable record must not stop the sweep.
+      }
+    }
+    return result;
   }
 
   list(sessionId?: string): ShellSnapshot[] {
@@ -159,12 +221,16 @@ export class ShellRegistry {
     const statePath = prior?.statePath ?? path.join(root, `${id}.state.json`);
     const outputPath = prior?.outputPath ?? path.join(root, `${id}.output.log`);
     const manifestPath = path.join(root, `${id}.launch.json`);
+    const priorRequest = prior ? jobRequest(prior) : {};
     const request = {
       version: 1,
       program: opts.program,
       args: opts.args,
       cwd: opts.cwd,
       description: opts.description,
+      // Enough to relaunch this exact job later, and to show where it came from.
+      attempt: typeof priorRequest.attempt === "number" ? priorRequest.attempt : (opts.attempt ?? 1),
+      ...(opts.resumedFrom ? { resumedFrom: opts.resumedFrom } : {}),
     } satisfies JsonValue;
     const created = prior ?? this.durability!.kernel.createBackgroundJob({
       id,
@@ -374,6 +440,217 @@ export class ShellRegistry {
     return confirmed;
   }
 
+  /**
+   * Kill every non-terminal shell this session owns. Returns how many were
+   * actually killed.
+   *
+   * This is the force-stop escape hatch. A turn whose subprocess dies out from
+   * under it (or which is blocked on a command that never returns) never
+   * unwinds its generator, so a normal Stop has nothing to settle and the owner
+   * is left with no exit. Ending what the turn is blocked ON is the honest way
+   * to break that: it does not pretend the turn finished cleanly, and the
+   * caller is expected to disclose that side effects may be incomplete.
+   */
+  async killAllForSession(sessionId: string): Promise<number> {
+    let killed = 0;
+    if (this.durability && sessionId) {
+      let jobs: BackgroundJobRecord[];
+      try {
+        jobs = this.durability.kernel.listBackgroundJobs(sessionId, { kind: "shell" });
+      } catch {
+        return 0;
+      }
+      for (const job of jobs) {
+        if (isTerminalJob(job)) continue;
+        try {
+          if (await this.killDurable(job.id, "user", sessionId)) killed++;
+        } catch {
+          // One stubborn job must not stop the rest from being reaped.
+        }
+      }
+      return killed;
+    }
+    for (const [id, state] of this.shells) {
+      if (state.status !== "running") continue;
+      try {
+        if (await this.kill(id, "user")) killed++;
+      } catch { /* best effort */ }
+    }
+    return killed;
+  }
+
+  /**
+   * Stop background work because the HOST is going away — a Stop the user
+   * pressed, or the app closing — and record it as resumable rather than
+   * finished.
+   *
+   * Field origin: background supervisors are detached and unref'd, so they
+   * outlive everything. Ares closed and a job kept running: a dev server that
+   * relaunched a game every few minutes, for days, with no window open to show
+   * it and nothing to stop it from. "Ares keeps launching Minecraft when I'm
+   * not even using it" was a background job nobody could see and nothing ever
+   * reaped.
+   *
+   * The rule this establishes: NO background job outlives the host that owns
+   * it. It is stopped and marked resumable, so picking the session back up
+   * offers it — deliberately, once, to a human — instead of resurrecting it
+   * behind their back.
+   *
+   * `since` scopes it to work started after a moment (the turn being
+   * interrupted), leaving older jobs the user deliberately kept alone.
+   * Deliberately NO completion input is written: a suspension is not news the
+   * model needs to wake up and act on, and a queue of them at startup is
+   * exactly how an unattended relaunch loop begins.
+   */
+  async suspendForSession(
+    sessionId: string,
+    opts: { reason: string; since?: number } = { reason: "host stopped" },
+  ): Promise<ShellSnapshot[]> {
+    const suspended: ShellSnapshot[] = [];
+    if (!this.durability || !sessionId) {
+      for (const [id, state] of this.shells) {
+        if (state.status !== "running") continue;
+        if (opts.since !== undefined && Date.parse(state.startedAt) < opts.since) continue;
+        if (await this.kill(id, "user")) suspended.push({ ...snapshot(state), suspended: true, stoppedReason: opts.reason, resumable: true });
+      }
+      return suspended;
+    }
+    let jobs: BackgroundJobRecord[];
+    try {
+      jobs = this.durability.kernel.listBackgroundJobs(sessionId, { kind: "shell" });
+    } catch {
+      return suspended;
+    }
+    for (const job of jobs) {
+      if (isTerminalJob(job)) continue;
+      if (opts.since !== undefined && (job.startedAtMs ?? job.createdAtMs) < opts.since) continue;
+      try {
+        const stopped = await this.stopJobProcess(job);
+        // Record it even when the process was already gone: the point is that
+        // the RECORD stops reading "running" and starts reading "resumable".
+        const settled = this.settleShellJob(
+          this.durability.kernel.getBackgroundJob(job.id) ?? job,
+          "cancelled",
+          null,
+          null,
+          job.outputBytes,
+          { suspended: true, resumable: true, stoppedReason: opts.reason, processStopped: stopped },
+          { completion: false },
+        );
+        suspended.push(durableSnapshot(settled, true));
+      } catch {
+        // One stubborn job must never block the rest of a shutdown sweep.
+      }
+    }
+    return suspended;
+  }
+
+  /**
+   * The BOOT sweep: stop background work left behind by a host that is gone.
+   *
+   * The shutdown sweep only runs when the host shuts down cleanly. The crash
+   * path — and exit 134 made that path common — leaves every detached
+   * supervisor running with nothing left that knows about it. That is the
+   * state people actually hit: Ares died, and a job kept relaunching a game
+   * for days across restarts, because each new host found it already "running"
+   * and left it alone.
+   *
+   * `before` is this host's start time: anything that began earlier belongs to
+   * a previous host and is suspended; anything a LIVE sibling host (the
+   * garrison, a CLI session sharing this workspace) starts afterwards is
+   * untouched.
+   */
+  async suspendAbandoned(opts: { before: number; reason: string }): Promise<ShellSnapshot[]> {
+    const suspended: ShellSnapshot[] = [];
+    if (!this.durability) return suspended;
+    let jobs: BackgroundJobRecord[];
+    try {
+      // No session filter: leftovers belong to sessions this host has not
+      // opened yet, and may never open. That is precisely why they are lost.
+      jobs = this.durability.kernel.listBackgroundJobs(undefined, {
+        kind: "shell",
+        statuses: ["queued", "running"],
+      });
+    } catch {
+      return suspended;
+    }
+    for (const job of jobs) {
+      if ((job.startedAtMs ?? job.createdAtMs) >= opts.before) continue;
+      try {
+        const stopped = await this.stopJobProcess(job);
+        const settled = this.settleShellJob(
+          this.durability.kernel.getBackgroundJob(job.id) ?? job,
+          "cancelled",
+          null,
+          null,
+          job.outputBytes,
+          { suspended: true, resumable: true, stoppedReason: opts.reason, processStopped: stopped },
+          { completion: false },
+        );
+        suspended.push(durableSnapshot(settled, true));
+      } catch {
+        // Never let one unreadable record stop a boot.
+      }
+    }
+    return suspended;
+  }
+
+  /** Suspend every session this registry has seen. The shutdown sweep. */
+  async suspendAll(reason: string): Promise<ShellSnapshot[]> {
+    const all: ShellSnapshot[] = [];
+    for (const sessionId of [...this.knownSessionIds]) {
+      all.push(...(await this.suspendForSession(sessionId, { reason })));
+    }
+    if (!this.durability) all.push(...(await this.suspendForSession("", { reason })));
+    return all;
+  }
+
+  /**
+   * Relaunch a stopped job exactly as it was, as a NEW attempt.
+   *
+   * Resumption is always explicit — a human or a model asking for it by id.
+   * Nothing here is ever called automatically at startup, which is the whole
+   * point: a resumable record is an offer, not a promise to run it again.
+   */
+  async resume(id: string, sessionId: string): Promise<ShellSnapshot> {
+    if (!this.durability) throw toolError("resuming a background job requires durable storage");
+    const job = this.durability.kernel.getBackgroundJob(id);
+    if (!job || job.kind !== "shell" || job.sessionId !== sessionId) {
+      throw toolError(`unknown background job: ${id}`);
+    }
+    const request = jobRequest(job);
+    const program = typeof request.program === "string" ? request.program : "";
+    const cwd = typeof request.cwd === "string" ? request.cwd : "";
+    if (!program || !cwd) throw toolError(`background job ${id} cannot be resumed: its launch request is incomplete`);
+    if (!isTerminalJob(this.reconcileDurableJob(job))) {
+      // Still alive — resuming would double-launch it.
+      return durableSnapshot(this.durability.kernel.getBackgroundJob(id) ?? job, true);
+    }
+    const attempt = (typeof request.attempt === "number" ? request.attempt : 1) + 1;
+    return this.spawn({
+      program,
+      args: Array.isArray(request.args) ? request.args.filter((a): a is string => typeof a === "string") : [],
+      cwd,
+      description: job.description,
+      sessionId,
+      // A fresh invocation key so this becomes its own record instead of
+      // returning the terminal one it descends from.
+      invocationKey: `${job.invocationKey}#resume${attempt}`,
+      resumedFrom: job.id,
+      attempt,
+    });
+  }
+
+  /** SIGTERM the supervisor tree behind a job. Returns whether a kill landed. */
+  private async stopJobProcess(job: BackgroundJobRecord): Promise<boolean> {
+    const pid = job.pid;
+    if (!pid || !processAlive(pid)) return false;
+    this.durability?.kernel.requestBackgroundJobCancellation(job.id);
+    return await killProcessTree(pid, () => {
+      try { process.kill(pid, "SIGTERM"); return true; } catch { return false; }
+    });
+  }
+
   private async killDurable(id: string, reason: "user" | "timeout", sessionId: string): Promise<boolean> {
     this.registerSession(sessionId);
     let job = this.durability!.kernel.getBackgroundJob(id);
@@ -477,6 +754,8 @@ export class ShellRegistry {
     error: JsonValue | null,
     exitCode: number | null,
     outputBytes: number,
+    extra: Record<string, JsonValue> = {},
+    opts: { completion?: boolean } = {},
   ): BackgroundJobRecord {
     const tail = readTail(job.outputPath, 16_000);
     const text = [
@@ -486,19 +765,25 @@ export class ShellRegistry {
     ].filter(Boolean).join("\n");
     return this.durability!.kernel.settleBackgroundJob(job.id, {
       status,
-      result: { shellId: job.id, status, exitCode, outputPath: job.outputPath, outputBytes },
+      result: { shellId: job.id, status, exitCode, outputPath: job.outputPath, outputBytes, ...extra },
       error,
       exitCode,
       outputBytes,
-      completion: {
-        id: stableJobId("input", job.sessionId, job.id, "completion"),
-        idempotencyKey: `background-job:${job.id}:completion`,
-        payload: {
-          kind: "background-job-completion",
-          jobId: job.id,
-          content: [{ type: "text", text }],
+      // A suspension writes NO completion input. The completion row becomes a
+      // recovered turn on the next start, and "the host stopped your job" is
+      // not something the model should wake up and act on — that path is how an
+      // unattended relaunch loop starts.
+      ...(opts.completion === false ? {} : {
+        completion: {
+          id: stableJobId("input", job.sessionId, job.id, "completion"),
+          idempotencyKey: `background-job:${job.id}:completion`,
+          payload: {
+            kind: "background-job-completion",
+            jobId: job.id,
+            content: [{ type: "text", text }],
+          },
         },
-      },
+      }),
     });
   }
 }
@@ -517,10 +802,22 @@ function snapshot(state: ShellState): ShellSnapshot {
   };
 }
 
-function durableSnapshot(job: BackgroundJobRecord, recovered: boolean): ShellSnapshot {
-  const request = job.request && typeof job.request === "object" && !Array.isArray(job.request)
+/** A job's launch request as a plain record — the shape everything reads. */
+function jobRequest(job: BackgroundJobRecord): Record<string, JsonValue> {
+  return job.request && typeof job.request === "object" && !Array.isArray(job.request)
     ? job.request as Record<string, JsonValue>
     : {};
+}
+
+function jobResult(job: BackgroundJobRecord): Record<string, JsonValue> {
+  return job.result && typeof job.result === "object" && !Array.isArray(job.result)
+    ? job.result as Record<string, JsonValue>
+    : {};
+}
+
+function durableSnapshot(job: BackgroundJobRecord, recovered: boolean): ShellSnapshot {
+  const request = jobRequest(job);
+  const result = jobResult(job);
   const program = typeof request.program === "string" ? request.program : "shell";
   const args = Array.isArray(request.args) ? request.args.filter((value): value is string => typeof value === "string") : [];
   const status: ShellSnapshot["status"] = job.status === "completed"
@@ -546,6 +843,13 @@ function durableSnapshot(job: BackgroundJobRecord, recovered: boolean): ShellSna
     pid: job.pid,
     ...(job.outputPath ? { outputPath: job.outputPath } : {}),
     recovered,
+    ...(result.suspended === true ? { suspended: true } : {}),
+    ...(typeof result.stoppedReason === "string" ? { stoppedReason: result.stoppedReason } : {}),
+    // Resumable = we stopped it on the host's behalf and still hold everything
+    // needed to run it again. A job that finished on its own is not "resumable"
+    // — re-running it is a new decision, not a continuation.
+    ...(result.resumable === true && typeof request.program === "string" ? { resumable: true } : {}),
+    ...(typeof request.resumedFrom === "string" ? { resumedFrom: request.resumedFrom } : {}),
   };
 }
 

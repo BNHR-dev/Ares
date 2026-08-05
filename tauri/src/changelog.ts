@@ -38,6 +38,44 @@ export interface ChangelogEntry {
 // from the "earlier updates" strip.
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.35.0",
+    date: "August 2026",
+    title: "It stops when you stop it",
+    tagline: "Ares was crashing the longer you used it, and work it started in the background never stopped — not when you pressed Stop, not when you closed the app. Both are fixed, and you can finally see what's running.",
+    highlights: [
+      {
+        icon: "🧠",
+        title: "No more slow-then-crash",
+        blurb: "Ares kept every chat you opened loaded in memory until it ran out and died. It now lets go of chats you're not using, and warns long before it's in trouble.",
+        tag: "Safer",
+      },
+      {
+        icon: "⏹",
+        title: "Stop actually stops everything",
+        blurb: "Anything Ares launched in the background during a turn now stops with that turn — and stops when you close the app, instead of running on without you.",
+        tag: "Safer",
+      },
+      {
+        icon: "👁",
+        title: "See what's running",
+        blurb: "A new Background panel above the message box shows every job Ares has going, with one click to stop it or pick it back up.",
+        tag: "New",
+      },
+      {
+        icon: "🎮",
+        title: "No more surprise launches",
+        blurb: "A leftover background job could relaunch an app or game every few minutes for days, with nothing on screen explaining why. Nothing survives Ares closing anymore.",
+        tag: "Safer",
+      },
+      {
+        icon: "💬",
+        title: "Crashes say what happened",
+        blurb: "\"The Garrison went down\" used to be followed by four lines of hex. Now it tells you the actual reason and what to do about it.",
+        tag: "Polished",
+      },
+    ],
+  },
+  {
     version: "0.34.1",
     date: "August 2026",
     title: "The buttons that never worked",

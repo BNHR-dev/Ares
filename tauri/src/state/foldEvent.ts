@@ -679,6 +679,10 @@ export function foldEvent(s: SessionVm, e: AresEvent): SessionVm {
       break;
     case "interrupt_settled":
     case "interrupted_by_user":
+    // A forced stop ends the turn's grip whether or not the generator
+    // unwound. It MUST clear the gate — the whole point is that the owner is
+    // no longer trapped on "stopping safely".
+    case "interrupt_forced":
       session.busy = false;
       session.cancelling = false;
       session.steerQueued = 0;

@@ -269,6 +269,23 @@ fn ares_restart_daemon(
     start_daemon(app, state.inner(), provider, model)
 }
 
+/// The Node heap ceiling for our long-lived children.
+///
+/// Left unset, V8 derives the limit from system memory — so the same build
+/// aborts at ~2 GB on an 8 GB laptop and ~4 GB on a workstation, and "exit code
+/// 134" reproduced for some coworkers and not others. Setting it explicitly
+/// makes the ceiling the same everywhere, and gives the in-process heap watch
+/// (packages/core/src/memoryGuard.ts) a fixed number to measure against so it
+/// can shed idle sessions BEFORE V8 aborts. Override with ARES_DAEMON_HEAP_MB.
+fn node_heap_arg() -> String {
+    let mb = std::env::var("ARES_DAEMON_HEAP_MB")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u32>().ok())
+        .filter(|mb| (512..=32768).contains(mb))
+        .unwrap_or(4096);
+    format!("--max-old-space-size={mb}")
+}
+
 fn start_daemon(
     app: tauri::AppHandle,
     state: &DaemonState,
@@ -316,6 +333,7 @@ fn start_daemon(
     let model = clean_optional(model);
     let mut command = Command::new(&runtime.node);
     command
+        .arg(node_heap_arg())
         .arg(&runtime.cli_entry)
         .arg("daemon")
         .arg("--json")
@@ -396,7 +414,11 @@ fn start_daemon(
         let mut garrison_guard = state.garrison.lock().map_err(|_| "daemon garrison lock failed")?;
         if garrison_guard.is_none() {
             let mut garrison_cmd = Command::new(&runtime.node);
-            garrison_cmd.arg(&runtime.cli_entry).arg("garrison").arg("serve");
+            garrison_cmd
+                .arg(node_heap_arg())
+                .arg(&runtime.cli_entry)
+                .arg("garrison")
+                .arg("serve");
             #[cfg(windows)]
             {
                 garrison_cmd.creation_flags(CREATE_NO_WINDOW);
@@ -636,6 +658,8 @@ const ALLOWED_DAEMON_COMMANDS: &[&str] = &[
     // unroutable again.
     "cognitive_state", "persona_adopt", "persona_delete", "persona_style",
     "persona_write", "roster_list", "workflow_mode",
+    // Background jobs: what is running, stop one, resume a suspended one.
+    "background_list", "background_stop", "background_resume",
 ];
 
 #[tauri::command]

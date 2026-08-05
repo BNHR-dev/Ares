@@ -136,6 +136,44 @@ export interface AresEvent {
   comment?: string | null;
   spoke?: boolean;
   at?: number;
+  // daemon_memory_pressure / session_evicted — the daemon watching its own heap
+  // so the climb toward an exit-134 abort is visible instead of silent.
+  pressure?: "ok" | "elevated" | "critical";
+  usedMb?: number;
+  limitMb?: number;
+  percent?: number;
+  residentSessions?: number;
+  evictedSessions?: number;
+  idleMs?: number;
+  // interrupt_pending / interrupt_forced — how long a Stop has sat unsettled,
+  // when a second Stop escalates, and what a forced stop actually killed.
+  stalledMs?: number;
+  forceAvailableInMs?: number;
+  killed?: number;
+  // background_jobs / background_suspended — the durable shell jobs a session
+  // owns, so the desktop can show and stop them instead of the owner finding
+  // out via Task Manager.
+  jobs?: BackgroundJobVm[];
+  running?: number;
+  resumable?: number;
+  from?: string;
+}
+
+/** One durable background shell, as the daemon reports it. */
+export interface BackgroundJobVm {
+  id: string;
+  description: string;
+  command: string;
+  cwd?: string;
+  status: "running" | "exited" | "killed" | "errored" | "orphaned";
+  exitCode?: number | null;
+  startedAt?: string;
+  /** Stopped because the host went away (Stop, or the app closing). */
+  suspended?: boolean;
+  stoppedReason?: string;
+  /** Can be relaunched exactly as it was — only ever on an explicit ask. */
+  resumable?: boolean;
+  sessionId?: string;
 }
 
 export interface ConsciousnessModelVm {

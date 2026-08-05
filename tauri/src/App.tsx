@@ -31,6 +31,7 @@ import { getCurrentWindow, LogicalSize, PhysicalSize, PhysicalPosition } from "@
 // it: exploded view, assembly steps, wiring overlay, BOM with STL export.
 import { buildHolotableHtml, validateHoloSpec, type HoloSpec } from "../../packages/cli/src/holotable";
 import { redactSecrets } from "../../packages/protocol/src/secretRedact";
+import { daemonExitMessage } from "../../packages/protocol/src/daemonExit";
 import { UpdateBanner } from "./UpdateBanner";
 import { WhatsNew } from "./WhatsNew";
 import { LivingSurface } from "./LivingSurface";
@@ -52,6 +53,7 @@ import {
   type DaemonStatus,
   type PresenceMode,
   type PresenceSnapshot,
+  type BackgroundJobVm,
 } from "./state/events";
 import {
   type ReasoningLevel,
@@ -596,6 +598,9 @@ function App() {
    * allowing unresolved steer bubbles to replay once with their original ID. */
   const steerReplayEpoch = useRef(createSteerReplayEpoch());
   const stderrTail = useRef<string[]>([]);
+  /** Background jobs per session id — what's running right now, and what was
+   *  suspended when a Stop or an app close took the host away. */
+  const [bgJobs, setBgJobs] = useState<Record<string, BackgroundJobVm[]>>({});
   prefsRef.current = prefs;
 
   const active = sessions.find((s) => s.id === activeId) ?? sessions[0];
@@ -1132,6 +1137,12 @@ function App() {
     // populate the status bar's mission count + rail's disk-session log
     void invoke("ares_daemon_command", { command: { type: "operator_status" } }).catch(() => null);
     void invoke("ares_daemon_command", { command: { type: "sessions_list" } }).catch(() => null);
+    // Anything the last run left behind is suspended, not gone. Ask for it on
+    // every daemon start so picking a session back up SHOWS the offer to resume
+    // instead of the work quietly having never stopped.
+    void invoke("ares_daemon_command", {
+      command: { type: "background_list", sessionId: activeRef.current || undefined },
+    }).catch(() => null);
     // A crash can happen after SQLite admitted a steer but before Desktop saw
     // its acknowledgement. Replay every unresolved bubble with the exact same
     // identity and payload; daemon idempotency, rather than UI guesswork, then
@@ -1197,6 +1208,38 @@ function App() {
         }
         case "daemon_stdout":
           pushLog(`[stdout] ${e.text ?? ""}`);
+          return true;
+        // The daemon watching its own heap. This is the warning that used to
+        // not exist: the slowdown before exit 134 now has a number attached to
+        // it, and the log says whether shedding idle sessions helped.
+        case "daemon_memory_pressure": {
+          const evicted = typeof e.evictedSessions === "number" && e.evictedSessions > 0
+            ? ` · released ${e.evictedSessions} idle session${e.evictedSessions === 1 ? "" : "s"}`
+            : "";
+          pushLog(
+            `[garrison] memory ${e.pressure ?? ""} · ${e.percent ?? "?"}% (${e.usedMb ?? "?"}/${e.limitMb ?? "?"} MB) · ` +
+            `${e.residentSessions ?? "?"} sessions resident${evicted}`,
+          );
+          return true;
+        }
+        case "background_jobs": {
+          const sid = (e as { sessionId?: string }).sessionId ?? activeRef.current;
+          const jobs = Array.isArray(e.jobs) ? e.jobs : [];
+          setBgJobs((prev) => ({ ...prev, [sid]: jobs }));
+          return true;
+        }
+        case "background_suspended": {
+          const count = Array.isArray(e.jobs) ? e.jobs.length : 0;
+          if (count > 0) {
+            pushLog(`[garrison] suspended ${count} background job${count === 1 ? "" : "s"} · ${e.reason ?? ""}`);
+          }
+          return true;
+        }
+        case "background_stopped":
+        case "background_resumed":
+          return true;
+        case "session_evicted":
+          pushLog(`[garrison] session released from memory (idle ${Math.round((e.idleMs ?? 0) / 1000)}s) — it reloads on next use`);
           return true;
         case "interrupt_requested":
         case "interrupt_pending":
@@ -1661,13 +1704,17 @@ function App() {
           resetSteerReplayEpoch(steerReplayEpoch.current);
           pushLog(`[shell] daemon exited · code ${e.code ?? "unknown"}`);
           setDaemon("error");
-          const tail = stderrTail.current.slice(-4).join("\n");
           const attempt = restartAttempts.current;
           const willRetry = attempt < MAX_AUTO_RESTARTS;
-          const errorText =
-            `The Garrison went down (exit code ${e.code ?? "unknown"}).` +
-            (tail ? `\n${tail}` : "") +
-            (willRetry ? `\nRestarting… (attempt ${attempt + 1}/${MAX_AUTO_RESTARTS})` : "\nAuto-restart limit reached — use Restart in the status bar.");
+          // Not the last four lines — the last four lines of a V8 fatal dump
+          // are stack addresses resolved against whatever symbol sits nearest
+          // in node.exe ("AES_cbc_encrypt+152028"), which told people nothing
+          // while the line that mattered scrolled off the top.
+          const errorText = daemonExitMessage(
+            typeof e.code === "number" ? e.code : null,
+            stderrTail.current,
+            { willRetry, attempt: attempt + 1, max: MAX_AUTO_RESTARTS },
+          );
           // A daemon crash kills every in-flight turn, not just the one the
           // user is currently looking at — sweep ALL busy sessions so
           // background cards don't stay stuck forever with no error shown.
@@ -3284,6 +3331,9 @@ function App() {
             autoRouting={prefs.routingMode === "auto"}
             routedLanes={routedLanes}
             todos={active?.todos ?? []}
+            backgroundJobs={active ? bgJobs[active.id] ?? [] : []}
+            onStopBackground={(id) => daemonCmd({ type: "background_stop", id, sessionId: active?.id })}
+            onResumeBackground={(id) => daemonCmd({ type: "background_resume", id, sessionId: active?.id })}
             steerQueued={active?.steerQueued ?? 0}
             steerActivity={active?.activity}
             recoverableDrafts={active?.recoverableDrafts ?? []}
@@ -6455,6 +6505,9 @@ const Composer = React.memo(function Composer({
   autoRouting,
   routedLanes,
   todos,
+  backgroundJobs,
+  onStopBackground,
+  onResumeBackground,
   steerQueued,
   steerActivity,
   recoverableDrafts,
@@ -6472,6 +6525,9 @@ const Composer = React.memo(function Composer({
   autoRouting: boolean;
   routedLanes: RouteLane[];
   todos: Array<{ id: string; content: string; activeForm: string; status: string }>;
+  backgroundJobs: BackgroundJobVm[];
+  onStopBackground: (id: string) => void;
+  onResumeBackground: (id: string) => void;
   steerQueued: number;
   steerActivity?: string;
   recoverableDrafts: NonNullable<SessionVm["recoverableDrafts"]>;
@@ -6679,6 +6735,7 @@ const Composer = React.memo(function Composer({
   return (
     <div className="composer">
       {todos.length > 0 ? <TodoPanel todos={todos} /> : null}
+      <BackgroundPanel jobs={backgroundJobs} onStop={onStopBackground} onResume={onResumeBackground} />
       {/* Model / reasoning / routing live in the bottom HUD only — no duplicate
          control strip over the input. Just a contextual steer indicator here. */}
       {busy && steerQueued > 0 ? (
@@ -7372,6 +7429,65 @@ function DiffCard({ item }: { item: Extract<Item, { kind: "diff" }> }) {
           ))}
           {item.truncated ? <span data-kind="meta">… diff truncated</span> : null}
         </pre>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * Background jobs, where you can actually see them.
+ *
+ * This panel exists because a background job used to be completely invisible.
+ * Ares could start a dev server or a watcher, the turn would end, and the only
+ * evidence anything was still running was the machine getting slower — or, in
+ * one case, a game relaunching itself every few minutes for days. Task Manager
+ * was the UI. Now: what's running, what it is, and one click to stop it.
+ *
+ * A suspended job (the app closed, or you pressed Stop) shows its offer to
+ * resume. It never resumes on its own — that is the point.
+ */
+function BackgroundPanel({
+  jobs,
+  onStop,
+  onResume,
+}: {
+  jobs: BackgroundJobVm[];
+  onStop: (id: string) => void;
+  onResume: (id: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const running = jobs.filter((j) => j.status === "running");
+  const resumable = jobs.filter((j) => j.resumable);
+  // Finished jobs are history, not something to act on — only surface work that
+  // is live or waiting on a decision.
+  const shown = [...running, ...resumable];
+  if (shown.length === 0) return null;
+  return (
+    <div className="bgPanel" data-open={open ? "1" : "0"}>
+      <button className="bgHead" onClick={() => setOpen(!open)}>
+        <span className="bgTitle">BACKGROUND</span>
+        <span className="bgCount">
+          {running.length ? `${running.length} running` : ""}
+          {running.length && resumable.length ? " · " : ""}
+          {resumable.length ? `${resumable.length} suspended` : ""}
+        </span>
+      </button>
+      {open ? (
+        <ul>
+          {shown.map((job) => (
+            <li key={job.id} data-status={job.status} data-suspended={job.suspended ? "1" : "0"}>
+              <span className="bgDesc" title={job.command}>{job.description || job.command}</span>
+              <span className="bgState">
+                {job.suspended ? job.stoppedReason || "suspended" : "running"}
+              </span>
+              {job.status === "running" ? (
+                <button className="bgAct" onClick={() => onStop(job.id)}>Stop</button>
+              ) : job.resumable ? (
+                <button className="bgAct" onClick={() => onResume(job.id)}>Resume</button>
+              ) : null}
+            </li>
+          ))}
+        </ul>
       ) : null}
     </div>
   );

@@ -75,12 +75,12 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: "Ares ${{ github.ref_name }}"
           releaseBody: |
-            Ares 0.34.0 rebuilds the system prompt: leaner, per-model, and with the personality separated from the craft.
+            Ares 0.35.0 fixes the two things that got worse the longer you used it: the crash, and background work that never stopped.
 
-            - The prompt was one 33,819-character string sent to every model, with six sections restating the same doctrine. It is now composed from a configurable persona, a shared craft core, a per-model overlay, and the environment surfaces - 34% smaller with an overlay applied.
-            - Per-model coding overlays target each family's real failure mode: Kimi is told to act rather than describe, GPT to prefer the smallest correct change, Anthropic gets URL discipline, DeepSeek gets convergence. Resolution reads the model id as well as the provider, so an aggregator-served model still gets the right overlay.
-            - Personality is now owner-configurable: the default Ares voice, a neutral factual voice, or your own - with the engineering doctrine untouched either way.
-            - Nothing was softened. A test asserts all 25 load-bearing rules survive the cut, from "reading the code is not verification" to the ComputerUse coordinate contract.
+            - The Garrison ran out of memory and aborted (exit code 134). Every chat you sent to stayed fully loaded forever - nothing ever released one. Idle chats are now released and reloaded on demand, the daemon watches its own heap and sheds memory before it hits the ceiling, and it writes a crash record on the way down instead of dying silently.
+            - Background jobs no longer outlive their host. Pressing Stop ends the background work that turn started; closing Ares ends all of it; and starting Ares stops anything a previous run - or a crash - left behind. Each is recorded as suspended and resumable, and nothing ever restarts by itself. This is the fix for an app or game relaunching itself every few minutes with nothing on screen to explain it.
+            - You can see them now: a Background panel above the message box lists every job with Stop and Resume, and Ares gained a BackgroundTasks tool so it can list, stop and resume its own work instead of losing track of it.
+            - "The Garrison went down (exit code 134)" used to be followed by four lines of hex addresses. It now names the actual cause and what to do about it.
           releaseDraft: false
           prerelease: false
           args: --bundles nsis
@@ -144,12 +144,12 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: "Ares ${{ github.ref_name }}"
           releaseBody: |
-            Ares 0.34.0 rebuilds the system prompt: leaner, per-model, and with the personality separated from the craft.
+            Ares 0.35.0 fixes the two things that got worse the longer you used it: the crash, and background work that never stopped.
 
-            - The prompt was one 33,819-character string sent to every model, with six sections restating the same doctrine. It is now composed from a configurable persona, a shared craft core, a per-model overlay, and the environment surfaces - 34% smaller with an overlay applied.
-            - Per-model coding overlays target each family's real failure mode: Kimi is told to act rather than describe, GPT to prefer the smallest correct change, Anthropic gets URL discipline, DeepSeek gets convergence. Resolution reads the model id as well as the provider, so an aggregator-served model still gets the right overlay.
-            - Personality is now owner-configurable: the default Ares voice, a neutral factual voice, or your own - with the engineering doctrine untouched either way.
-            - Nothing was softened. A test asserts all 25 load-bearing rules survive the cut, from "reading the code is not verification" to the ComputerUse coordinate contract.
+            - The Garrison ran out of memory and aborted (exit code 134). Every chat you sent to stayed fully loaded forever - nothing ever released one. Idle chats are now released and reloaded on demand, the daemon watches its own heap and sheds memory before it hits the ceiling, and it writes a crash record on the way down instead of dying silently.
+            - Background jobs no longer outlive their host. Pressing Stop ends the background work that turn started; closing Ares ends all of it; and starting Ares stops anything a previous run - or a crash - left behind. Each is recorded as suspended and resumable, and nothing ever restarts by itself. This is the fix for an app or game relaunching itself every few minutes with nothing on screen to explain it.
+            - You can see them now: a Background panel above the message box lists every job with Stop and Resume, and Ares gained a BackgroundTasks tool so it can list, stop and resume its own work instead of losing track of it.
+            - "The Garrison went down (exit code 134)" used to be followed by four lines of hex addresses. It now names the actual cause and what to do about it.
           releaseDraft: false
           prerelease: false
           args: --bundles appimage,deb

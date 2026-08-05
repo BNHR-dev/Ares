@@ -1,6 +1,11 @@
 // Extracted from entry.ts — daemon.
 
-import { authStatus, listSessions, loadSessionSnapshot, loadSessionRollout, deleteSession, renameSession, SessionNotFoundError, type Provider, classifyLane, runAnthropicLoginFlow, loadAnthropicTokens, sideQuery, sideQueryJson, QueryEngine, installGlobalCrashHandlers, EventRing, openWorkspaceSessionKernel, probeCredentialEncryption, connectMcpServer, disconnectMcpServer, setMcpServerEnabled, connectorNameFromUrl, runOpenAILoginFlow, runKimiLoginFlow, kimiAuthStatus } from "@ares/core";
+/** How long an accepted-but-unsettled Stop must sit before a second Stop is
+ *  allowed to force-kill what the turn is blocked on. Long enough that an
+ *  ordinary unwind finishes first; short enough that nobody waits forever. */
+const FORCE_STOP_AFTER_MS = 12_000;
+
+import { authStatus, listSessions, loadSessionSnapshot, loadSessionRollout, deleteSession, renameSession, SessionNotFoundError, type Provider, classifyLane, runAnthropicLoginFlow, loadAnthropicTokens, sideQuery, sideQueryJson, QueryEngine, installGlobalCrashHandlers, EventRing, HeapGuard, readHeapSample, writeCrashLogSync, openWorkspaceSessionKernel, probeCredentialEncryption, connectMcpServer, disconnectMcpServer, setMcpServerEnabled, connectorNameFromUrl, runOpenAILoginFlow, runKimiLoginFlow, kimiAuthStatus } from "@ares/core";
 import { appendFile, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -64,6 +69,9 @@ export { applyEngineConfigEnv, type ManualReminderSource } from "./daemon/engine
 export { parseSurfaces, inferSkillProvides } from "./daemon/skills.js";
 
 export async function daemonCommand(args: ParsedArgs): Promise<number> {
+  /** When THIS host started. The fence between "work a previous Ares left
+   *  running" and work a live sibling host owns. */
+  const hostStartedAt = Date.now();
   if (args.flags.get("json") !== "true" && !args.flags.has("json")) {
     process.stderr.write("error: daemon currently requires --json\n");
     return 2;
@@ -225,6 +233,9 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
     /** Stop was accepted; no new send may be inferred as steering until the
      * owner generator and its post-turn settlement have actually unwound. */
     cancelRequested: boolean;
+    /** When Stop was accepted — a Stop that never settles becomes force-eligible. */
+    cancelRequestedAt?: number;
+    forceStopRequested?: boolean;
     /** Steers admitted against the active turn and not yet acknowledged. */
     pendingSteerInputIds: Set<string>;
     /** Admission/drain tasks, including the rare steer that becomes the next
@@ -272,6 +283,12 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
      *  "Back to Ares" survives the next message instead of being undone by the
      *  first keyword that matches. */
     personaGate: PersonaGate;
+    /** Last time anything touched this session. Drives idle eviction — a
+     *  resident session is a whole transcript held in memory. */
+    lastActiveAt: number;
+    /** When the active turn began. Scopes an interrupt's background sweep to
+     *  the work that turn started. */
+    turnStartedAt?: number;
   }
   const DEFAULT_SID = "__primary__";
   const sessions = new Map<string, DaemonEntry>();
@@ -292,6 +309,7 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
     startupRecoveryPreparing: false,
     startupRecoveryCancelRequested: false,
     personaGate: newPersonaGate(),
+    lastActiveAt: Date.now(),
   };
   let mainSelection = live.selection;
   let mainProviderFamily = providerFamilyForSelection(live.selection);
@@ -335,6 +353,164 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
     const payload = sessionId && sessionId !== DEFAULT_SID ? { ...obj, sessionId } : obj;
     eventRing.record({ at: Date.now(), ...payload });
     process.stdout.write(JSON.stringify(payload) + "\n");
+  };
+
+  // ─── Resident-session ceiling ────────────────────────────────────────────
+  //
+  // Every session the desktop touches gets a LIVE session here — engine,
+  // full message history, tool surfaces, verifier, agent runtime — and until
+  // now nothing ever removed one. Only `session delete` called sessions.delete.
+  // So a day of clicking through the rail meant every transcript ever opened,
+  // screenshots and tool output included, resident at once. That is the climb
+  // behind "the more I use it the slower it gets", and the heap limit behind
+  // exit 134.
+  //
+  // Eviction is not deletion: the session is on disk, and resolveEntry rebuilds
+  // it on the next command through the SAME path a daemon restart uses. The
+  // cost is one rehydration; the alternative is the process dying.
+  const MAX_RESIDENT_SESSIONS = Math.max(2, Number(process.env.ARES_MAX_RESIDENT_SESSIONS) || 6);
+  const SESSION_IDLE_MS = Math.max(60_000, Number(process.env.ARES_SESSION_IDLE_MS) || 15 * 60_000);
+  /** Never evict something that just happened — a resolve is often followed
+   *  immediately by the command that resolved it. */
+  const EVICT_FLOOR_MS = 45_000;
+
+  /**
+   * Evictable = idle AND holding nothing the daemon still owes an answer for.
+   * Every one of these fields is a promise to the surface (a turn mid-flight, a
+   * steer awaiting acknowledgement, a recovered input not yet re-admitted);
+   * dropping the session under any of them would strand it.
+   */
+  const isEvictable = (entry: DaemonEntry): boolean =>
+    entry !== primaryEntry &&
+    !entry.turnActive &&
+    !entry.cancelRequested &&
+    !entry.successorHandoff &&
+    entry.pendingSteerInputIds.size === 0 &&
+    entry.pendingSteerTasks.size === 0 &&
+    entry.preparingSteers.size === 0 &&
+    entry.deferredSteers.size === 0 &&
+    entry.activeToolIds.size === 0 &&
+    entry.steeringPhase === "idle" &&
+    !entry.startupRecoveryInputId &&
+    !entry.startupRecoveryPreparing &&
+    entry.startupRecoveryQueue.length === 0;
+
+  const evictSession = (sid: string, entry: DaemonEntry, reason: string, idleMs: number): void => {
+    sessions.delete(sid);
+    // Release process-local helpers. Durable background jobs deliberately
+    // survive this (same posture as any other host teardown) — an evicted
+    // session is a session that is still very much alive on disk.
+    void disposeLiveSession(entry.live).catch(() => undefined);
+    tagEmit(sid, {
+      type: "session_evicted",
+      reason,
+      idleMs,
+      residentSessions: sessions.size,
+    });
+  };
+
+  /**
+   * Drop idle sessions: everything past the idle deadline, then — oldest
+   * first — whatever it takes to get back under the resident ceiling. Under
+   * heap pressure the deadline collapses to the floor, because at that point a
+   * rehydration is cheaper than an abort. Returns how many were evicted.
+   */
+  const evictIdleSessions = (reason: "idle" | "heap-pressure"): number => {
+    const now = Date.now();
+    const pressured = reason === "heap-pressure";
+    const deadline = pressured ? EVICT_FLOOR_MS : SESSION_IDLE_MS;
+    const candidates = [...sessions.entries()]
+      .filter(([, entry]) => isEvictable(entry))
+      .sort((a, b) => a[1].lastActiveAt - b[1].lastActiveAt);
+
+    let evicted = 0;
+    const remaining: Array<[string, DaemonEntry]> = [];
+    for (const [sid, entry] of candidates) {
+      const idleMs = now - entry.lastActiveAt;
+      if (idleMs >= deadline) {
+        evictSession(sid, entry, reason, idleMs);
+        evicted++;
+      } else {
+        remaining.push([sid, entry]);
+      }
+    }
+    // Still over the ceiling? Keep taking from the oldest end. The floor holds
+    // even here: a session touched seconds ago is about to be used.
+    for (const [sid, entry] of remaining) {
+      if (sessions.size <= MAX_RESIDENT_SESSIONS) break;
+      const idleMs = now - entry.lastActiveAt;
+      if (idleMs < EVICT_FLOOR_MS) continue;
+      evictSession(sid, entry, `${reason}:over-capacity`, idleMs);
+      evicted++;
+    }
+    return evicted;
+  };
+
+  // ─── Background work: visible, stoppable, and never outliving its host ────
+  //
+  // A background shell runs behind a DETACHED supervisor, on purpose: that is
+  // what makes it survive a daemon restart and stay pollable. The bug was that
+  // it survived EVERYTHING — Stop, the app closing, the machine sitting idle
+  // overnight — while being impossible to see or stop from the UI. One
+  // dev-server job kept relaunching a game every few minutes for days.
+  //
+  // The rule now: a background job may outlive a RESTART, but never its host.
+  // On Stop we suspend what that turn started; on shutdown we suspend
+  // everything. Suspended is not cancelled — the record keeps the launch
+  // request, reads as resumable, and is relaunched only when a human or the
+  // model explicitly asks. Nothing ever resumes by itself.
+
+  /** Every non-terminal background job the daemon knows about, newest first. */
+  const backgroundJobsFor = (sid: string, entry: DaemonEntry): Array<Record<string, unknown>> => {
+    try {
+      return entry.live.shellRegistry.list(entry.live.session.meta.id).map((job) => ({ ...job, sessionId: sid }));
+    } catch {
+      return [];
+    }
+  };
+
+  const emitBackgroundJobs = (sessionId: string | undefined, entry: DaemonEntry): void => {
+    const jobs = backgroundJobsFor(sessionId ?? entry.live.session.meta.id, entry);
+    tagEmit(sessionId, {
+      type: "background_jobs",
+      jobs,
+      running: jobs.filter((job) => job.status === "running").length,
+      resumable: jobs.filter((job) => job.resumable === true).length,
+    });
+  };
+
+  /**
+   * Stop background work on the host's behalf and say so.
+   *
+   * `since` scopes it to work a specific turn started, so an interrupted turn
+   * takes its own launches down with it and leaves alone the dev server the
+   * user deliberately started an hour ago.
+   */
+  const suspendBackgroundWork = async (
+    reason: string,
+    entries: DaemonEntry[],
+    opts: { since?: number; sessionId?: string } = {},
+  ): Promise<number> => {
+    let stopped = 0;
+    for (const entry of entries) {
+      try {
+        const suspended = await entry.live.shellRegistry.suspendForSession(
+          entry.live.session.meta.id,
+          { reason, ...(opts.since !== undefined ? { since: opts.since } : {}) },
+        );
+        if (suspended.length === 0) continue;
+        stopped += suspended.length;
+        tagEmit(opts.sessionId, {
+          type: "background_suspended",
+          reason,
+          count: suspended.length,
+          jobs: suspended.map((job) => ({ id: job.id, description: job.description, command: job.command, resumable: job.resumable === true })),
+        });
+      } catch {
+        // Shutdown must never fail on a job that refuses to die.
+      }
+    }
+    return stopped;
   };
 
   // OS known folders for natural-language drive-workspace rebinding. Resolved
@@ -401,6 +577,101 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
         JSON.stringify({ type: "daemon_crash", kind: notice.kind, message: notice.message, logFile: notice.logFile }) + "\n",
       ),
   });
+
+  // Boot sweep. Anything still "running" from before this process started
+  // belongs to a host that no longer exists — usually one that crashed, since
+  // the clean-shutdown path suspends its own work. Those are the jobs that kept
+  // relaunching a game across restarts: every new host found them already
+  // running and left them alone. They stop here, resumable, and the UI is told.
+  void (async () => {
+    try {
+      const abandoned = await live.shellRegistry.suspendAbandoned({
+        before: hostStartedAt,
+        reason: "left running by a previous Ares",
+      });
+      if (abandoned.length > 0) {
+        tagEmit(undefined, {
+          type: "background_suspended",
+          reason: "left running by a previous Ares",
+          count: abandoned.length,
+          jobs: abandoned.map((job) => ({ id: job.id, description: job.description, command: job.command, resumable: job.resumable === true })),
+        });
+      }
+    } catch {
+      // A boot must never fail on cleanup.
+    }
+  })();
+
+  // ─── Heap watch: the crash that could never leave a note ──────────────────
+  //
+  // `The Garrison went down (exit code 134)` is V8 aborting on the heap limit.
+  // That abort does NOT run uncaughtException, so the crash handler above never
+  // fires and ~/.ares/crashes stays empty for the one crash we most need a
+  // record of. And the slowdown people describe BEFORE it ("the more I use it
+  // the slower it gets") is the GC thrashing against a ceiling nobody measured.
+  //
+  // So we measure it ourselves, from the inside, while the process is still
+  // alive enough to act: say so on the way up, shed idle sessions at the top,
+  // and write the artifact the abort itself never could.
+  const heapGuard = new HeapGuard({
+    elevatedRatio: Number(process.env.ARES_HEAP_WARN_RATIO) || 0.72,
+    criticalRatio: Number(process.env.ARES_HEAP_CRITICAL_RATIO) || 0.86,
+  });
+  {
+    const heapWatch = setInterval(() => {
+      try {
+        const verdict = heapGuard.observe(readHeapSample(), Date.now());
+        let relief: { evicted: number; residentSessions: number } | undefined;
+        if (verdict.shouldRelieve) {
+          relief = { evicted: evictIdleSessions("heap-pressure"), residentSessions: sessions.size };
+          // The last chance to leave a diagnosable trail. An abort a few
+          // seconds from now writes nothing at all.
+          writeCrashLogSync(live.context.home, {
+            at: new Date().toISOString(),
+            kind: "manual",
+            process: "daemon",
+            message: `heap pressure ${Math.round(verdict.ratio * 100)}% (${verdict.usedMb}MB / ${verdict.limitMb}MB)`,
+            context: {
+              reason: "heap-critical",
+              ...verdict,
+              ...relief,
+              activeTurns,
+              sessionIds: [...sessions.keys()],
+            },
+            recentEvents: eventRing.snapshot(),
+          });
+        }
+        if (verdict.shouldReport) {
+          tagEmit(undefined, {
+            type: "daemon_memory_pressure",
+            pressure: verdict.pressure,
+            usedMb: verdict.usedMb,
+            limitMb: verdict.limitMb,
+            percent: Math.round(verdict.ratio * 100),
+            residentSessions: sessions.size,
+            ...(relief ? { evictedSessions: relief.evicted } : {}),
+          });
+        }
+      } catch {
+        // A diagnostic must never be the thing that kills the process.
+      }
+    }, Math.max(5_000, Number(process.env.ARES_HEAP_WATCH_MS) || 15_000));
+    heapWatch.unref?.();
+  }
+
+  // Routine hygiene at a much lower frequency than the heap watch: a session
+  // nobody has touched in a while is a full resident transcript (plus its tool
+  // surfaces, verifier and agent runtime) held for nothing.
+  {
+    const idleSweep = setInterval(() => {
+      try {
+        evictIdleSessions("idle");
+      } catch {
+        // best-effort
+      }
+    }, 60_000);
+    idleSweep.unref?.();
+  }
 
   // ─── Consciousness: the always-on local watcher ──────────────────────────
   const consciousnessWatch = new ConsciousnessWatch({
@@ -559,9 +830,17 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
 
   const resolveEntry = async (sessionId: string | undefined): Promise<DaemonEntry> => {
     const sid = sessionId || DEFAULT_SID;
-    if (sid === DEFAULT_SID) return primaryEntry;
+    if (sid === DEFAULT_SID) {
+      primaryEntry.lastActiveAt = Date.now();
+      return primaryEntry;
+    }
     const existing = sessions.get(sid);
-    if (existing) return existing;
+    if (existing) {
+      // Every command for a session comes through here, so this is the one
+      // place idleness has to be marked.
+      existing.lastActiveAt = Date.now();
+      return existing;
+    }
     // A RESUMED card must come back on ITS OWN saved provider+model pair. The
     // daemon's main lane is a moving target (failover and model switches mutate
     // it), and pairing main's provider with another session's model built
@@ -618,8 +897,12 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
       startupRecoveryPreparing: false,
       startupRecoveryCancelRequested: false,
       personaGate: newPersonaGate(),
+      lastActiveAt: Date.now(),
     };
     sessions.set(sid, entry);
+    // Opening one more session is the moment to check we are not hoarding the
+    // last twenty — before the new transcript is loaded on top of them.
+    evictIdleSessions("idle");
     tagEmit(sid, { type: "session_opened", model: fresh.selection.model, provider: fresh.selection.provider.name });
     await prepareDaemonStartupRecovery(entry, sid);
     return entry;
@@ -1055,9 +1338,43 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
       return;
     }
     if (entry.cancelRequested) {
+      // A Stop that was already accepted but has NOT settled. Synthesising a
+      // completion here would be a lie (the tool generator may still be mid
+      // side effect), but leaving the owner with no exit is worse: a turn whose
+      // subprocess was killed out from under it never unwinds, and the UI sits
+      // on "stopping safely" forever with no way out. So: disclose, and after a
+      // grace period let a SECOND Stop escalate to a real forced abort.
+      const since = Date.now() - (entry.cancelRequestedAt ?? Date.now());
+      if (since >= FORCE_STOP_AFTER_MS) {
+        entry.forceStopRequested = true;
+        const stalledInputId = entry.activeInputId;
+        // onInterrupt is a synchronous callback — the kill runs detached and
+        // reports when it lands. This is the honest version of "force": we do
+        // not claim the turn ended cleanly, we end the thing holding it and
+        // say exactly that.
+        void entry.live.shellRegistry
+          .killAllForSession(entry.live.session.meta.id)
+          .catch(() => 0)
+          .then((killed) => {
+            entry.live.session.interrupt(stalledInputId);
+            tagEmit(command.sessionId, {
+              type: "interrupt_forced",
+              inputId: stalledInputId,
+              killed,
+              error:
+                `Stop did not settle after ${Math.round(since / 1000)}s, so the turn's running processes were force-killed (${killed}). ` +
+                `Any side effect already in flight may be incomplete — check the workspace before continuing.`,
+            });
+          });
+        return;
+      }
       tagEmit(command.sessionId, {
         type: "interrupt_pending",
         inputId: entry.activeInputId,
+        stalledMs: since,
+        // Tell the surface when a second Stop becomes a force-stop, so it can
+        // offer that instead of spinning silently.
+        forceAvailableInMs: Math.max(0, FORCE_STOP_AFTER_MS - since),
       });
       return;
     }
@@ -1067,6 +1384,7 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
     // can still own routing/post-turn work. Gate fresh sends until finally
     // releases turnActive so they cannot be inferred as late steering.
     entry.cancelRequested = true;
+    entry.cancelRequestedAt = Date.now();
     for (const [steerInputId, steer] of entry.preparingSteers) {
       tagEmit(steer.sessionId, {
         type: "steer_cancelled",
@@ -1086,6 +1404,18 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
     tagEmit(command.sessionId, {
       type: accepted ? "interrupt_requested" : "interrupt_pending",
       inputId,
+    });
+    // Stop means stop — including the work this turn pushed into the background.
+    // A backgrounded launch is still this turn's side effect; leaving it running
+    // after the user pressed Stop is how "I cancelled it and it kept going"
+    // happens. Scoped to jobs this turn started, so a dev server the user asked
+    // for an hour ago is left alone. Detached from the synchronous callback; the
+    // suspension announces itself when it lands.
+    void suspendBackgroundWork("turn interrupted", [entry], {
+      since: entry.turnStartedAt,
+      sessionId: command.sessionId,
+    }).then((stopped) => {
+      if (stopped > 0) emitBackgroundJobs(command.sessionId, entry);
     });
     // Do not synthesize completion on a timer. The Session owns a FIFO run lease
     // and remains busy until the provider/tool generator actually unwinds; a UI
@@ -1603,6 +1933,40 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
         } catch (err) {
           process.stdout.write(JSON.stringify({ type: "daemon_error", error: `session_history: ${err instanceof Error ? err.message : String(err)}` }) + "\n");
         }
+        continue;
+      }
+      // ─── Background jobs, from the UI ──────────────────────────────────
+      // The desktop can now SEE this: what is running, what was suspended when
+      // the app closed, and one click each to stop or resume. Before this, the
+      // only surface for a runaway background job was Task Manager.
+      if (
+        command.type === "background_list" ||
+        command.type === "background_stop" ||
+        command.type === "background_resume"
+      ) {
+        const entry = await resolveEntry(command.sessionId).catch(() => undefined);
+        if (!entry) {
+          process.stdout.write(JSON.stringify({ type: "daemon_error", error: `${command.type}: unknown session` }) + "\n");
+          continue;
+        }
+        const jobId = cleanCommandId(command.id);
+        try {
+          if (command.type === "background_stop") {
+            if (!jobId) throw new Error("background_stop requires id");
+            const killed = await entry.live.shellRegistry.kill(jobId, "user", entry.live.session.meta.id);
+            tagEmit(command.sessionId, { type: "background_stopped", id: jobId, ok: killed });
+          } else if (command.type === "background_resume") {
+            if (!jobId) throw new Error("background_resume requires id");
+            const resumed = await entry.live.shellRegistry.resume(jobId, entry.live.session.meta.id);
+            tagEmit(command.sessionId, { type: "background_resumed", id: resumed.id, from: jobId, status: resumed.status });
+          }
+        } catch (err) {
+          tagEmit(command.sessionId, {
+            type: "daemon_error",
+            error: `${command.type}: ${err instanceof Error ? err.message : String(err)}`,
+          });
+        }
+        emitBackgroundJobs(command.sessionId, entry);
         continue;
       }
       if (command.type === "mcp_list") {
@@ -2637,6 +3001,9 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
       const inputDelivery = canonicalInput?.delivery ?? (idleSteer ? "steer" : "queue");
       entry.turnActive = true;
       entry.activeInputId = inputId;
+      // The fence for "background work THIS turn started" — what a Stop takes
+      // down with it, leaving earlier jobs the user chose to keep alone.
+      entry.turnStartedAt = Date.now();
       entry.cancelRequested = inheritedHandoffCancellation;
       if (successorHandoff) entry.successorHandoff = undefined;
       entry.steeringPhase = "preparing";
@@ -3142,6 +3509,10 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
             });
           }
           await scheduleNextStartupRecovery(entry);
+          // Whatever the turn left running is now the user's to see. This is the
+          // event the background panel folds; a turn that walks away from a live
+          // job can no longer do it quietly.
+          emitBackgroundJobs(command.sessionId, entry);
           tagEmit(command.sessionId, {
             type: "turn_settled",
             inputId,
@@ -3165,6 +3536,13 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
     }
     // Tear down every session (the primary owns the shared mind loop).
     const allEntries = sessions.size > 0 ? [...sessions.values()] : [primaryEntry];
+    // NOTHING OUTLIVES THE HOST. Background supervisors are detached and
+    // unref'd — closing Ares used to leave them running forever, invisible,
+    // with no window to stop them from. That is how a dev server kept
+    // relaunching a game for days after the app was closed. Stop them here,
+    // marked resumable, so picking the session back up OFFERS the work instead
+    // of it having never stopped.
+    await suspendBackgroundWork("Ares closed", allEntries);
     for (const entry of allEntries) {
       try {
         await disposeLiveSession(entry.live);

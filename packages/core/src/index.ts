@@ -488,6 +488,15 @@ export {
 } from "./crashLog.js";
 
 export {
+  HeapGuard,
+  readHeapSample,
+  type HeapPressure,
+  type HeapSample,
+  type HeapVerdict,
+  type HeapGuardOptions,
+} from "./memoryGuard.js";
+
+export {
   parsePatch,
   parsePatchText,
   PatchParseError,

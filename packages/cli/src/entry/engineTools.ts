@@ -2,7 +2,7 @@
 
 import { AresSubagentRunner, SubagentRegistry, openWorkspaceSessionKernel, type EngineTool, type QueryEngineConfig, type SessionKernelStore, type ToolCallContext } from "@ares/core";
 import path from "node:path";
-import { DEFAULT_TOOLS, ReadTool, WriteTool, EditTool, ApplyPatchTool, ApplyIntentTool, GlobTool, GrepTool, CodebaseSearchTool, LspTool, PowerShellTool, BashTool, FindAndEditTool, CodeModeTool, adaptToolForEngine, buildTool, makeTodoWriteTool, makeTaskTool, makeTaskOutputTool, makeKillTaskTool, makeConductorTool, makeCodingBackendTool, makeWebFetchTool, makeWebSearchTool, makeImageSearchTool, makeBashOutputTool, makeKillShellTool, makeEnterPlanModeTool, makeUpdatePlanDraftTool, makeExitPlanModeTool, TodoStore, ShellRegistry, type RichToolContext, type FileReadStamp, type PathPermissionStore, type CommandPermissionStore, type PlanModeState } from "@ares/tools";
+import { DEFAULT_TOOLS, ReadTool, WriteTool, EditTool, ApplyPatchTool, ApplyIntentTool, GlobTool, GrepTool, CodebaseSearchTool, LspTool, PowerShellTool, BashTool, FindAndEditTool, CodeModeTool, adaptToolForEngine, buildTool, makeTodoWriteTool, makeTaskTool, makeTaskOutputTool, makeKillTaskTool, makeConductorTool, makeCodingBackendTool, makeWebFetchTool, makeWebSearchTool, makeImageSearchTool, makeBashOutputTool, makeKillShellTool, makeBackgroundTasksTool, makeEnterPlanModeTool, makeUpdatePlanDraftTool, makeExitPlanModeTool, TodoStore, ShellRegistry, type RichToolContext, type FileReadStamp, type PathPermissionStore, type CommandPermissionStore, type PlanModeState } from "@ares/tools";
 import { z } from "zod";
 import { decidePermission } from "../permissionPolicy.js";
 import { loadUiSettings } from "../uiSettings.js";
@@ -238,6 +238,7 @@ export async function buildEngineTools(
     makeWebFetchTool(selection.subModel),
     makeBashOutputTool(shellRegistry),
     makeKillShellTool(shellRegistry),
+    makeBackgroundTasksTool(shellRegistry),
     makeEnterPlanModeTool((call) => planModeStateFor(call.sessionId)),
     makeUpdatePlanDraftTool((call) => planModeStateFor(call.sessionId)),
     makeExitPlanModeTool((call) => planModeStateFor(call.sessionId)),
@@ -429,7 +430,9 @@ export async function buildCodingTools(
     FindAndEditTool,
     CodeModeTool,
     makeTodoWriteTool(todoStore),
-    ...(options.shell === false ? [] : [makeBashOutputTool(shellRegistry), makeKillShellTool(shellRegistry)]),
+    ...(options.shell === false
+      ? []
+      : [makeBashOutputTool(shellRegistry), makeKillShellTool(shellRegistry), makeBackgroundTasksTool(shellRegistry)]),
     makeEnterPlanModeTool(runtime),
     makeUpdatePlanDraftTool(runtime),
     makeExitPlanModeTool(runtime),
