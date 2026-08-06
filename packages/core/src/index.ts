@@ -107,6 +107,7 @@ export {
   type FleetSpec,
   type FleetPhaseSpec,
   type FleetAgentSpec,
+  type FleetPersonaDef,
   type FleetReduce,
   type FleetResult,
   type PhaseResult,

@@ -2615,8 +2615,12 @@ export class SessionKernelStore {
         this.db.exec(`RELEASE SAVEPOINT ${savepoint}`);
         return result;
       } catch (error) {
-        this.db.exec(`ROLLBACK TO SAVEPOINT ${savepoint}`);
-        this.db.exec(`RELEASE SAVEPOINT ${savepoint}`);
+        try {
+          this.db.exec(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+          this.db.exec(`RELEASE SAVEPOINT ${savepoint}`);
+        } catch {
+          // Preserve the original write failure.
+        }
         throw error;
       } finally {
         this.transactionDepth -= 1;

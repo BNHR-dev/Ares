@@ -2375,13 +2375,11 @@ export class QueryEngine {
                 // just burns another 90s of dead air. Shrink the history window
                 // and go again instead (bug report 4a8ac088: 90s×2+ of silence).
                 if (transientRetry >= 2 && !sawCommittedOutput && attempt < budgetAttempts.length - 1) {
-                  // Repeated stalls at this size are the provider choking on the
-                  // prompt — remember the working ceiling so later iterations
-                  // start below it instead of stalling here again.
-                  this.learnedContextCeiling = Math.min(
-                    this.learnedContextCeiling ?? Number.POSITIVE_INFINITY,
-                    rawBudgetAttempts[attempt + 1],
-                  );
+                  // Shrink THIS attempt only — a stall is not evidence about
+                  // prompt size (brownouts, sleep/wake, slow prefill all stall),
+                  // so it must never teach a persistent ceiling. Learning here
+                  // ratcheted sessions down to a few thousand tokens after one
+                  // bad provider outage, with no recovery path.
                   yield {
                     type: "system_reminder_injected",
                     text: `Provider stalled ${transientRetry} times at this prompt size; retrying with a smaller recent-history window (${budgetAttempts[attempt + 1].toLocaleString()} tokens).`,
@@ -2441,11 +2439,18 @@ export class QueryEngine {
             attempt < budgetAttempts.length - 1
           ) {
             // Hard evidence of the provider's real limit — remember it so the
-            // next iteration's ladder starts at a rung that can fit.
-            this.learnedContextCeiling = Math.min(
-              this.learnedContextCeiling ?? Number.POSITIVE_INFINITY,
-              rawBudgetAttempts[attempt + 1],
-            );
+            // next iteration's ladder starts at a rung that can fit. Floored:
+            // a ceiling below 16k would put compaction's target under its own
+            // keep-floor (compaction would then fire every single turn), and no
+            // real serving layer rejects 16k prompts — below that, shrink this
+            // attempt without persisting.
+            const learnedRung = rawBudgetAttempts[attempt + 1];
+            if (learnedRung >= 16_000) {
+              this.learnedContextCeiling = Math.min(
+                this.learnedContextCeiling ?? Number.POSITIVE_INFINITY,
+                learnedRung,
+              );
+            }
             yield {
               type: "system_reminder_injected",
               text: `Provider rejected the prompt as too large; retrying with a smaller recent-history window (${budgetAttempts[attempt + 1].toLocaleString()} tokens).`,

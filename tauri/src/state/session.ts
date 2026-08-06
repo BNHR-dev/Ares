@@ -237,14 +237,28 @@ export interface FleetAgentVm {
   activity?: string;
   resumed?: boolean;
 }
+/** Per-phase status folded from phase_start/phase_end fleet_activity events.
+ *  Rendered as the phase group header's pip + deliverable checklist — phases
+ *  are never agent rows. */
+export interface FleetPhaseVm {
+  kind?: string;
+  build?: boolean;
+  status?: string;
+  failureReason?: string;
+  deliverables?: Array<{ pattern: string; met: boolean }>;
+}
 export interface FleetVm {
   active: boolean;
   /** The runFleet id — lets the UI offer a resume of an aborted run. */
   fleetId?: string;
+  /** The fleet's mission statement (≤200 chars), from fleet_start. */
+  goal?: string;
   /** Set on turn-end when the fleet left failed/incomplete leaves behind. */
   canResume?: boolean;
   /** Insertion-ordered agents keyed by agentId. */
   agents: Array<{ id: string } & FleetAgentVm>;
+  /** Phase status keyed by phase id (from phase_start/phase_end). */
+  phases?: Record<string, FleetPhaseVm>;
 }
 
 export let keySeq = 0;

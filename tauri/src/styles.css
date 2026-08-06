@@ -497,6 +497,31 @@ a:hover { border-bottom-color: var(--bronze-hi); }
 .railProjectHeader:hover { color: var(--muted); }
 .sessionActions .rowBtn[data-project="1"] { color: var(--accent, inherit); }
 
+/* Transcript window: the walk-back control for long sessions. */
+.showEarlier {
+  display: block;
+  margin: 10px auto 14px;
+  padding: 6px 14px;
+  border: 1px solid var(--line, rgba(255, 255, 255, 0.12));
+  border-radius: 999px;
+  background: none;
+  color: var(--muted);
+  font: 600 11px/1 var(--mono);
+  letter-spacing: 0.08em;
+  cursor: pointer;
+}
+.showEarlier:hover { color: var(--fg, inherit); }
+
+/* Full-size view of a transcript image thumbnail. */
+.imageLightbox {
+  position: fixed; inset: 0; z-index: 220;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, 0.82);
+  cursor: zoom-out;
+}
+.imageLightbox img { max-width: 92vw; max-height: 92vh; object-fit: contain; }
+canvas.bubbleImage { cursor: zoom-in; }
+
 .railNav { display: grid; gap: 3px; }
 .railNav button {
   display: flex; align-items: center; gap: 10px;

@@ -15,7 +15,21 @@ test("non-1M families keep their real windows", () => {
   assert.equal(modelContextWindow("claude-sonnet-4-6"), 200_000);
   assert.equal(modelContextWindow("claude-haiku-4-5-20251001"), 200_000);
   assert.equal(modelContextWindow("glm-5"), 200_000);
-  assert.equal(modelContextWindow("deepseek-v3.1"), 160_000);
+  // V3.x is a 128k family — the old 160k/1M figures caused hard 400s.
+  assert.equal(modelContextWindow("deepseek-v3.1"), 128_000);
+  assert.equal(modelContextWindow("deepseek-v3.2"), 128_000);
+  assert.equal(modelContextWindow("deepseek-r1:671b"), 128_000);
+});
+
+test("openai families: gpt-5 400k, gpt-4.1 1M, o3/o4 200k, gpt-4o 128k", () => {
+  assert.equal(modelContextWindow("gpt-5"), 400_000);
+  assert.equal(modelContextWindow("gpt-5-mini"), 400_000);
+  assert.equal(modelContextWindow("gpt-4.1"), 1_000_000);
+  assert.equal(modelContextWindow("o3"), 200_000);
+  assert.equal(modelContextWindow("o4-mini"), 200_000);
+  assert.equal(modelContextWindow("gpt-4o"), 128_000);
+  assert.equal(modelContextWindow("gpt-4-turbo"), 128_000);
+  assert.equal(modelContextWindow("gpt-oss-120b"), 128_000);
 });
 
 test("budget: giant windows use a cost-safe 192k working set unless explicitly raised", () => {

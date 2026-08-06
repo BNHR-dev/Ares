@@ -660,6 +660,8 @@ const ALLOWED_DAEMON_COMMANDS: &[&str] = &[
     "persona_write", "roster_list", "workflow_mode",
     // Background jobs: what is running, stop one, resume a suspended one.
     "background_list", "background_stop", "background_resume",
+    // Agent visibility: HELM's fleet history + durable background subagents.
+    "fleets_list", "subagents_list",
 ];
 
 #[tauri::command]
@@ -1997,11 +1999,23 @@ fn push_event_parts(
 ) {
     let seq = next_event_seq.fetch_add(1, Ordering::SeqCst);
     let buffered = BufferedEvent { seq, event };
-    if let Ok(mut buffer) = events.lock() {
-        buffer.push(buffered.clone());
-        let extra = buffer.len().saturating_sub(1200);
-        if extra > 0 {
-            buffer.drain(0..extra);
+    // Live browser frames are transient telemetry: replaying a stale frame
+    // after a reconnect is useless, and each one carries a fat base64 JPEG —
+    // buffering them pinned hundreds of MB in Ares.exe during long automation
+    // runs (the buffer caps by COUNT, not bytes). Emit live, never buffer.
+    let is_transient_frame = buffered
+        .event
+        .get("data")
+        .and_then(|data| data.get("kind"))
+        .and_then(|kind| kind.as_str())
+        == Some("browser_frame");
+    if !is_transient_frame {
+        if let Ok(mut buffer) = events.lock() {
+            buffer.push(buffered.clone());
+            let extra = buffer.len().saturating_sub(1200);
+            if extra > 0 {
+                buffer.drain(0..extra);
+            }
         }
     }
     // The webview listens ONLY to ares:event-buffered (seq carries ordering +

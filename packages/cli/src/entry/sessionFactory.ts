@@ -260,8 +260,12 @@ export async function handleReasoningCommand(
  */
 export function modelContextWindow(modelId: string): number {
   const id = (modelId ?? "").toLowerCase();
-  if (/deepseek-v4|v4-pro|v4-flash|deepseek-v3\.2/.test(id)) return 1_000_000;
-  if (/deepseek-v3\.1|671b/.test(id)) return 160_000;
+  if (/deepseek-v4|v4-pro|v4-flash/.test(id)) return 1_000_000;
+  // V3.x is a 128k family — the old 1M (v3.2) / 160k (v3.1) figures were
+  // over-estimates that let the kept-history budget grow past what the API
+  // accepts, producing hard 400s deep into long sessions. `671b` is anchored
+  // to deepseek ids so cogito-2.1:671b-cloud and friends don't match.
+  if (/deepseek-v3\.1|deepseek-v3\.2|deepseek.*671b/.test(id)) return 128_000;
   // Opus 4.8+ ships the 1M window; earlier Claude models stay at 200k below.
   if (/opus-4-[89]|opus-5/.test(id)) return 1_000_000;
   if (/glm-5\.1/.test(id)) return 1_000_000;
@@ -270,7 +274,10 @@ export function modelContextWindow(modelId: string): number {
   if (/kimi|moonshot/.test(id)) return 256_000;
   if (/gemini-3|gemini-2/.test(id)) return 1_000_000;
   if (/claude|sonnet|opus|haiku/.test(id)) return 200_000;
-  if (/gpt-oss|gpt-4|gpt-5|o3|o4/.test(id)) return 128_000;
+  if (/gpt-4\.1/.test(id)) return 1_000_000;
+  if (/gpt-5/.test(id)) return 400_000;
+  if (/o3|o4/.test(id)) return 200_000;
+  if (/gpt-oss|gpt-4o|gpt-4-turbo|gpt-4/.test(id)) return 128_000;
   return 128_000; // sane default for a modern cloud model
 }
 
@@ -392,12 +399,17 @@ export function guardVisionForTurn(live: LiveSession, content: readonly ContentB
  *
  * Returns null when the family has nothing else to offer.
  */
-export async function pickCapacitySibling(current: ProviderSelection): Promise<ProviderSelection | null> {
+export async function pickCapacitySibling(
+  current: ProviderSelection,
+  exclude: ReadonlySet<string> = new Set(),
+): Promise<ProviderSelection | null> {
   const family = providerFamilyForSelection(current);
   // The gateway routes server-side; picking its models for it is not our job.
   if (family === "ares") return null;
   const rows = await daemonModelCatalog(family).catch(() => []);
-  const siblings = rows.map((row) => row.id).filter((id) => id && id !== current.model);
+  const siblings = rows
+    .map((row) => row.id)
+    .filter((id) => id && id !== current.model && !exclude.has(id));
   if (siblings.length === 0) return null;
   for (const model of siblings) {
     try {

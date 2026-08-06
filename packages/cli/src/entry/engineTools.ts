@@ -9,7 +9,7 @@ import { loadUiSettings } from "../uiSettings.js";
 import { aresGatewayBase } from "./providers.js";
 import { makeTelegramSetupTool } from "../telegramSetupTool.js";
 import { makeTelegramRosterTool } from "../telegramRosterTool.js";
-import { BootstrapTool, MissionTool, PersonaTool, RunSkillTool, SelfEvolveTool, SelfTool, SkillCraftTool, listPersonas, makeCapabilityTool, makeSkillHubTool, resolveCapabilityProvider, runSkill, scanCapabilityRegistry } from "@ares/agent";
+import { BootstrapTool, MissionTool, PersonaTool, RunSkillTool, SelfEvolveTool, SelfTool, SkillCraftTool, listPersonas, makeCapabilityTool, makeSkillHubTool, renderPersonaLayer, resolveCapabilityProvider, runSkill, scanCapabilityRegistry } from "@ares/agent";
 import { registerPersonaSubagents } from "./rosterBridge.js";
 import { withMissionRunRecorded } from "./missionLiveness.js";
 import { QueryEngineDispatcher, acquireCapability, createGoal, listGoals, listAcquisitions, listCapabilities, markAcquisitionAcquired, newGoalId, novelDeltaCurve, reliabilityOf, runGoalToCompletion, saveGoal, setAcquisitionStatus, loadStandingOrders, addStandingOrder, removeStandingOrder, renderStandingOrders, type StandingOrder, type Goal, type AcquisitionKind, type VerificationSpec } from "@ares/operator";
@@ -313,6 +313,27 @@ export async function buildEngineTools(
       // toggle applies to the next fleet without rebuilding the session.
       leafRequestPermission: async (req) =>
         decidePermission(req, runtime.permissions, { fleet: true }) === "allow" ? "allow_once" : "deny",
+      // FleetAgentSpec.persona → the ~/.ares roster. Read fresh per lookup so a
+      // persona authored mid-session is usable by the very next fleet. Never
+      // fatal: null → the leaf runs persona-less with a hint.
+      resolvePersona: async (name) => {
+        try {
+          const personas = await listPersonas(context.home);
+          const wanted = name.trim().toLowerCase();
+          const match = personas.find(
+            (p) => p.name.toLowerCase() === wanted || p.label.toLowerCase() === wanted,
+          );
+          if (!match) return null;
+          return {
+            promptLayer: renderPersonaLayer(match),
+            tools: match.tools.length > 0 ? match.tools : undefined,
+            maxTurns: match.maxTurns,
+            model: match.model,
+          };
+        } catch {
+          return null;
+        }
+      },
     }),
     enrich,
   ) as EngineTool;

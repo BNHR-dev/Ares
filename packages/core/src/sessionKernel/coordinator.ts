@@ -81,6 +81,10 @@ interface SessionSlot {
 interface ActiveLease {
   controller: AbortController;
   settled: boolean;
+  /** Idempotent teardown (clear heartbeat, detach listeners, drop from active).
+   * Installed by acquire(); shutdown() runs it so an aborted lease can never
+   * keep renewing on its heartbeat interval after the coordinator is closed. */
+  cleanup?: () => void;
 }
 
 /**
@@ -157,6 +161,7 @@ export class RunLeaseCoordinator {
       inherited?.removeEventListener("abort", abortFromParent);
       this.active.delete(state);
     };
+    state.cleanup = cleanup;
     const loseLease = (error: unknown) => {
       if (leaseFailure === undefined) leaseFailure = error;
       if (!controller.signal.aborted) controller.abort(error);
@@ -213,7 +218,14 @@ export class RunLeaseCoordinator {
   async shutdown(reason: unknown = new Error("Run lease coordinator shut down")): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    for (const lease of this.active) lease.controller.abort(reason);
+    // Snapshot first: cleanup() deletes from this.active while we iterate.
+    for (const lease of [...this.active]) {
+      lease.controller.abort(reason);
+      // Aborting alone leaves the heartbeat interval alive — the lease would
+      // keep renewing forever after shutdown. Run the same teardown release()
+      // does (clearInterval + listener removal + active.delete).
+      lease.cleanup?.();
+    }
   }
 }
 

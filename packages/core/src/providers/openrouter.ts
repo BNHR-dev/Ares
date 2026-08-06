@@ -100,6 +100,9 @@ export class OpenRouterProvider implements Provider {
         yield stallErrorEvent();
         return;
       }
+      // Caller-initiated abort (user pressed Stop, engine superseded the
+      // attempt) is not an error — return silently, mirroring anthropic.ts.
+      if (req.signal?.aborted || isAbortError(err)) return;
       yield {
         type: "error",
         error: { code: "network_error", message: err instanceof Error ? err.message : String(err), retriable: true },
@@ -126,10 +129,10 @@ export class OpenRouterProvider implements Provider {
       return;
     }
 
-    yield* this.parseSSE(response.body, this.model || req.model, guard);
+    yield* this.parseSSE(response.body, this.model || req.model, guard, req.signal);
   }
 
-  private async *parseSSE(body: ReadableStream<Uint8Array>, model: string, guard?: StallGuard): AsyncGenerator<StreamEvent> {
+  private async *parseSSE(body: ReadableStream<Uint8Array>, model: string, guard?: StallGuard, signal?: AbortSignal): AsyncGenerator<StreamEvent> {
     const decoder = new TextDecoder("utf8");
     const reader = body.getReader();
     let buffer = "";
@@ -249,6 +252,9 @@ export class OpenRouterProvider implements Provider {
             yield stallErrorEvent();
             return;
           }
+          // Caller-initiated abort mid-stream (Stop button) — end silently
+          // instead of rethrowing as a red retriable error. See anthropic.ts.
+          if (signal?.aborted || isAbortError(err)) return;
           throw err;
         }
         guard?.reset();
@@ -509,6 +515,11 @@ function toChatMessages(m: Message, flavor: OpenAIChatFlavor): Record<string, un
   const onlyText = parts.length > 0 && parts.every((p) => p.type === "text");
   const content = onlyText ? parts.map((p) => (p as { text: string }).text).join("") : parts;
   return [{ role: m.role === "system" ? "system" : "user", content }];
+}
+
+/** Same shape anthropic.ts uses: undici/fetch abort surfaces as AbortError. */
+function isAbortError(err: unknown): boolean {
+  return err instanceof Error && err.name === "AbortError";
 }
 
 function mapFinish(reason: string): StopReason {

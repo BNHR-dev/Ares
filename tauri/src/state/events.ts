@@ -70,7 +70,7 @@ export interface AresEvent {
   /** tool_use_input_delta — partial JSON of the tool input being authored. */
   deltaJson?: string;
   /** tool_progress — live sub-tool output (shell chunks, grep ticks, subagent activity, live browser frames, Conductor fleet activity). */
-  data?: { kind?: string; stream?: string; text?: string; total?: number; activity?: string; tool?: string; image?: string; url?: string; title?: string; agentId?: string; event?: string; role?: string; phase?: string; status?: string; fleetId?: string; backend?: string; label?: string; line?: string; filesTouched?: number; version?: string };
+  data?: { kind?: string; stream?: string; text?: string; total?: number; activity?: string; tool?: string; image?: string; url?: string; title?: string; agentId?: string; event?: string; role?: string; phase?: string; status?: string; fleetId?: string; backend?: string; label?: string; line?: string; filesTouched?: number; version?: string; phaseKind?: string; build?: boolean; failureReason?: string; contract?: { deliverables?: Array<{ pattern: string; met: boolean }> }; goal?: string };
   /** compaction event fields */
   summarizedMessages?: number;
   tokensBefore?: number;
@@ -93,6 +93,10 @@ export interface AresEvent {
   skills?: unknown;
   stats?: unknown;
   sessions?: unknown;
+  /** operator_status — the operator scheduler is halted (owner pressed Halt). */
+  halted?: boolean;
+  /** fleets_list reply — every Conductor fleet the daemon knows about. */
+  fleets?: FleetSummaryWire[];
   models?: unknown;
   messages?: unknown;
   meta?: unknown;
@@ -152,11 +156,40 @@ export interface AresEvent {
   killed?: number;
   // background_jobs / background_suspended — the durable shell jobs a session
   // owns, so the desktop can show and stop them instead of the owner finding
-  // out via Task Manager.
-  jobs?: BackgroundJobVm[];
+  // out via Task Manager. subagents_list replies reuse this field with the
+  // SubagentJobWire shape — narrow by event type at the handler.
+  jobs?: BackgroundJobVm[] | SubagentJobWire[];
   running?: number;
   resumable?: number;
   from?: string;
+}
+
+/** One fleet from a fleets_list reply — the HELM Fleets history ledger. */
+export interface FleetSummaryWire {
+  fleetId: string;
+  goal?: string;
+  status?: string;
+  startedAt?: string | number;
+  finishedAt?: string | number;
+  phases?: Array<{
+    id: string;
+    kind?: string;
+    status?: string;
+    build?: boolean;
+    agents?: Array<{ role?: string; status?: string; workStatus?: string }>;
+  }>;
+  manifestPath?: string;
+}
+
+/** One background Task subagent from a subagents_list reply. */
+export interface SubagentJobWire {
+  jobId: string;
+  kind?: string;
+  description?: string;
+  status: string;
+  startedAt?: string | number;
+  finishedAt?: string | number;
+  sessionId?: string;
 }
 
 /** One durable background shell, as the daemon reports it. */

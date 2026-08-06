@@ -219,10 +219,18 @@ export class OllamaCloudPool {
         } else {
           yield* self.callOllamaChat(model, req);
         }
-        resolveDone();
       } catch (err) {
+        // A deliberate abort is not a provider failure — the consumer already
+        // knows it stopped the turn; a red retriable banner here is noise.
+        if (req.signal?.aborted) return;
         const message = err instanceof Error ? err.message : String(err);
         yield { type: "error", error: { code: "ollama_throw", message, retriable: true } };
+      } finally {
+        // finally, not tail calls: when the consumer breaks out of its
+        // for-await (Stop, steering supersession) this generator completes
+        // via RETURN, reaching neither branch above — the old shape left
+        // `promise` pending forever and every later call queued on the same
+        // slot deadlocked behind it.
         resolveDone();
       }
     })();
@@ -238,9 +246,18 @@ export class OllamaCloudPool {
     // Same chars/4 heuristic the engine budgets with — num_ctx must cover the
     // prompt we are about to send plus the output allowance, or the serving
     // side truncates/rejects a request the engine believed was in budget.
-    const estPromptTokens = Math.ceil(
-      (JSON.stringify(messages).length + JSON.stringify(req.tools).length + (req.system?.length ?? 0)) / 4,
-    );
+    // Images are counted at a flat vision-token allowance, NEVER by their
+    // base64 length: a single pasted screenshot stringifies to ~1M chars and
+    // would have demanded a multi-million-token num_ctx.
+    let estPromptChars = JSON.stringify(req.tools).length + (req.system?.length ?? 0);
+    let estImageTokens = 0;
+    for (const msg of req.messages) {
+      for (const block of msg.content) {
+        if (block.type === "image") estImageTokens += 2_000;
+        else estPromptChars += JSON.stringify(block).length;
+      }
+    }
+    const estPromptTokens = Math.ceil(estPromptChars / 4) + estImageTokens;
 
     const body = {
       model,
@@ -258,7 +275,14 @@ export class OllamaCloudPool {
             }))
           : undefined,
       stream: true,
-      options: { num_ctx: ollamaNumCtx(estPromptTokens, req.maxOutputTokens ?? 8_192), temperature: 0.2 },
+      options: {
+        num_ctx: ollamaNumCtx(
+          estPromptTokens,
+          req.maxOutputTokens ?? 8_192,
+          /cloud/i.test(model) || /ollama\.com/i.test(this.host),
+        ),
+        temperature: 0.2,
+      },
       // Reasoning dial → native /api/chat "think" field. Ollama's documented think
       // enum is low|medium|high (plus a boolean) — NOT "max" — so clamp max→high
       // (mirrors openAIReasoningEffort) to avoid a 400 on models that validate it,
@@ -298,24 +322,31 @@ export class OllamaCloudPool {
         yield stallErrorEvent();
         return;
       }
+      if (req.signal?.aborted) return;
       throw err;
     }
     guard.reset();
 
     if (!res.ok) {
       const text = await res.text().catch(() => "");
+      guard.dispose();
       yield {
         type: "error",
         error: {
           code: `http_${res.status}`,
+          // 429 was hardcoded fatal here — a rate-limited turn died outright
+          // instead of waiting out the Retry-After window like every other
+          // adapter honors.
           message: `Ollama returned ${res.status}: ${text.slice(0, 500)}`,
-          retriable: res.status >= 500,
+          retriable: res.status >= 500 || res.status === 429,
+          ...(res.status === 429 ? { retryAfterMs: parseRetryAfterMs(res.headers) } : {}),
         },
       };
       return;
     }
 
     if (!res.body) {
+      guard.dispose();
       yield {
         type: "error",
         error: { code: "no_body", message: "Ollama returned no body", retriable: false },
@@ -334,22 +365,31 @@ export class OllamaCloudPool {
     let usage: Usage = { inputTokens: 0, outputTokens: 0 };
     let stopReason: StopReason = "end_turn";
 
+    try {
     while (true) {
       let step: ReadableStreamReadResult<Uint8Array>;
       try {
         step = await reader.read();
       } catch (err) {
-        guard.dispose();
         if (guard.stalled()) {
           yield stallErrorEvent();
           return;
         }
+        if (req.signal?.aborted) return;
         throw err;
       }
       guard.reset();
       const { done, value } = step;
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+      if (done) {
+        // Final flush: a stream that closes without a trailing newline still
+        // has its last chunk in the buffer — usually the done:true chunk
+        // carrying usage and done_reason. Dropping it zeroed the turn's usage
+        // and misreported max_tokens truncation as a clean end_turn.
+        buffer += decoder.decode();
+        if (buffer.trim() && !buffer.endsWith("\n")) buffer += "\n";
+      } else {
+        buffer += decoder.decode(value, { stream: true });
+      }
       let nlIdx: number;
       while ((nlIdx = buffer.indexOf("\n")) !== -1) {
         const line = buffer.slice(0, nlIdx).trim();
@@ -418,9 +458,15 @@ export class OllamaCloudPool {
           stopReason = chunk.done_reason === "length" ? "max_tokens" : "end_turn";
         }
       }
+      if (done) break;
     }
-
-    guard.dispose();
+    } finally {
+      // Every early return above used to abandon an open HTTP body and leave
+      // the stall guard's timer + abort listener armed — sockets and listeners
+      // accumulated on the turn signal across a flaky session.
+      guard.dispose();
+      void reader.cancel().catch(() => undefined);
+    }
 
     for (const part of flushThinkingState(thinkingState)) {
       if (part.type === "thinking") {
@@ -529,43 +575,38 @@ export class OllamaCloudPool {
           // Continue into the normal streaming parser below with the retried response.
         } else {
           const retryText = await res.text().catch(() => "");
+          guard.dispose();
           yield {
             type: "error",
             error: {
               code: `http_${res.status}`,
               message: `Ollama Anthropic-compat returned ${res.status}: ${retryText.slice(0, 500)}`,
               retriable: res.status >= 500 || res.status === 429,
+              retryAfterMs: parseRetryAfterMs(res.headers),
             },
           };
           return;
         }
       } else {
+        guard.dispose();
         yield {
           type: "error",
           error: {
             code: `http_${res.status}`,
             message: `Ollama Anthropic-compat returned ${res.status}: ${text.slice(0, 500)}`,
             retriable: res.status >= 500 || res.status === 429,
+            // Retry-After only lived in an unreachable duplicate block below
+            // (every !ok path returned before it) — a rate-limited turn never
+            // honored the server's reset window.
+            retryAfterMs: parseRetryAfterMs(res.headers),
           },
         };
         return;
       }
     }
 
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      yield {
-        type: "error",
-        error: {
-          code: `http_${res.status}`,
-          message: `Ollama Anthropic-compat returned ${res.status}: ${text.slice(0, 500)}`,
-          retriable: res.status >= 500 || res.status === 429,
-          retryAfterMs: parseRetryAfterMs(res.headers),
-        },
-      };
-      return;
-    }
     if (!res.body) {
+      guard.dispose();
       yield { type: "error", error: { code: "no_body", message: "no body", retriable: false } };
       return;
     }
@@ -591,22 +632,29 @@ export class OllamaCloudPool {
     let stopReason: StopReason = "end_turn";
     let messageId = "";
 
+    try {
     while (true) {
       let step: ReadableStreamReadResult<Uint8Array>;
       try {
         step = await reader.read();
       } catch (err) {
-        guard.dispose();
         if (guard.stalled()) {
           yield stallErrorEvent();
           return;
         }
+        if (req.signal?.aborted) return;
         throw err;
       }
       guard.reset();
       const { done, value } = step;
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+      if (done) {
+        // Final flush — a residual SSE event without its trailing blank line
+        // (usually message_delta/message_stop with usage) must not be dropped.
+        buffer += decoder.decode();
+        if (buffer.trim() && !buffer.endsWith("\n\n")) buffer += "\n\n";
+      } else {
+        buffer += decoder.decode(value, { stream: true });
+      }
       let sep: number;
       while ((sep = buffer.indexOf("\n\n")) !== -1) {
         const raw = buffer.slice(0, sep);
@@ -709,21 +757,30 @@ export class OllamaCloudPool {
             yield { type: "stream_heartbeat" };
             continue;
           case "error": {
+            // Capacity/limits arriving as SSE frames instead of HTTP statuses
+            // are the SAME retriable conditions — anthropic.ts retries these
+            // deliberately; hardcoding false here failed turns on blips.
+            const kind = evt.error?.type ?? "stream_error";
             yield {
               type: "error",
               error: {
-                code: evt.error?.type ?? "stream_error",
+                code: kind,
                 message: evt.error?.message ?? "anthropic-compat stream error",
-                retriable: false,
+                retriable: kind === "overloaded_error" || kind === "api_error" || kind === "rate_limit_error",
               },
             };
             return;
           }
         }
       }
+      if (done) break;
     }
-
-    guard.dispose();
+    } finally {
+      // Early returns above (SSE error frame, stall, abort) used to abandon
+      // the open HTTP body and leave the stall guard's timer/listener armed.
+      guard.dispose();
+      void reader.cancel().catch(() => undefined);
+    }
 
     // Build final assistant message
     const content: ContentBlock[] = [];
@@ -856,10 +913,20 @@ function buildAnthropicMessagesBody(
  * the old default; if the serving side can't honor it, the engine's ladder
  * learns the real ceiling from the rejection.
  */
-function ollamaNumCtx(estPromptTokens: number, maxOutputTokens: number): number {
+function ollamaNumCtx(estPromptTokens: number, maxOutputTokens: number, cloudServed: boolean): number {
   const raw = Number(process.env.ARES_OLLAMA_NUM_CTX);
   if (Number.isFinite(raw) && raw >= 8_192) return Math.floor(raw);
-  return Math.max(65_536, estPromptTokens + maxOutputTokens + 2_048);
+  // Only cloud-served models get the dynamic raise. A LOCAL model allocates
+  // its KV cache from num_ctx — asking a local llama.cpp for a 170k context
+  // can OOM the whole machine, where the old 65,536 merely truncated.
+  if (!cloudServed) return 65_536;
+  // Quantized to coarse 32k steps and capped: Ollama reloads/reallocates when
+  // num_ctx changes, so a value that creeps up every tool round would thrash;
+  // the cap keeps a bad estimate from demanding an absurd allocation (the
+  // engine's shrink ladder handles genuine overflow).
+  const needed = estPromptTokens + maxOutputTokens + 2_048;
+  const quantized = Math.ceil(needed / 32_768) * 32_768;
+  return Math.min(262_144, Math.max(65_536, quantized));
 }
 
 function toAnthropicContentBlock(block: ContentBlock): Record<string, unknown> {

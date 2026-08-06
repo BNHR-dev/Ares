@@ -728,6 +728,9 @@ export interface ConductorToolDeps {
    *  toggle). Forwarded to runFleet; absent → leaves deny everything. */
   leafRequestPermission?: ConductorDeps["leafRequestPermission"];
   sessionKernel?: SessionKernelStore;
+  /** Roster persona resolver for FleetAgentSpec.persona (the host wires the
+   *  ~/.ares roster here). Absent → persona names are ignored with a hint. */
+  resolvePersona?: ConductorDeps["resolvePersona"];
 }
 
 // ─── Shape-example → validator + hint ──────────────────────────────────────
@@ -823,6 +826,26 @@ const agentSchema = z
       .optional()
       .describe(
         "WRITE agents only: path prefixes this agent owns (e.g. [\"src/api\"]). Required (and checked for overlap) when a parallel build phase sets isolation:'none'.",
+      ),
+    persona: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        "Optional roster persona name (e.g. 'vitruvius', 'forge'). The agent adopts that persona's prompt layer, tool limits, and turn ceiling on top of this spec. An unknown name never fails the fleet — the agent runs without it and the result carries a hint.",
+      ),
+    contract: z
+      .object({
+        deliverables: z
+          .array(z.string().min(1))
+          .min(1)
+          .optional()
+          .describe("File globs this agent must create/modify (e.g. [\"src/api/**\", \"README.md\"])."),
+      })
+      .strict()
+      .optional()
+      .describe(
+        "WORK CONTRACT (build agents): declared deliverables are checked against the files the agent actually changed. If NO changed file matches any pattern, the agent fails its work contract (treated like unverified work).",
       ),
   })
   .strict();
@@ -987,13 +1010,16 @@ export function makeConductorTool(deps: ConductorToolDeps) {
         validate: exampleValidator,
         schemaHint: exampleHinter,
         makeWorktree: (label, durableKey) => makeCopyWorktree(ctx.workspace, label, durableKey),
+        resolvePersona: deps.resolvePersona,
       };
       const result = await runFleet(i as FleetSpec, runtimeDeps);
       // Corrective hints — turn the runtime's failure signals into one-line advice
       // the model will actually read and apply next time (closes the learning loop).
       const stripped = result.phases.flatMap((p) => p.leaves.flatMap((l) => l.strippedTools));
       const unresolved = result.phases.reduce((n, p) => n + p.unresolvedTemplates, 0);
-      const hints: string[] = [];
+      // Per-leaf advisories (unknown persona, unmet deliverable contract) —
+      // surfaced verbatim so the model can correct the next spec.
+      const hints: string[] = result.phases.flatMap((p) => p.leaves.flatMap((l) => l.hints ?? []));
       if (stripped.length > 0)
         hints.push(
           `${stripped.length} write tool(s) were stripped (unattended posture). Serialize writers into ONE pipeline stage, or don't whitelist write tools in a fleet.`,
@@ -1039,6 +1065,7 @@ export function makeConductorTool(deps: ConductorToolDeps) {
               unresolvedTemplates: l.unresolvedTemplates,
               strippedTools: l.strippedTools,
               structured: l.structured,
+              ...(l.deliverables ? { deliverables: l.deliverables } : {}),
             })),
           })),
           manifestPath: result.manifestPath,

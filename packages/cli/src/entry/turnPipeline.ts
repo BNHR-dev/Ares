@@ -106,16 +106,28 @@ function gitRun(cwd: string, args: string[]): Promise<string> {
   return new Promise((resolve) => {
     const child = spawn("git", args, { cwd, windowsHide: true });
     let out = "";
-    child.stdout?.on("data", (b: Buffer) => (out += b.toString("utf8")));
-    child.on("error", () => resolve(""));
-    child.on("close", () => resolve(out.trim()));
-    setTimeout(() => {
+    let settled = false;
+    const settle = (value: string) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const timer = setTimeout(() => {
       try {
         child.kill();
       } catch {
         /* ignore */
       }
+      // A killed child's partial stdout is indistinguishable from a clean
+      // result — resolve empty so callers treat a timeout as "no data".
+      settle("");
     }, 3000);
+    // Never let the kill timer keep the process alive past a fast git exit.
+    (timer as { unref?: () => void }).unref?.();
+    child.stdout?.on("data", (b: Buffer) => (out += b.toString("utf8")));
+    child.on("error", () => settle(""));
+    child.on("close", () => settle(out.trim()));
   });
 }
 
@@ -131,21 +143,7 @@ export async function gatherGitRunFacts(workspace: string): Promise<{ sha: strin
 
 export async function loadGitContext(context: CliRuntimeContext): Promise<string> {
   const cwd = context.workspace;
-  const run = (args: string[]): Promise<string> =>
-    new Promise((resolve) => {
-      const child = spawn("git", args, { cwd, windowsHide: true });
-      let out = "";
-      child.stdout?.on("data", (b: Buffer) => (out += b.toString("utf8")));
-      child.on("error", () => resolve(""));
-      child.on("close", () => resolve(out.trim()));
-      setTimeout(() => {
-        try {
-          child.kill();
-        } catch {
-          /* ignore */
-        }
-      }, 3000);
-    });
+  const run = (args: string[]): Promise<string> => gitRun(cwd, args);
   try {
     const branch = await run(["rev-parse", "--abbrev-ref", "HEAD"]);
     if (!branch) return ""; // not a git repo
@@ -436,6 +434,10 @@ export async function finishTurn(
       conversation: { user: userMessage, assistant: assistantText, status: finalStatus },
       store,
       source: live.session.meta.id,
+      // The Witness runs on post-turn settling — an unbounded model call here
+      // means the turn never finishes settling. witness.ts forwards this
+      // signal into ask(); sideQuery also carries its own 60s default now.
+      signal: AbortSignal.timeout(60_000),
       ask: ({ system, user, schemaHint, signal }) =>
         sideQueryJson({
           provider: live.selection.provider,

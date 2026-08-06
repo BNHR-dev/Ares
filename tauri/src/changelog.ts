@@ -38,6 +38,56 @@ export interface ChangelogEntry {
 // from the "earlier updates" strip.
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.36.0",
+    date: "August 2026",
+    title: "The field-report release",
+    tagline: "A real user spent a day filing everything that hurt — the twenty-minute stalls, the stop that never stopped, renames that vanished, the footer naming the wrong model. All of it fixed, plus projects, a lighter app, and a window into your agents.",
+    highlights: [
+      {
+        icon: "⚡",
+        title: "No more 20-minute stalls",
+        blurb: "Long chats on cloud models kept re-sending prompts the server was always going to refuse. Ares now asks for the right context size and remembers what the server can actually take.",
+        tag: "Faster",
+      },
+      {
+        icon: "⏹",
+        title: "Stop can't get stuck",
+        blurb: "\"Stopping safely\" could hang forever with every button dead. Stop stays clickable, pressing it again force-stops a stuck turn, and the session frees itself instead of needing a restart.",
+        tag: "Safer",
+      },
+      {
+        icon: "✏️",
+        title: "Renames that stick",
+        blurb: "Renamed sessions kept snapping back to their old names after a restart. Your names now survive reopening, and a rename that fails reverts instead of lying.",
+        tag: "Polished",
+      },
+      {
+        icon: "🎯",
+        title: "The footer tells the truth",
+        blurb: "Each session shows the model it actually runs — no more picking one model and watching messages come from another.",
+        tag: "Polished",
+      },
+      {
+        icon: "🗂",
+        title: "Projects in the rail",
+        blurb: "Group related sessions under named, collapsible projects — one click on a session's grid button.",
+        tag: "New",
+      },
+      {
+        icon: "🪶",
+        title: "A much lighter app",
+        blurb: "Long sessions no longer grow the app to gigabytes: the transcript keeps only recent messages mounted, images live as thumbnails, and live browser frames stopped piling up.",
+        tag: "Faster",
+      },
+      {
+        icon: "🤖",
+        title: "Watch your agents work",
+        blurb: "Background agents and fleets now show up live — every agent, phase, and delivery check — with a new Fleets view in HELM and personas you can assign to the agents Ares spawns.",
+        tag: "New",
+      },
+    ],
+  },
+  {
     version: "0.35.0",
     date: "August 2026",
     title: "It stops when you stop it",

@@ -180,7 +180,15 @@ export function loadPrefs(): Prefs {
       voiceSpeed: typeof raw.voiceSpeed === "number" && raw.voiceSpeed >= 0.5 && raw.voiceSpeed <= 2 ? raw.voiceSpeed : 1,
       wakeWord: raw.wakeWord === true,
       voiceNotify: raw.voiceNotify !== false, // default ON — a spoken heads-up is the point of voice
-
+      // These MUST round-trip: the returned literal is the whole Prefs from
+      // here on, so any stored key omitted here is erased by the next
+      // savePrefs. Dropping them lost every star/recent on each launch.
+      favoriteModels: Array.isArray(raw.favoriteModels)
+        ? raw.favoriteModels.filter((m): m is string => typeof m === "string")
+        : undefined,
+      recentModels: Array.isArray(raw.recentModels)
+        ? raw.recentModels.filter((m): m is string => typeof m === "string").slice(0, 6)
+        : undefined,
     };
   } catch {
     return fallback;

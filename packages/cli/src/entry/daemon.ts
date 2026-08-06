@@ -9,11 +9,12 @@ const FORCE_STOP_AFTER_MS = 12_000;
  *  before the daemon declares it a zombie and releases the session entry.
  *  Covers the awaits a process kill cannot break (a hung verifier drain, a
  *  dead promise) — the class that used to wedge "stopping safely" until the
- *  app was restarted. */
-const FORCE_STOP_RELEASE_GRACE_MS = 10_000;
+ *  app was restarted. Longer than the cancelled-turn finishTurn bound (15s):
+ *  a healthy-but-slow settle must finish, not get zombified mid-write. */
+const FORCE_STOP_RELEASE_GRACE_MS = 20_000;
 
 import { authStatus, listSessions, loadSessionSnapshot, loadSessionRollout, deleteSession, renameSession, SessionNotFoundError, type Provider, classifyLane, runAnthropicLoginFlow, loadAnthropicTokens, sideQuery, sideQueryJson, QueryEngine, installGlobalCrashHandlers, EventRing, HeapGuard, readHeapSample, writeCrashLogSync, openWorkspaceSessionKernel, probeCredentialEncryption, connectMcpServer, disconnectMcpServer, setMcpServerEnabled, connectorNameFromUrl, runOpenAILoginFlow, runKimiLoginFlow, kimiAuthStatus } from "@ares/core";
-import { appendFile, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
@@ -1079,6 +1080,12 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
   ): void => {
     void (async () => {
       const kernel = await openWorkspaceSessionKernel(entry.live.context.workspace);
+      // Exponential backoff, not a flat 20ms: this loop runs for the WHOLE
+      // remaining turn (a 10-minute agentic turn = ~30k synchronous SQLite
+      // reads per deferred steer — measurable fan spin). The first second
+      // stays snappy; after that 500ms is plenty, since the owner settlement
+      // drain re-checks every state synchronously anyway.
+      let pollMs = 20;
       while (entry.turnActive && entry.deferredSteers.has(inputId)) {
         const state = kernel.getInput(inputId)?.state;
         if (state === "consumed" || state === "cancelled") {
@@ -1086,7 +1093,8 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
           announceSteerTerminal(entry, sessionId, inputId, state);
           return;
         }
-        await new Promise<void>((resolve) => setTimeout(resolve, 20));
+        await new Promise<void>((resolve) => setTimeout(resolve, pollMs));
+        pollMs = Math.min(500, Math.round(pollMs * 1.5));
       }
     })().catch((error) => {
       tagEmit(sessionId, {
@@ -1356,6 +1364,17 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
       // subprocess was killed out from under it never unwinds, and the UI sits
       // on "stopping safely" forever with no way out. So: disclose, and after a
       // grace period let a SECOND Stop escalate to a real forced abort.
+      // A force is already in flight — don't stack more kills and timers on
+      // a triple-click; just restate the pending state.
+      if (entry.forceStopRequested) {
+        tagEmit(command.sessionId, {
+          type: "interrupt_pending",
+          inputId: entry.activeInputId,
+          stalledMs: Date.now() - (entry.cancelRequestedAt ?? Date.now()),
+          forceAvailableInMs: 0,
+        });
+        return;
+      }
       const since = Date.now() - (entry.cancelRequestedAt ?? Date.now());
       if (since >= FORCE_STOP_AFTER_MS) {
         entry.forceStopRequested = true;
@@ -1400,9 +1419,7 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
               tagEmit(command.sessionId, { type: "turn_settled", inputId: stalledInputId, continuing: false });
               // The zombie generator may still hold the session's kernel run
               // lease. A rehydrated session takes the lease over the same way
-              // startup recovery does after a crash; the primary entry cannot
-              // be evicted, so it keeps its live session (the common wedge —
-              // post-turn settling — has already released the lease by then).
+              // startup recovery does after a crash.
               if (entry !== primaryEntry) {
                 for (const [mappedSid, mapped] of sessions) {
                   if (mapped === entry) {
@@ -1410,6 +1427,32 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
                     break;
                   }
                 }
+              } else {
+                // The primary cannot be evicted — but keeping the WEDGED live
+                // session would leave its run lease held, so the next send
+                // blocked forever anyway (the exact restart-to-recover loop
+                // this path exists to end). Rebuild the live session from disk
+                // under the same id, the same way eviction + rehydrate does.
+                const wedged = entry.live;
+                void (async () => {
+                  try {
+                    const selection = await selectProvider(new Map([
+                      ["provider", providerFamilyForSelection(wedged.selection)],
+                      ["model", wedged.selection.model],
+                    ]));
+                    const fresh = await createSessionWithSelection(
+                      args,
+                      selection,
+                      wedged.session.meta.id,
+                      requestPermission,
+                      { startAgentRuntime: false, detachedStartupRecovery: false },
+                    );
+                    entry.live = fresh;
+                    void disposeLiveSession(wedged).catch(() => undefined);
+                  } catch (rebuildErr) {
+                    console.error(`primary force-stop rebuild failed: ${rebuildErr instanceof Error ? rebuildErr.message : String(rebuildErr)}`);
+                  }
+                })();
               }
             }, FORCE_STOP_RELEASE_GRACE_MS);
             releaseTimer.unref?.();
@@ -2015,6 +2058,118 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
           });
         }
         emitBackgroundJobs(command.sessionId, entry);
+        continue;
+      }
+      // ─── Subagent visibility: fleets + durable subagent jobs ───────────
+      // Read-only windows for the desktop. Fleets are journaled on disk by the
+      // conductor (<workspace>/.ares/fleets/<id>/manifest.json); durable
+      // subagent work lives in the session kernel as kind:"task" jobs. Both
+      // handlers are best-effort: a malformed manifest or a locked kernel DB
+      // must never take the daemon down, so errors surface inside the reply.
+      if (command.type === "fleets_list") {
+        try {
+          const workspace = (await resolveEntry(command.sessionId).catch(() => undefined))?.live.context.workspace
+            ?? live.context.workspace;
+          const fleetsDir = path.join(workspace, ".ares", "fleets");
+          const dirents = await readdir(fleetsDir, { withFileTypes: true }).catch(() => []);
+          const found: Array<{ mtimeMs: number; fleet: Record<string, unknown> }> = [];
+          for (const dirent of dirents) {
+            if (!dirent.isDirectory()) continue;
+            const manifestPath = path.join(fleetsDir, dirent.name, "manifest.json");
+            try {
+              const [info, raw] = await Promise.all([stat(manifestPath), readFile(manifestPath, "utf8")]);
+              const manifest = JSON.parse(raw) as Record<string, unknown>;
+              if (!manifest || typeof manifest !== "object") continue;
+              // Trim to a compact summary — manifests can carry long prompts,
+              // failure texts, and per-leaf transcript paths that the list
+              // view never needs. Pass through only what each level holds.
+              const phases = Array.isArray(manifest.phases)
+                ? manifest.phases.map((phase) => {
+                    const p = (phase ?? {}) as Record<string, unknown>;
+                    const agents = Array.isArray(p.agents)
+                      ? p.agents.map((agent) => {
+                          const a = (agent ?? {}) as Record<string, unknown>;
+                          return {
+                            ...(a.role !== undefined ? { role: a.role } : {}),
+                            ...(a.status !== undefined ? { status: a.status } : {}),
+                            ...(a.workStatus !== undefined ? { workStatus: a.workStatus } : {}),
+                          };
+                        })
+                      : undefined;
+                    return {
+                      ...(p.id !== undefined ? { id: p.id } : {}),
+                      ...(p.kind !== undefined ? { kind: p.kind } : {}),
+                      ...(p.status !== undefined ? { status: p.status } : {}),
+                      ...(p.build !== undefined ? { build: p.build } : {}),
+                      ...(agents !== undefined ? { agents } : {}),
+                    };
+                  })
+                : undefined;
+              found.push({
+                mtimeMs: info.mtimeMs,
+                fleet: {
+                  fleetId: typeof manifest.fleetId === "string" && manifest.fleetId ? manifest.fleetId : dirent.name,
+                  ...(manifest.goal !== undefined ? { goal: manifest.goal } : {}),
+                  ...(manifest.status !== undefined ? { status: manifest.status } : {}),
+                  ...(manifest.startedAt !== undefined ? { startedAt: manifest.startedAt } : {}),
+                  // journalFleet writes the manifest when the fleet settles, so
+                  // the file's mtime is an honest finish time when the manifest
+                  // itself doesn't carry one.
+                  finishedAt: manifest.finishedAt !== undefined ? manifest.finishedAt : info.mtimeMs,
+                  ...(phases !== undefined ? { phases } : {}),
+                  manifestPath,
+                },
+              });
+            } catch {
+              // Malformed or vanished manifest — skip the entry silently.
+            }
+          }
+          found.sort((a, b) => b.mtimeMs - a.mtimeMs);
+          tagEmit(command.sessionId, { type: "fleets_list", fleets: found.slice(0, 30).map((f) => f.fleet) });
+        } catch (err) {
+          tagEmit(command.sessionId, {
+            type: "fleets_list",
+            fleets: [],
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+        continue;
+      }
+      if (command.type === "subagents_list") {
+        try {
+          const entry = await resolveEntry(command.sessionId);
+          const sid = entry.live.session.meta.id;
+          const kernel = await openWorkspaceSessionKernel(entry.live.context.workspace);
+          // kind:"task" is the durable subagent job kind (kind:"shell" is
+          // background shells, which background_list already covers). Show
+          // everything live plus anything that finished in the last day —
+          // "what just happened" is the whole point of this window.
+          const RECENT_MS = 24 * 60 * 60 * 1000;
+          const now = Date.now();
+          const jobs = kernel.listBackgroundJobs(sid, { kind: "task" })
+            .filter((job) =>
+              job.status === "queued" || job.status === "running" ||
+              (job.finishedAtMs !== null && now - job.finishedAtMs <= RECENT_MS),
+            )
+            .sort((a, b) => b.createdAtMs - a.createdAtMs)
+            .slice(0, 50)
+            .map((job) => ({
+              jobId: job.id,
+              kind: job.kind,
+              ...(job.description ? { description: job.description } : {}),
+              status: job.status,
+              ...(job.startedAtMs !== null ? { startedAt: job.startedAtMs } : {}),
+              ...(job.finishedAtMs !== null ? { finishedAt: job.finishedAtMs } : {}),
+              sessionId: job.sessionId,
+            }));
+          tagEmit(command.sessionId, { type: "subagents_list", jobs });
+        } catch (err) {
+          tagEmit(command.sessionId, {
+            type: "subagents_list",
+            jobs: [],
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
         continue;
       }
       if (command.type === "mcp_list") {
@@ -2848,7 +3003,11 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
           tagEmit(command.sessionId, { type: "daemon_error", error: "steer inputId must be 1-1024 characters" });
           continue;
         }
-        const entry = sessions.get(command.sessionId || DEFAULT_SID);
+        // The registry is keyed by REAL session id; DEFAULT_SID is a lookup
+        // sentinel handled only inside resolveEntry — sessions.get(DEFAULT_SID)
+        // can never match, so an untagged steer silently skipped every
+        // active-turn branch below.
+        const entry = command.sessionId ? sessions.get(command.sessionId) : primaryEntry;
         if (entry?.turnActive) {
           if (entry.cancelRequested) {
             tagEmit(command.sessionId, {
@@ -3053,6 +3212,11 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
       // down with it, leaving earlier jobs the user chose to keep alone.
       entry.turnStartedAt = Date.now();
       entry.cancelRequested = inheritedHandoffCancellation;
+      // The Stop clock must start NOW for an inherited cancellation — a stale
+      // timestamp from a previous Stop made the next Stop click an instant
+      // force-kill ("since" measured from minutes ago).
+      entry.cancelRequestedAt = inheritedHandoffCancellation ? Date.now() : undefined;
+      entry.forceStopRequested = false;
       if (successorHandoff) entry.successorHandoff = undefined;
       entry.steeringPhase = "preparing";
       entry.activeToolIds.clear();
@@ -3074,9 +3238,14 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
         // task domain (lane) actually changes. No per-turn flip-flop and no
         // mid-conversation model swap — context and the prompt cache stay
         // coherent, so you never get quality/personality whiplash per message.
+        // Remembered past the routing block so later emits (vision escalation)
+        // know whether a lane tag is honest — a lane is a ROUTER decision and
+        // manual mode ran no router.
+        let turnRoutingMode: "auto" | "manual" = "manual";
         try {
           if (ownerCancellationPending()) throw new Error("owner cancelled before optional routing");
           const settings = await loadUiSettings();
+          turnRoutingMode = settings.routingMode === "auto" ? "auto" : "manual";
           if (ownerCancellationPending()) throw new Error("owner cancelled during optional routing");
           const recentGoals = entry.live.session
             .history()
@@ -3205,7 +3374,13 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
                 source: "instructions",
                 text: `Image attached — ${pinned.model} can't see images, so this turn runs on ${visionSel.provider.name}/${visionSel.model}. Your model choice is restored next turn.`,
               });
-              tagEmit(sid, { type: "route_resolved", model: visionSel.model, provider: visionSel.provider.name, lane: entry.lane ?? "chat", source: "assigned" });
+              tagEmit(sid, {
+                type: "route_resolved",
+                model: visionSel.model,
+                provider: visionSel.provider.name,
+                ...(turnRoutingMode === "auto" ? { lane: entry.lane ?? "chat" } : {}),
+                source: "assigned",
+              });
             } else {
               entry.live.queueSystemReminder(
                 `The user attached an image, but the current model (${pinned.model}) cannot see images and no vision-capable provider is configured. Say so plainly, describe what you'd need (a vision model — e.g. Claude, GPT-4o, or Gemini — selected in the model picker), and work from the user's text only. Do NOT guess at the image's contents.`,
@@ -3310,7 +3485,14 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
           // is unauthenticated / out of balance / unreachable, walk healthy
           // providers until one actually completes the turn — not just one hop.
           // Dead-on-balance providers are remembered so later turns skip them.
+          // A force-released turn has already been settled for the user — its
+          // late unwind must not run failover (setProvider/resumeTurn against
+          // an entry a successor may own) or post-turn bookkeeping.
+          if (entry.zombieTurnInputIds?.has(inputId)) return;
           let fallbackHops = 0;
+          // Without this set, two congested siblings ping-pong A→B→A→B for all
+          // four hops — four full re-runs of an already-slow turn.
+          const triedCapacityModels = new Set<string>([entry.live.selection.model]);
           while (turnState.status === "failed" && turnState.fatalProvider && fallbackHops < 4) {
             fallbackHops++;
             // The provider that just failed: if it's a balance/auth death, retire
@@ -3328,7 +3510,7 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
             // here; on manual we stop and say so instead of switching.
             const fallback = routingMode !== "auto"
               ? null
-              : (overloaded ? await pickCapacitySibling(entry.live.selection).catch(() => null) : null) ??
+              : (overloaded ? await pickCapacitySibling(entry.live.selection, triedCapacityModels).catch(() => null) : null) ??
                 (await pickHealthyFallback(entry.live.selection, liveDeadProviders(), {
                   allowCrossProvider: true,
                 }).catch(() => null));
@@ -3354,6 +3536,12 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
               ),
             });
             const overloadedModel = entry.live.selection.model;
+            // Read the FAILED family before the selection is replaced — reading
+            // it after resolved to the fallback's family, so the toast told the
+            // user the WRONG provider's key was rejected and sent them to
+            // replace a key that was fine.
+            const failedFamily = providerFamilyForSelection(entry.live.selection);
+            triedCapacityModels.add(fallback.model);
             entry.live.selection = fallback;
             // Deliberately NOT persisted to mainSelection: a failover is a
             // per-session rescue, never a change to the owner's default. The
@@ -3366,7 +3554,6 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
             // Settings", and the message should say so (the mid-landscape
             // OpenRouter-401 session surfaced the raw error and read as a crash).
             const authDead = isPermanentlyDeadError(turnState.fatalProvider);
-            const failedFamily = providerFamilyForSelection(entry.live.selection);
             tagEmit(sid, {
               type: "system_reminder_injected",
               source: "instructions",
@@ -3376,7 +3563,16 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
                 ? `The ${failedFamily} API key was rejected (invalid, expired, or out of credit) — it's retired for this session and the turn is continuing on ${providerFamilyForSelection(fallback)}/${fallback.model}. To use ${failedFamily} again, paste a fresh key in Settings → API Keys.`
                 : `Provider failed (${turnState.fatalProvider}). Auto routing switched to ${providerFamilyForSelection(fallback)}/${fallback.model}.`,
             });
-            tagEmit(sid, { type: "route_resolved", model: fallback.model, provider: providerFamilyForSelection(fallback), lane: entry.lane ?? "chat", source: "assigned" });
+            tagEmit(sid, {
+              type: "route_resolved",
+              model: fallback.model,
+              provider: providerFamilyForSelection(fallback),
+              ...(routingMode === "auto" ? { lane: entry.lane ?? "chat" } : {}),
+              // "failover" (not "assigned"): unlike a one-turn vision detour,
+              // a failover durably changes the session's live selection — the
+              // footer's pinned readout must follow it.
+              source: "failover",
+            });
             // Reset and re-run; if THIS one also fails fatally the loop continues.
             turnState.status = "completed";
             turnState.fatalProvider = null;
@@ -3395,7 +3591,17 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
               }),
             ]);
           } else {
-            await finishTurn(entry.live, turnState.status);
+            // Normal completions get a generous bound too: post-turn settling
+            // (witness/verifier/journal) sits between the visible reply and
+            // turn_settled — a half-open socket here left the card "working"
+            // forever after the answer was already on screen.
+            await Promise.race([
+              finishTurn(entry.live, turnState.status).catch(() => undefined),
+              new Promise<void>((resolve) => {
+                const timer = setTimeout(resolve, 60_000);
+                timer.unref?.();
+              }),
+            ]);
           }
           // A completed turn may have landed a commit — reflect it into the war
           // map. Fire-and-forget; reflection never delays or breaks the turn.
@@ -3418,6 +3624,14 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
           // successor may own it now. Touching entry state or emitting
           // settlement events here would corrupt that successor. Drop out.
           if (entry.zombieTurnInputIds?.delete(inputId)) return;
+          // Everything before the state-reset tail below is best-effort and can
+          // THROW OR AWAIT: a momentarily locked kernel DB (Defender/OneDrive)
+          // used to abort this finally before turnActive was cleared — the card
+          // stayed "working" forever and only an app restart recovered. The
+          // reset tail must run no matter what happens in here.
+          let settlementRecoveryScheduled = false;
+          const deferredCommands: Array<{ text: string; sessionId?: string; inputId: string }> = [];
+          try {
           // A vision escalation was for THIS turn only — hand the conversation
           // back to the user's pinned model. If the failover loop replaced the
           // model mid-turn (provider death), its choice wins — don't revert onto
@@ -3443,7 +3657,6 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
           // queue input behind a row with no runner. Make the explicit failed
           // boundary terminal here; canonical messages/effects remain in the
           // ledger and a fresh user message can continue from them safely.
-          let settlementRecoveryScheduled = false;
           if (turnState.status === "failed") {
             const kernel = await openWorkspaceSessionKernel(entry.live.context.workspace);
             const failedOwner = kernel.getInput(inputId);
@@ -3493,7 +3706,6 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
           while (entry.pendingSteerTasks.size > 0) {
             await Promise.allSettled([...entry.pendingSteerTasks.values()]);
           }
-          const deferredCommands: Array<{ text: string; sessionId?: string; inputId: string }> = [];
           if (entry.deferredSteers.size > 0) {
             const kernel = await openWorkspaceSessionKernel(entry.live.context.workspace);
             let nextDeferredChosen = false;
@@ -3523,6 +3735,17 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
               }
             }
           }
+          } catch (settleErr) {
+            // Never let settlement bookkeeping wedge the session — log to
+            // stderr (surfaces as daemon_stderr) and fall through to the reset.
+            console.error(`post-turn settlement error (input ${inputId}): ${settleErr instanceof Error ? settleErr.message : String(settleErr)}`);
+          }
+          // Zombie check #2: the force-release timer may have fired DURING the
+          // awaits above — it already reset the entry, decremented activeTurns,
+          // emitted settlement, and possibly evicted this entry while a
+          // successor took over. Running the tail now would double-decrement
+          // and clear the successor's state out from under it.
+          if (entry.zombieTurnInputIds?.delete(inputId)) return;
           const completedStartupRecovery = entry.startupRecoveryInputId === inputId;
           const startupRecoveryWasCancelled = completedStartupRecovery && entry.startupRecoveryCancelRequested;
           const cancelledInputId = entry.cancelRequested
@@ -3541,6 +3764,11 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
           entry.turnActive = false;
           entry.activeInputId = undefined;
           entry.cancelRequested = false;
+          // Stale Stop bookkeeping made the NEXT turn's first Stop click an
+          // instant force-kill: `since` was computed from a timestamp left over
+          // from a Stop that settled normally minutes earlier.
+          entry.cancelRequestedAt = undefined;
+          entry.forceStopRequested = false;
           entry.steeringPhase = "idle";
           entry.activeToolIds.clear();
           activeTurns--;
@@ -3589,7 +3817,12 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
               inputId: deferred.inputId,
             });
           }
-          await scheduleNextStartupRecovery(entry);
+          try {
+            await scheduleNextStartupRecovery(entry);
+          } catch (recoveryErr) {
+            // Recovery scheduling must never block turn_settled below.
+            console.error(`startup-recovery scheduling error: ${recoveryErr instanceof Error ? recoveryErr.message : String(recoveryErr)}`);
+          }
           // Whatever the turn left running is now the user's to see. This is the
           // event the background panel folds; a turn that walks away from a live
           // job can no longer do it quietly.
@@ -3600,7 +3833,11 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
             continuing: settlementRecoveryScheduled || deferredCommands.length > 0 || Boolean(entry.startupRecoveryInputId),
           });
         }
-      })();
+      })().catch((err) => {
+        // Absolute backstop: the runner's own try/catch/finally should make
+        // this unreachable, but a detached rejection here used to be silent.
+        console.error(`turn runner escaped its guards: ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
+      });
     }
   } finally {
     setExtensionBrowserBridge(null);

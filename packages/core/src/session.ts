@@ -1693,6 +1693,12 @@ export class Session {
     recoverExistingOwner = false,
   ): Promise<boolean> {
     if (!this.kernel) return true;
+    // Wall-clock ceiling: a stranded admitted input owned by a dead generator
+    // (e.g. a steer whose caller crashed) can sit at the head forever, and this
+    // poll would spin eternally with the turn never settling. On deadline we
+    // return false — the caller path already handles false honestly (cancelled
+    // → interrupted terminal, otherwise settle as completed without claiming).
+    const deadline = Date.now() + 60_000;
     while (true) {
       const own = this.kernel.getInput(inputId);
       if (!own || own.state === "cancelled" || own.state === "consumed") return false;
@@ -1720,6 +1726,15 @@ export class Session {
         : runnablePending.find((input) => input.delivery === "steer") ??
           runnablePending.find((input) => input.delivery === "queue");
       if (head?.id === inputId && head.state === "admitted") return true;
+      if (Date.now() >= deadline) {
+        try {
+          process.stderr.write(
+            `[session] waitUntilKernelInputHead: input ${inputId} did not reach the queue head within 60s ` +
+            `(head=${head ? `${head.id} (${head.delivery}/${head.state})` : "none"}); settling without claiming\n`,
+          );
+        } catch { /* stderr unavailable */ }
+        return false;
+      }
       await this.waitForKernelProgress(50);
     }
   }
@@ -2193,6 +2208,18 @@ export class Session {
     this.ioChain = this.ioChain
       .catch(() => undefined)
       .then(() => appendFile(this.eventsPath, line, "utf8"))
+      .then(() => {
+        // A later successful append means the fault was transient (Defender /
+        // OneDrive briefly locking the file, EPERM/EBUSY). Clear the latch so
+        // one hiccup doesn't poison every subsequent flush() with "rollout
+        // persistence failed" for the rest of the session.
+        if (this.ioError) {
+          try {
+            process.stderr.write(`[session] rollout persistence recovered (${this.eventsPath})\n`);
+          } catch { /* stderr unavailable */ }
+          this.ioError = null;
+        }
+      })
       .catch((error: unknown) => {
         const err = error instanceof Error ? error : new Error(String(error));
         // Surface the FIRST failure immediately (disk full, perms, path gone) —

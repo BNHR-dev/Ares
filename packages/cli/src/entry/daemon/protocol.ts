@@ -68,6 +68,8 @@ export interface DaemonInputCommand {
    *  match a response to the exact call (TTS utterances, surface clicks). */
   invokeId?: string;
   /** cognitive_state has no payload beyond sessionId. */
+  /** fleets_list / subagents_list — read-only subagent visibility; no payload
+   *  beyond sessionId. Replies are `fleets_list` / `subagents_list` events. */
   /** persona_write payload — the roster card the owner authored in HELM → Agents.
    *  `name`, `label`, `model` and `reason` reuse the fields above. */
   body?: string;

@@ -54,6 +54,8 @@ import {
   type PresenceMode,
   type PresenceSnapshot,
   type BackgroundJobVm,
+  type FleetSummaryWire,
+  type SubagentJobWire,
 } from "./state/events";
 import {
   type ReasoningLevel,
@@ -445,6 +447,90 @@ type DaemonState = "starting" | "running" | "stopped" | "error";
 
 const MAX_AUTO_RESTARTS = 3;
 
+/** How many transcript items stay mounted at once. Long sessions used to
+ *  mount every bubble forever — the unbounded DOM (plus full-size data-URI
+ *  images inside it) is what walked the WebView2 renderer to 4.8GB. */
+const TRANSCRIPT_WINDOW = 150;
+
+/** Live automation frames drawn into ONE persistent canvas. The old path set
+ *  a brand-new data: URI on a mounted <img> for every frame — each frame a
+ *  fresh decode + cached bitmap the renderer had to GC, the CPU/memory churn
+ *  behind the WebView2 leak during browser-driving runs. The canvas backing
+ *  store is allocated once and repainted in place. */
+function LiveFrameCanvas({ frame, className, title }: { frame: string; className?: string; title?: string }) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    let cancelled = false;
+    const img = new Image();
+    img.onload = () => {
+      if (cancelled) return;
+      if (canvas.width !== img.naturalWidth || canvas.height !== img.naturalHeight) {
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+      }
+      canvas.getContext("2d")?.drawImage(img, 0, 0);
+    };
+    img.src = `data:image/jpeg;base64,${frame}`;
+    return () => {
+      cancelled = true;
+      img.onload = null;
+      img.src = "";
+    };
+  }, [frame]);
+  return <canvas ref={canvasRef} className={className} title={title} aria-label={title} />;
+}
+
+/** Longest edge of a transcript image thumbnail's backing store. */
+const THUMB_EDGE = 320;
+
+/** Transcript attachment images, decoded ONCE into a small canvas. The full
+ *  data: URL used to sit in a mounted <img> per attachment — every pasted
+ *  screenshot pinned its full decoded bitmap in the renderer for the life of
+ *  the session (a large slice of the 4.8GB leak). The full image now only
+ *  mounts while the lightbox is open. */
+function BubbleImage({ src, alt }: { src: string; alt: string }) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [full, setFull] = useState(false);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    let cancelled = false;
+    const img = new Image();
+    img.onload = () => {
+      if (cancelled) return;
+      const scale = Math.min(1, THUMB_EDGE / Math.max(1, Math.max(img.naturalWidth, img.naturalHeight)));
+      canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+      canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+      canvas.getContext("2d")?.drawImage(img, 0, 0, canvas.width, canvas.height);
+    };
+    img.src = src;
+    return () => {
+      cancelled = true;
+      img.onload = null;
+      img.src = "";
+    };
+  }, [src]);
+  return (
+    <>
+      <canvas
+        ref={canvasRef}
+        className="bubbleImage"
+        role="img"
+        aria-label={alt}
+        title="Click to view full size"
+        onClick={() => setFull(true)}
+      />
+      {full ? (
+        <div className="imageLightbox" onClick={() => setFull(false)} role="dialog" aria-label={alt}>
+          <img src={src} alt={alt} />
+        </div>
+      ) : null}
+    </>
+  );
+}
+
 function App() {
   const native = useMemo(hasNativeBridge, []);
   const [prefs, setPrefs] = useState<Prefs>(loadPrefs);
@@ -463,7 +549,7 @@ function App() {
   const [personaStyle, setPersonaStyle] = useState<string>("ares");
   // Which HELM tab is showing. Lifted out of HelmView so the status bar's
   // persona chip can jump straight to the gallery.
-  const [helmTab, setHelmTab] = useState<"overview" | "agents" | "mind">("overview");
+  const [helmTab, setHelmTab] = useState<"overview" | "agents" | "fleets" | "mind">("overview");
   const [personaSuggestion, setPersonaSuggestion] = useState<{ persona: PersonaVm; matched: string[] } | null>(null);
   const [usageStats, setUsageStats] = useState<UsageStats | null>(null);
   const [consciousness, setConsciousness] = useState<ConsciousnessVm>({
@@ -480,6 +566,13 @@ function App() {
   const [keyStatus, setKeyStatus] = useState<Record<string, boolean>>({});
   const [permissions, setPermissions] = useState<PermSettings>(DEFAULT_PERMS);
   const [opStatus, setOpStatus] = useState<{ activeCount: number; goals: Array<{ id: string; statement: string; status: string; progress: number }>; autotick: boolean; trust?: Array<{ domain: string; level: number; proven: number }> } | null>(null);
+  // Operator halt state. Optimistic on click; an operator_status frame that
+  // carries `halted` is authoritative and overwrites the guess on the next poll.
+  const [opHalted, setOpHalted] = useState(false);
+  // HELM → Fleets: fleet history + background Task subagents, fed by the
+  // fleets_list / subagents_list reply events on the 5s helm poll.
+  const [fleetHistory, setFleetHistory] = useState<FleetSummaryWire[]>([]);
+  const [subagentJobs, setSubagentJobs] = useState<SubagentJobWire[]>([]);
   const [oauthProviders, setOauthProviders] = useState<OAuthProviderVm[]>([]);
   // Ares Gateway account (doingteam.com): live snapshot + grant toasts.
   const [gatewayAccount, setGatewayAccount] = useState<GatewayAccountVm | null>(null);
@@ -573,8 +666,11 @@ function App() {
    * Stop click and an immediate Enter keypress, so this closes that tiny race. */
   const stoppingSessionsRef = useRef(new Set<string>());
   /** Titles as they were before an in-flight rename, so a failed persist can
-   * revert the optimistic update instead of lying until the next restart. */
-  const pendingRenamesRef = useRef(new Map<string, string>());
+   * revert the optimistic update instead of lying until the next restart.
+   * `pending` counts unacknowledged renames: an ack only clears the stash
+   * when it settles the LAST one, so a rapid A→B→C where B succeeds and C
+   * fails still reverts to something real. */
+  const pendingRenamesRef = useRef(new Map<string, { title: string; pending: number }>());
   const rosterRef = useRef<PersonaVm[]>([]);
   // While the experimental Living Surface owns this session it owns narration
   // too. The hidden Classic window must not read the JSON patch stream aloud.
@@ -1042,6 +1138,10 @@ function App() {
     const scry = () => {
       daemonCmd({ type: "operator_status" });
       daemonCmd({ type: "usage_stats", days: 14 });
+      // The Fleets tab's history + background agents ride the same 5s cadence
+      // (cheap list reads; fetched for all tabs so the data is warm on switch).
+      daemonCmd({ type: "fleets_list" });
+      daemonCmd({ type: "subagents_list" });
       scryCognitive();
     };
     scry();
@@ -1196,6 +1296,12 @@ function App() {
     let poller: number | null = null;
     let unlisten: (() => void) | undefined;
 
+    // Untagged daemon events belong to the PRIMARY card (tagEmit omits the
+    // sessionId for the primary session) — never whichever card the owner
+    // happens to be viewing. Fall back to the active card only when no
+    // primary has been established yet.
+    const ownerOf = (e: { sessionId?: string }) => e.sessionId ?? (primarySessionRef.current || activeRef.current);
+
     const handleShellEvent = (e: AresEvent): boolean => {
       switch (e.type) {
         case "daemon_ready":
@@ -1226,8 +1332,8 @@ function App() {
           return true;
         }
         case "background_jobs": {
-          const sid = (e as { sessionId?: string }).sessionId ?? activeRef.current;
-          const jobs = Array.isArray(e.jobs) ? e.jobs : [];
+          const sid = ownerOf(e as { sessionId?: string });
+          const jobs = Array.isArray(e.jobs) ? (e.jobs as BackgroundJobVm[]) : [];
           setBgJobs((prev) => ({ ...prev, [sid]: jobs }));
           return true;
         }
@@ -1251,17 +1357,20 @@ function App() {
         case "interrupted_by_user":
         case "interrupt_forced":
           pushLog(`[garrison] ${e.type}`);
-          if (e.type === "interrupt_requested" || e.type === "interrupt_pending") {
-            stoppingSessionsRef.current.add(e.sessionId ?? activeRef.current);
+          if (e.type === "interrupt_requested" || e.type === "interrupt_pending" || e.type === "interrupt_forced") {
+            // forced = killed but not yet settled; the daemon's force-release
+            // guarantees interrupt_settled within its grace window, which is
+            // what clears the gate.
+            stoppingSessionsRef.current.add(ownerOf(e));
           } else {
-            stoppingSessionsRef.current.delete(e.sessionId ?? activeRef.current);
+            stoppingSessionsRef.current.delete(ownerOf(e));
           }
-          applyTo(e.sessionId ?? activeRef.current, (s) => foldEvent(s, e));
+          applyTo(ownerOf(e), (s) => foldEvent(s, e));
           return true;
         case "startup_recovery_preparing":
         case "startup_recovery_queued":
         case "startup_recovery_failed": {
-          const recoverySession = e.sessionId ?? activeRef.current;
+          const recoverySession = ownerOf(e);
           pushLog(`[garrison] ${e.type}${e.inputId ? ` · ${e.inputId}` : ""}`);
           // A failed takeover is a real terminal UI boundary. In particular,
           // clear a Stop gate armed during lease wait so the composer cannot
@@ -1277,7 +1386,7 @@ function App() {
           // optimistic local guess, so it can never show a mode the session
           // did not actually take.
           const mode = e.mode === "plan" ? "plan" : "build";
-          applyTo(e.sessionId ?? activeRef.current, (s) => ({ ...s, workflowMode: mode }));
+          applyTo(ownerOf(e), (s) => ({ ...s, workflowMode: mode }));
           pushLog(e.error ? `[garrison] workflow_mode rejected: ${e.error}` : `[garrison] ${mode} mode`);
           return true;
         }
@@ -1299,7 +1408,7 @@ function App() {
           // The pin is per-session state, not just a log line — reflect it so
           // the footer/badges agree with what the daemon will actually run.
           if (e.model) {
-            applyTo(e.sessionId ?? activeRef.current, (s) => ({
+            applyTo(ownerOf(e), (s) => ({
               ...s,
               sessionModel: String(e.model),
               turnModel: String(e.model),
@@ -1313,7 +1422,7 @@ function App() {
           const restored = { ...prefsRef.current, provider: currentProvider, model: currentModel };
           setPrefs(restored);
           savePrefs(restored);
-          applyTo(e.sessionId ?? activeRef.current, (s) => foldEvent({
+          applyTo(ownerOf(e), (s) => foldEvent({
             ...s,
             turnProvider: currentProvider,
             turnModel: currentModel,
@@ -1554,6 +1663,15 @@ function App() {
             autotick: e.autotick !== false,
             trust: Array.isArray(e.trust) ? (e.trust as Array<{ domain: string; level: number; proven: number }>) : [],
           });
+          // Authoritative halt state when the daemon reports it; otherwise the
+          // optimistic local flag from the Halt/Resume button stands.
+          if (typeof e.halted === "boolean") setOpHalted(e.halted);
+          return true;
+        case "fleets_list":
+          setFleetHistory(Array.isArray(e.fleets) ? e.fleets : []);
+          return true;
+        case "subagents_list":
+          setSubagentJobs(Array.isArray(e.jobs) ? (e.jobs as SubagentJobWire[]) : []);
           return true;
         case "gateway_account":
           setGatewayAccount(e as unknown as GatewayAccountVm);
@@ -1678,7 +1796,11 @@ function App() {
         }
         case "session_renamed": {
           if (e.id && e.ok !== false) {
-            pendingRenamesRef.current.delete(e.id);
+            const stash = pendingRenamesRef.current.get(e.id);
+            if (stash && --stash.pending <= 0) pendingRenamesRef.current.delete(e.id);
+            // A success while more renames are pending becomes the new revert
+            // point: only the still-unacked renames could fail from here.
+            else if (stash && typeof e.label === "string" && e.label) stash.title = compact(e.label, 42);
             const label = typeof e.label === "string" ? e.label : "";
             setSessions((current) => current.map((session) => (
               session.id === e.id ? { ...session, title: label ? compact(label, 42) : session.title } : session
@@ -1686,12 +1808,12 @@ function App() {
           } else if (e.id) {
             // The rename never persisted — revert the optimistic title so the
             // rail doesn't show a name that will vanish on restart.
-            const previous = pendingRenamesRef.current.get(e.id);
+            const stash = pendingRenamesRef.current.get(e.id);
             pendingRenamesRef.current.delete(e.id);
             pushLog(`[garrison] session rename failed for ${e.id} — title reverted`);
-            if (previous !== undefined) {
+            if (stash !== undefined) {
               setSessions((current) => current.map((session) => (
-                session.id === e.id ? { ...session, title: previous } : session
+                session.id === e.id ? { ...session, title: stash.title } : session
               )));
             }
           }
@@ -1707,16 +1829,31 @@ function App() {
             const metaHasLabel =
               !!e.meta && typeof e.meta === "object" && !!(e.meta as { label?: unknown }).label &&
               typeof (e.meta as { label?: unknown }).label === "string";
-            setSessions((current) => current.map((session) => (
-              session.id === e.id
-                ? {
-                    ...hydrated,
-                    title: metaHasLabel ? hydrated.title : session.title || hydrated.title,
-                    updatedAt: session.updatedAt,
-                    workflowMode: hydrated.workflowMode ?? session.workflowMode,
-                  }
-                : session
-            )));
+            // Placeholders must not outrank a real first-message title.
+            const keepable = (title: string | undefined): string | undefined =>
+              title && title !== "Saved session" && title !== "New session" ? title : undefined;
+            setSessions((current) => current.map((session) => {
+              if (session.id !== e.id) return session;
+              // A send/steer can land while the history request is in flight.
+              // If the local card is mid-turn, or already holds MORE than the
+              // snapshot, the snapshot is stale — keep the local transcript and
+              // busy state entirely (only the title may refresh) instead of
+              // erasing a message the user just sent.
+              if (session.busy || session.items.length > hydrated.items.length) {
+                return {
+                  ...session,
+                  loading: false,
+                  loaded: true,
+                  title: metaHasLabel ? hydrated.title : keepable(session.title) ?? hydrated.title,
+                };
+              }
+              return {
+                ...hydrated,
+                title: metaHasLabel ? hydrated.title : keepable(session.title) ?? hydrated.title,
+                updatedAt: session.updatedAt,
+                workflowMode: hydrated.workflowMode ?? session.workflowMode,
+              };
+            }));
           }
           return true;
         case "lifecycle":
@@ -1767,6 +1904,9 @@ function App() {
             } : s)),
           );
           stoppingSessionsRef.current.clear();
+          // The sweep above folded desktop_error into every busy session, which
+          // re-enables their approval buttons — release the matching locks.
+          permissionSubmissionLocks.current.clear();
           if (willRetry) {
             restartAttempts.current += 1;
             window.setTimeout(() => restartDaemon(), 900 * (attempt + 1));
@@ -1791,10 +1931,26 @@ function App() {
       if (ev.type === "permission_response" && ev.id) {
         permissionSubmissionLocks.current.delete(ev.id);
       }
+      // A daemon transport failure makes every in-flight approval delivery
+      // ambiguous. foldEvent re-enables the prompt buttons on desktop_error;
+      // the local submission locks must open at the same moment, or the
+      // re-enabled buttons are dead on click.
+      if (ev.type === "desktop_error") {
+        permissionSubmissionLocks.current.clear();
+      }
+      // Turn settlement clears the local Stop gate. The daemon does not always
+      // pair a Stop with interrupt_settled (a successor handoff cancels the
+      // settle and closes via plain turn_end/turn_settled) — without this, the
+      // session's composer stayed send/steer-blocked forever.
+      if (ev.type === "turn_settled" || ev.type === "turn_end") {
+        stoppingSessionsRef.current.delete(sid ?? (primarySessionRef.current || activeRef.current));
+      }
       // Feed the composer's token-flow strip: count every streamed character of
       // the session you're LOOKING at (text, thinking, tool-input authoring).
       // One integer addition on a module-level accumulator — no React involved.
-      if (!sid || sid === activeRef.current) {
+      // Untagged events belong to the PRIMARY card, so they only feed the strip
+      // (and the voice) when the primary is the card being looked at.
+      if ((sid ?? (primarySessionRef.current || activeRef.current)) === activeRef.current) {
         if (ev.type === "provider_attempt_superseded" && ev.reason === "steering") {
           // Any speech/text from this provider attempt is stale by definition.
           // The reducer removes only that attempt's draft items; stop its voice
@@ -1974,6 +2130,13 @@ function App() {
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
     setPinned(nearBottom);
   }, []);
+  // Transcript window: long sessions used to mount EVERY item forever — the
+  // 4.8GB WebView2 renderer leak. Only the newest window stays mounted; the
+  // "show earlier" control walks back in slabs. Reset per session card.
+  const [transcriptCap, setTranscriptCap] = useState(TRANSCRIPT_WINDOW);
+  useEffect(() => {
+    setTranscriptCap(TRANSCRIPT_WINDOW);
+  }, [active?.id]);
   const jumpToLatest = useCallback(() => {
     const el = scroller.current;
     if (el) el.scrollTop = el.scrollHeight;
@@ -2771,9 +2934,9 @@ function App() {
     const clean = label.trim().slice(0, 120);
     if (!clean) return;
     const previous = sessionsRef.current.find((s) => s.id === id)?.title;
-    if (previous !== undefined && !pendingRenamesRef.current.has(id)) {
-      pendingRenamesRef.current.set(id, previous);
-    }
+    const stash = pendingRenamesRef.current.get(id);
+    if (stash) stash.pending++;
+    else if (previous !== undefined) pendingRenamesRef.current.set(id, { title: previous, pending: 1 });
     setSessions((current) => current.map((s) => (s.id === id ? { ...s, title: compact(clean, 42) } : s)));
     daemonCmd({ type: "session_rename", id, label: clean });
   };
@@ -2791,16 +2954,36 @@ function App() {
       }
       return next;
     });
-    if (prefs.pinned.includes(id)) {
-      const cleaned = { ...prefs, pinned: prefs.pinned.filter((p) => p !== id) };
+    const hadProject = prefs.sessionProjects?.[id] !== undefined;
+    if (prefs.pinned.includes(id) || hadProject) {
+      // Drop the closed id from pins AND project membership — a stale
+      // sessionProjects entry accumulated forever and could resurrect a
+      // ghost project name. Collapse state for now-empty projects goes too.
+      const { [id]: _closed, ...restProjects } = prefs.sessionProjects ?? {};
+      const remainingNames = new Set(Object.values(restProjects));
+      const cleaned: Prefs = {
+        ...prefs,
+        pinned: prefs.pinned.filter((p) => p !== id),
+        sessionProjects: Object.keys(restProjects).length > 0 ? restProjects : undefined,
+        collapsedProjects: prefs.collapsedProjects?.filter((name) => remainingNames.has(name)),
+      };
       setPrefs(cleaned);
       savePrefs(cleaned);
     }
     daemonCmd({ type: "session_delete", id });
   };
 
-  /** The vault: every image, file, and link Ares produced, across sessions. */
-  const vault = useMemo(() => collectVault(sessions), [sessions]);
+  /** The vault: every image, file, and link Ares produced, across sessions.
+   *  Scanning every message of every session is O(transcript) — doing it on
+   *  EVERY streamed token was a per-delta full rescan. Compute only while the
+   *  artifacts view is actually open (it refreshes on open because `view` is a
+   *  dependency); off-view, serve the last computed snapshot so the nav badge
+   *  keeps its count without any rescan. */
+  const vaultCacheRef = useRef<Vault>({ images: [], files: [], links: [] });
+  const vault = useMemo(() => {
+    if (view === "artifacts") vaultCacheRef.current = collectVault(sessions);
+    return vaultCacheRef.current;
+  }, [view, sessions]);
   const vaultCount = vault.images.length + vault.files.length + vault.links.length;
 
   // God-of-War drivers for the whole shell: --heat (molten temperature) and
@@ -3352,9 +3535,19 @@ function App() {
             cognitive={cognitive}
             tab={helmTab}
             onTab={setHelmTab}
+            fleetHistory={fleetHistory}
+            subagentJobs={subagentJobs}
+            operatorHalted={opHalted}
+            onToggleHalt={() => {
+              daemonCmd({ type: "operator_control", action: opHalted ? "resume" : "halt" });
+              setOpHalted((h) => !h);
+            }}
+            onResumeFleet={(fleetId) =>
+              send(`Resume the agent fleet "${fleetId}" — author a Conductor FleetSpec with resumeFleetId: "${fleetId}" so the completed leaves are reused from disk and only the failed/incomplete ones re-run.`)
+            }
             onOpenSession={openSession}
             onToggleAutotick={() => daemonCmd({ type: "operator_autotick", enabled: !(opStatus?.autotick ?? true) })}
-            onRefresh={() => { daemonCmd({ type: "operator_status" }); daemonCmd({ type: "usage_stats", days: 14 }); daemonCmd({ type: "roster_list", sessionId: activeId }); }}
+            onRefresh={() => { daemonCmd({ type: "operator_status" }); daemonCmd({ type: "usage_stats", days: 14 }); daemonCmd({ type: "roster_list", sessionId: activeId }); daemonCmd({ type: "fleets_list" }); daemonCmd({ type: "subagents_list" }); }}
             onAdoptPersona={adoptPersona}
             onDeletePersona={(name) => daemonCmd({ type: "persona_delete", name })}
             onWritePersona={(draft) => daemonCmd({ type: "persona_write", ...draft })}
@@ -3397,7 +3590,20 @@ function App() {
                 </div>
               </div>
             ) : null}
-            {active?.items.map((item) => (
+            {active && active.items.length > transcriptCap ? (
+              <button
+                className="showEarlier"
+                onClick={() => setTranscriptCap((cap) => cap + TRANSCRIPT_WINDOW)}
+              >
+                Show earlier — {active.items.length - transcriptCap} older items
+              </button>
+            ) : null}
+            {(active
+              ? active.items.length > transcriptCap
+                ? active.items.slice(-transcriptCap)
+                : active.items
+              : []
+            ).map((item) => (
               <ItemView key={item.key} item={item} onPermission={respondPermission} onArtifact={openArtifact} onSignIn={startAnthropicSignIn} toolDisplay={prefs.toolDisplay} />
             ))}
             {/* Who is answering, and why. An adopted persona is never silent:
@@ -3459,8 +3665,10 @@ function App() {
 
         {active?.codingBackend ? <CodingBackendScene vm={active.codingBackend} /> : null}
 
-        {view !== "helm" ? (
-          <Composer
+        {/* Kept MOUNTED on HELM (hidden, not unmounted) — unmounting destroyed
+            the draft text and pending attachments every time the view flipped. */}
+        <Composer
+            hidden={view === "helm"}
             busy={active?.busy ?? false}
             cancelling={active?.cancelling ?? false}
             model={liveModel}
@@ -3488,8 +3696,7 @@ function App() {
             onModelChip={() => setModelPopOpen(true)}
             onRoutingChip={() => setRoutingOpen(true)}
             slashActions={slashActions}
-          />
-        ) : null}
+        />
 
         <footer className="statusBar">
           <div className="statusGroup">
@@ -3702,10 +3909,10 @@ function App() {
                   {forgeCanEmbed(liveTarget.url) ? (
                     <>
                       <iframe key={`${liveTarget.url}-${liveRevision}`} title={liveTarget.title || "Live preview"} src={forgeFrameUrl(liveTarget.url, native, liveRevision)} sandbox={PREVIEW_SANDBOX} />
-                      {liveBrowser ? <img className="liveTelemetry" src={`data:image/jpeg;base64,${liveBrowser.frame}`} alt="Latest automation frame" title="Latest frame seen by Ares" /> : null}
+                      {liveBrowser ? <LiveFrameCanvas className="liveTelemetry" frame={liveBrowser.frame} title="Latest frame seen by Ares" /> : null}
                     </>
                   ) : liveBrowser ? (
-                    <img className="liveTelemetryMain" src={`data:image/jpeg;base64,${liveBrowser.frame}`} alt="Live browser controlled by Ares" />
+                    <LiveFrameCanvas className="liveTelemetryMain" frame={liveBrowser.frame} title="Live browser controlled by Ares" />
                   ) : (
                     <div className="externalPreviewNotice">
                       <strong>This site cannot run inside the Forge.</strong>
@@ -5050,6 +5257,12 @@ function HelmModern({
   cognitive,
   tab,
   onTab,
+  activeFleet,
+  fleetHistory,
+  subagentJobs,
+  operatorHalted,
+  onToggleHalt,
+  onResumeFleet,
   onOpenSession,
   onToggleAutotick,
   onRefresh,
@@ -5070,8 +5283,15 @@ function HelmModern({
   /** Controlled by the app so the status bar's persona chip can deep-link
    *  straight to Agents — a "you're wearing Forge" indicator you can't click
    *  through to is only half an answer. */
-  tab: "overview" | "agents" | "mind";
-  onTab: (tab: "overview" | "agents" | "mind") => void;
+  tab: "overview" | "agents" | "fleets" | "mind";
+  onTab: (tab: "overview" | "agents" | "fleets" | "mind") => void;
+  /** The active session's live fleet board — mirrored into the Fleets tab. */
+  activeFleet: FleetVm | undefined;
+  fleetHistory: FleetSummaryWire[];
+  subagentJobs: SubagentJobWire[];
+  operatorHalted: boolean;
+  onToggleHalt: () => void;
+  onResumeFleet: (fleetId: string) => void;
   onOpenSession: (id: string) => void;
   onToggleAutotick: () => void;
   onRefresh: () => void;
@@ -5102,6 +5322,12 @@ function HelmModern({
   const reusedPct = usage && usage.tokensIn > 0 ? Math.round((usage.cacheReadTokens / usage.tokensIn) * 100) : 0;
   const recent = sessions.filter((s) => s.loaded !== false || s.items.length > 0).slice(0, 5);
 
+  // Live workers for the Fleets tab badge: running fleet agents + running
+  // background Task subagents.
+  const fleetsLive =
+    (activeFleet?.agents.filter((a) => a.status === "running").length ?? 0) +
+    subagentJobs.filter((j) => j.status === "running").length;
+
   const stats = [
     { label: "Missions", value: String(opStatus?.activeCount ?? 0), sub: opStatus?.autotick ? "hunting unattended" : "attended only" },
     { label: "Sessions", value: String(sessions.length), sub: "rehydrated from rollout" },
@@ -5127,6 +5353,7 @@ function HelmModern({
         {([
           { id: "overview" as const, label: "Overview", glyph: "helm" },
           { id: "agents" as const, label: "Agents", glyph: "skills" },
+          { id: "fleets" as const, label: "Fleets", glyph: "sessions" },
           { id: "mind" as const, label: "Mind", glyph: "search" },
         ]).map((t) => (
           <button
@@ -5140,6 +5367,7 @@ function HelmModern({
             <Sigil name={asSigilName(t.glyph)} size={18} />
             <span>{t.label}</span>
             {t.id === "agents" && roster.length > 0 ? <em className="hmTabCount">{roster.length}</em> : null}
+            {t.id === "fleets" && fleetsLive > 0 ? <em className="hmTabCount">{fleetsLive}</em> : null}
             {t.id === "mind" && attention > 0 ? <em className="hmTabCount" data-alert="1">{attention}</em> : null}
           </button>
         ))}
@@ -5148,6 +5376,13 @@ function HelmModern({
 
       {tab === "mind" ? (
         <HelmMind cognitive={cognitive} />
+      ) : tab === "fleets" ? (
+        <HelmFleets
+          fleet={activeFleet}
+          history={fleetHistory}
+          jobs={subagentJobs}
+          onResume={onResumeFleet}
+        />
       ) : tab === "agents" ? (
         <HelmAgents
           roster={roster}
@@ -5191,6 +5426,17 @@ function HelmModern({
             <span>Unattended hunt</span>
             <i className="hmSwitch" data-on={opStatus?.autotick ? "1" : "0"} />
           </button>
+          <button
+            className="hmToggle hmHalt"
+            data-halted={operatorHalted ? "1" : "0"}
+            onClick={onToggleHalt}
+            title={operatorHalted
+              ? "The operator is halted — nothing advances until you resume it."
+              : "Stop the operator from advancing any mission until you resume it."}
+          >
+            <span>{operatorHalted ? "Resume operator" : "Halt operator"}</span>
+            <i className="hmSwitch" data-on={operatorHalted ? "0" : "1"} />
+          </button>
         </section>
 
         <section className="hmPanel">
@@ -5224,6 +5470,86 @@ function HelmModern({
       </div>
       </div>
       )}
+    </div>
+  );
+}
+
+/** HELM → Fleets: the active session's live fleet board plus the durable
+ *  ledger — past fleets (fleets_list) and background Task subagents
+ *  (subagents_list), both refreshed on the 5s helm poll. The live board is
+ *  fold-state, so it moves in real time between polls. */
+function HelmFleets({
+  fleet,
+  history,
+  jobs,
+  onResume,
+}: {
+  fleet: FleetVm | undefined;
+  history: FleetSummaryWire[];
+  jobs: SubagentJobWire[];
+  onResume: (fleetId: string) => void;
+}) {
+  const when = (v?: string | number): string => {
+    if (v === undefined || v === "") return "";
+    const d = typeof v === "number" ? new Date(v) : new Date(String(v));
+    return Number.isNaN(d.getTime())
+      ? ""
+      : d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  };
+  return (
+    <div className="hmPane hmFleets" key="fleets">
+      <section className="hmPanel">
+        <div className="hmPanelLabel">Live fleet · this session</div>
+        {fleet && fleet.agents.length > 0 ? (
+          <FleetPanel fleet={fleet} onResume={onResume} />
+        ) : (
+          <p className="hmEmpty">No fleet marching in this session. Ask for a big parallel build and the board lights up here.</p>
+        )}
+      </section>
+
+      <div className="hmPanels">
+        <section className="hmPanel">
+          <div className="hmPanelLabel">Fleet ledger · {history.length}</div>
+          {history.length === 0 ? (
+            <p className="hmEmpty">No fleets on record yet. Every Conductor run lands here, win or lose.</p>
+          ) : (
+            history.slice(0, 20).map((f) => (
+              <div className="hmFleetRow" key={f.fleetId} data-status={f.status ?? ""}>
+                <i className="hmFleetDot" data-status={f.status ?? ""} aria-hidden="true" />
+                <div className="hmFleetText">
+                  <strong title={f.goal ? `${f.goal} · ${f.fleetId}` : f.fleetId}>{compact(f.goal || f.fleetId, 64)}</strong>
+                  <span>
+                    {f.status ?? "unknown"}
+                    {` · ${(f.phases ?? []).length} phase${(f.phases ?? []).length === 1 ? "" : "s"}`}
+                    {when(f.startedAt) ? ` · ${when(f.startedAt)}` : ""}
+                  </span>
+                </div>
+              </div>
+            ))
+          )}
+        </section>
+
+        <section className="hmPanel">
+          <div className="hmPanelLabel">Background agents · {jobs.length}</div>
+          {jobs.length === 0 ? (
+            <p className="hmEmpty">No background Task agents running or on record.</p>
+          ) : (
+            jobs.slice(0, 20).map((j) => (
+              <div className="hmFleetRow" key={j.jobId} data-status={j.status}>
+                <i className="hmFleetDot" data-status={j.status} aria-hidden="true" />
+                <div className="hmFleetText">
+                  <strong title={j.jobId}>{compact(j.description || j.jobId, 64)}</strong>
+                  <span>
+                    {j.status}
+                    {j.kind ? ` · ${j.kind}` : ""}
+                    {when(j.startedAt) ? ` · ${when(j.startedAt)}` : ""}
+                  </span>
+                </div>
+              </div>
+            ))
+          )}
+        </section>
+      </div>
     </div>
   );
 }
@@ -5807,6 +6133,11 @@ function HelmView({
   cognitive,
   tab,
   onTab,
+  fleetHistory,
+  subagentJobs,
+  operatorHalted,
+  onToggleHalt,
+  onResumeFleet,
   onOpenSession,
   onToggleAutotick,
   onRefresh,
@@ -5825,8 +6156,13 @@ function HelmView({
   roster: PersonaVm[];
   activePersona: PersonaVm | null;
   cognitive: CognitiveStateVm | null;
-  tab: "overview" | "agents" | "mind";
-  onTab: (tab: "overview" | "agents" | "mind") => void;
+  tab: "overview" | "agents" | "fleets" | "mind";
+  onTab: (tab: "overview" | "agents" | "fleets" | "mind") => void;
+  fleetHistory: FleetSummaryWire[];
+  subagentJobs: SubagentJobWire[];
+  operatorHalted: boolean;
+  onToggleHalt: () => void;
+  onResumeFleet: (fleetId: string) => void;
   onOpenSession: (id: string) => void;
   onToggleAutotick: () => void;
   onRefresh: () => void;
@@ -5902,6 +6238,12 @@ function HelmView({
         cognitive={cognitive}
         tab={tab}
         onTab={onTab}
+        activeFleet={active?.fleet}
+        fleetHistory={fleetHistory}
+        subagentJobs={subagentJobs}
+        operatorHalted={operatorHalted}
+        onToggleHalt={onToggleHalt}
+        onResumeFleet={onResumeFleet}
         onOpenSession={onOpenSession}
         onToggleAutotick={onToggleAutotick}
         onRefresh={onRefresh}
@@ -6678,6 +7020,7 @@ function PillBar({
 // or steers mid-turn (queue a message the daemon folds in at a safe boundary).
 
 const Composer = React.memo(function Composer({
+  hidden,
   busy,
   cancelling,
   model,
@@ -6698,6 +7041,8 @@ const Composer = React.memo(function Composer({
   onRoutingChip,
   slashActions,
 }: {
+  /** display:none instead of unmount — preserves the draft across view flips. */
+  hidden?: boolean;
   busy: boolean;
   cancelling: boolean;
   model: string;
@@ -6743,6 +7088,8 @@ const Composer = React.memo(function Composer({
     setAttachmentsState(attachmentsRef.current);
   };
   const ref = useRef<HTMLTextAreaElement | null>(null);
+  // True while submit() is in flight (it awaits pending attachment reads).
+  const submittingRef = useRef(false);
   const cancellingRef = useRef(cancelling);
   cancellingRef.current = cancelling;
   const restoredDraftIds = useRef<Set<string>>(new Set());
@@ -6892,27 +7239,36 @@ const Composer = React.memo(function Composer({
   }, []);
 
   const submit = async () => {
-    if (cancellingRef.current) return;
-    if (pendingReads.current.size > 0) await Promise.all(pendingReads.current);
-    if (cancellingRef.current) return;
-    const t = text.trim();
-    const currentAttachments = attachmentsRef.current;
-    if (!t && currentAttachments.length === 0) return;
-    // Images travel OUT OF BAND now (not concatenated into the message text) so
-    // the transcript renders thumbnails, not a truncated base64 blob. The daemon
-    // still gets them as image content, and send() shows them on the bubble.
-    const imgs = currentAttachments.map((a) => a.dataUrl);
-    if (busy) {
-      // If Stop/settlement won a local race, retain the draft. Ownership moves
-      // out of the composer only after the parent accepts this exact steer.
-      if (!onSteer(t, imgs)) return;
-    } else if (!onSend(t, imgs)) return;
-    setText("");
-    setAttachments(() => []);
-    if (ref.current) ref.current.style.height = "auto";
+    // Re-entry latch: the await below yields, so a second Enter (or Enter +
+    // send-button click) during a pending attachment read used to run the whole
+    // body twice and double-send the same draft.
+    if (submittingRef.current) return;
+    submittingRef.current = true;
+    try {
+      if (cancellingRef.current) return;
+      if (pendingReads.current.size > 0) await Promise.all(pendingReads.current);
+      if (cancellingRef.current) return;
+      const t = text.trim();
+      const currentAttachments = attachmentsRef.current;
+      if (!t && currentAttachments.length === 0) return;
+      // Images travel OUT OF BAND now (not concatenated into the message text) so
+      // the transcript renders thumbnails, not a truncated base64 blob. The daemon
+      // still gets them as image content, and send() shows them on the bubble.
+      const imgs = currentAttachments.map((a) => a.dataUrl);
+      if (busy) {
+        // If Stop/settlement won a local race, retain the draft. Ownership moves
+        // out of the composer only after the parent accepts this exact steer.
+        if (!onSteer(t, imgs)) return;
+      } else if (!onSend(t, imgs)) return;
+      setText("");
+      setAttachments(() => []);
+      if (ref.current) ref.current.style.height = "auto";
+    } finally {
+      submittingRef.current = false;
+    }
   };
   return (
-    <div className="composer">
+    <div className="composer" style={hidden ? { display: "none" } : undefined}>
       {todos.length > 0 ? <TodoPanel todos={todos} /> : null}
       <BackgroundPanel jobs={backgroundJobs} onStop={onStopBackground} onResume={onResumeBackground} />
       {/* Model / reasoning / routing live in the bottom HUD only — no duplicate
@@ -7378,7 +7734,7 @@ const ItemView = React.memo(function ItemView({
           {item.images && item.images.length > 0 ? (
             <div className="bubbleImages">
               {item.images.map((src, i) => (
-                <img key={i} className="bubbleImage" src={src} alt="attachment" />
+                <BubbleImage key={i} src={src} alt="attachment" />
               ))}
             </div>
           ) : null}
@@ -7405,7 +7761,7 @@ const ItemView = React.memo(function ItemView({
           <span className="steerTag">{label}</span>
           {item.images && item.images.length > 0 ? (
             <div className="bubbleImages">
-              {item.images.map((src, index) => <img key={index} className="bubbleImage" src={src} alt="steer attachment" />)}
+              {item.images.map((src, index) => <BubbleImage key={index} src={src} alt="steer attachment" />)}
             </div>
           ) : null}
           {item.text ? <div className="bubbleText">{item.text}</div> : null}

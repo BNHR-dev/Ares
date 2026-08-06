@@ -100,13 +100,19 @@ export function foldEvent(s: SessionVm, e: AresEvent): SessionVm {
   };
 
   switch (e.type) {
-    case "turn_start":
+    case "turn_start": {
       session.busy = true;
       session.cancelling = false;
       session.activity = "marshalling";
-      session.fleet = undefined; // clear last turn's fleet board
+      // Clear last turn's fleet board — UNLESS it can still resume or has
+      // agents still running (background fleets survive turn boundaries; a new
+      // turn must not make live background work invisible).
+      const fleet = session.fleet;
+      const keepFleet = !!fleet && (fleet.canResume === true || fleet.agents.some((a) => a.status === "running"));
+      if (!keepFleet) session.fleet = undefined;
       session.codingBackend = undefined; // and last turn's delegation cut-scene (fresh elapsed clock)
       break;
+    }
     case "startup_recovery_preparing":
       // The daemon has claimed visible ownership of this exact durable input,
       // even though it may still be waiting for a crashed lease to expire.
@@ -364,7 +370,46 @@ export function foldEvent(s: SessionVm, e: AresEvent): SessionVm {
       if (!d) break;
       // Conductor fleet board — one row per leaf agent, grouped by phase.
       if (d.kind === "fleet_activity" && d.event === "fleet_start") {
-        session.fleet = { active: true, fleetId: d.fleetId, agents: session.fleet?.agents ?? [] };
+        // A new fleet REPLACES the board (fresh run, fresh rows) — carrying the
+        // previous run's agents forward painted ghosts over a new fleet.
+        session.fleet = {
+          active: true,
+          fleetId: d.fleetId,
+          goal: typeof d.goal === "string" ? d.goal : undefined,
+          agents: [],
+        };
+        break;
+      }
+      // Phase lifecycle — folds into per-phase status, never into agent rows
+      // (the phase pseudo-agentId "phase:<id>" must not render as a worker).
+      if (d.kind === "fleet_activity" && (d.event === "phase_start" || d.event === "phase_end")) {
+        const phaseId = typeof d.phase === "string" && d.phase
+          ? d.phase
+          : typeof d.agentId === "string"
+            ? d.agentId.replace(/^phase:/, "")
+            : "";
+        if (phaseId) {
+          const phases = { ...(session.fleet?.phases ?? {}) };
+          const prev = phases[phaseId] ?? {};
+          const deliverables = d.contract?.deliverables;
+          phases[phaseId] = {
+            kind: typeof d.phaseKind === "string" ? d.phaseKind : prev.kind,
+            build: typeof d.build === "boolean" ? d.build : prev.build,
+            status: d.event === "phase_start"
+              ? "running"
+              : typeof d.status === "string" && d.status
+                ? d.status
+                : "completed",
+            failureReason: typeof d.failureReason === "string" ? d.failureReason : prev.failureReason,
+            deliverables: Array.isArray(deliverables) ? deliverables : prev.deliverables,
+          };
+          session.fleet = {
+            ...session.fleet,
+            active: true,
+            agents: session.fleet?.agents ?? [],
+            phases,
+          };
+        }
         break;
       }
       if (d.kind === "fleet_activity" && typeof d.agentId === "string") {
@@ -686,14 +731,19 @@ export function foldEvent(s: SessionVm, e: AresEvent): SessionVm {
       break;
     case "interrupt_settled":
     case "interrupted_by_user":
-    // A forced stop ends the turn's grip whether or not the generator
-    // unwound. It MUST clear the gate — the whole point is that the owner is
-    // no longer trapped on "stopping safely".
-    case "interrupt_forced":
       session.busy = false;
       session.cancelling = false;
       session.steerQueued = 0;
       session.activity = undefined;
+      break;
+    case "interrupt_forced":
+      // Processes were killed, but the turn has NOT settled yet — the daemon
+      // guarantees an interrupt_settled within its force-release grace window.
+      // Unlocking here invited sends that bounced off "turn_cancelling" for
+      // seconds; keep the gate honest (and bounded) until settlement.
+      session.busy = true;
+      session.cancelling = true;
+      session.activity = "force-stopping";
       break;
     case "interrupt_idle":
       // Idempotent Stop raced the real terminal boundary or targeted an idle
@@ -809,8 +859,9 @@ export function foldEvent(s: SessionVm, e: AresEvent): SessionVm {
       }
       // Provider errors are diagnostics, not terminal turn boundaries. Retry
       // or failover may follow; only turn_end/interrupt settlement unlocks UI.
-      session.busy = true;
-      if (retriable) session.activity = "retrying provider";
+      // Preserve — never CREATE — the busy gate: an error landing on an idle
+      // card must not park its composer in Stop mode.
+      if (session.busy && retriable) session.activity = "retrying provider";
       break;
     }
     case "desktop_error":

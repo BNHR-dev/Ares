@@ -488,6 +488,14 @@ export class AresSubagentRunner implements SubagentRunner {
     // — searching doesn't need the frontier model, and it keeps fan-out cheap.
     const model =
       def.modelPreference === "fast" && this.opts.fastModel ? this.opts.fastModel : this.opts.model;
+    // Fleet-board mirror: the desktop agent board renders `fleet_activity`
+    // payloads (keyed on agentId), so every Task subagent ALSO announces its
+    // lifecycle in that shape — phase "task" groups them apart from Conductor
+    // phases. The `subagent_activity` emission stays: the step-detail label
+    // in the transcript depends on it.
+    const boardRole = req.description || req.subagent_type;
+    const emitBoard = (data: Record<string, unknown>) =>
+      req.onProgress?.({ kind: "fleet_activity", agentId: id, role: boardRole, phase: "task", ...data });
     const onEvent = (ev: import("@ares/protocol").TurnEvent) => {
       journal.record(ev);
       if (ev.type === "tool_start") {
@@ -498,10 +506,14 @@ export class AresSubagentRunner implements SubagentRunner {
           tool: ev.name,
           activity: ev.activityDescription,
         });
+        emitBoard({ event: "tool", tool: ev.name, activity: ev.activityDescription });
       }
     };
-    const result = this.opts.sessionKernel
-      ? await this.runDurableTurn({
+    emitBoard({ event: "start" });
+    let result: ForkedTurnResult;
+    try {
+      result = this.opts.sessionKernel
+        ? await this.runDurableTurn({
           id,
           prompt: req.prompt,
           workspace: req.workspace,
@@ -536,11 +548,17 @@ export class AresSubagentRunner implements SubagentRunner {
           seed: { kind: "work-item", text: req.prompt },
           onEvent,
         });
+    } catch (error) {
+      // The board never shows a ghost agent: a thrown run settles as failed.
+      emitBoard({ event: "done", status: "failed" });
+      throw error;
+    }
 
     const events = result.events;
     const usage: Usage = result.usage;
     const toolCallCount = events.filter((e) => e.type === "tool_start").length;
     const status: SubagentRunResult["status"] = result.status === "completed" ? "completed" : "failed";
+    emitBoard({ event: "done", status });
 
     const hasAssistant = result.history.some((m) => m.role === "assistant");
     // A child that died before writing prose still owes the parent an

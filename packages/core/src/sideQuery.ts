@@ -17,6 +17,10 @@ export interface SideQueryOptions {
   system: string;
   user: string;
   signal?: AbortSignal;
+  /** Wall-clock deadline for the whole call. Default 60s — auxiliary
+   *  judgments run on post-turn settling paths, and a half-open socket
+   *  with no deadline used to hang settling forever. */
+  timeoutMs?: number;
   /** Output ceiling for the reply. Default 1024 — judgments are short. */
   maxOutputTokens?: number;
   reasoningLevel?: ReasoningLevel;
@@ -51,9 +55,14 @@ export async function sideQuery(opts: SideQueryOptions): Promise<string> {
   const outputTokens = opts.maxOutputTokens ?? 1024;
   const outputChars = Math.max(256, outputTokens * 4);
   const outputAbort = new AbortController();
-  const signal = opts.signal
-    ? AbortSignal.any([opts.signal, outputAbort.signal])
-    : outputAbort.signal;
+  // Always carry a wall-clock deadline: providers abort the underlying fetch
+  // on this signal, so a half-open socket becomes a clean end-of-stream (or
+  // AbortError rejection) instead of hanging post-turn settling forever.
+  const signal = AbortSignal.any([
+    ...(opts.signal ? [opts.signal] : []),
+    outputAbort.signal,
+    AbortSignal.timeout(opts.timeoutMs ?? 60_000),
+  ]);
   let chars = 0;
   for await (const ev of opts.provider.stream({
     model: opts.model,
