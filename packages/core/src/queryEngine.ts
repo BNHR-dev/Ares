@@ -1074,6 +1074,13 @@ export class QueryEngine {
    * real datapoint; EWMA-smoothed and clamped so one weird turn can't wreck it.
    */
   private tokenScale = 1;
+  /** The provider's REAL prompt ceiling, learned from rejections/stalls at
+   *  specific ladder rungs (real-token units). The configured budget can be
+   *  far above what the serving layer accepts (ollama num_ctx, gateway 413s);
+   *  without this the ladder re-walked its guaranteed-failing prefix on every
+   *  iteration — minutes of dead round trips per tool round. Null until a
+   *  rung fails; reset on provider/model switch. */
+  private learnedContextCeiling: number | null = null;
   /** Latest TodoWrite snapshot — so the end-of-turn gate can refuse a premature
    *  "done" while the model's own plan still has unfinished items. */
   private latestTodos: import("@ares/protocol").Todo[] = [];
@@ -1358,6 +1365,8 @@ export class QueryEngine {
       this.cfg.summarizeSpan = context.summarizeSpan;
     }
     this.tokenScale = 1;
+    // The ceiling was evidence about the OLD provider/model's serving limit.
+    this.learnedContextCeiling = null;
   }
 
   hydrate(messages: readonly Message[]): void {
@@ -1526,13 +1535,27 @@ export class QueryEngine {
    * and, unlike a blunt trim, it preserves every assistant reasoning step and
    * user message. Returns a UI event, or null when nothing was cleared.
    */
+  /** Compaction threshold in real tokens. Follows the LEARNED serving ceiling
+   *  when the ladder has discovered the provider accepts less than the
+   *  configured budget — otherwise compaction only fires after history is
+   *  already unsendable and every iteration pays doomed round trips first. */
+  private compactionThresholdTarget(): number {
+    const base =
+      this.cfg.compactionThresholdTokens ??
+      (this.cfg.contextBudgetTokens ? Math.floor(this.cfg.contextBudgetTokens * 0.8) : 0);
+    const learned = this.learnedContextCeiling;
+    if (learned !== null && learned > 0) {
+      const cap = Math.floor(learned * 0.8);
+      return base > 0 ? Math.min(base, cap) : cap;
+    }
+    return base;
+  }
+
   private microcompactIfNeeded(): {
     projection: Extract<TurnEvent, { type: "compaction" }>;
     reminder: Extract<TurnEvent, { type: "system_reminder_injected" }>;
   } | null {
-    const threshold =
-      this.cfg.compactionThresholdTokens ??
-      (this.cfg.contextBudgetTokens ? Math.floor(this.cfg.contextBudgetTokens * 0.8) : 0);
+    const threshold = this.compactionThresholdTarget();
     if (threshold <= 0) return null;
     const estBefore = this.messages.reduce((s, m) => s + estimateMessageTokens(m), 0);
     if (estBefore * this.tokenScale <= threshold * MICROCOMPACT_TRIGGER_RATIO) return null;
@@ -1639,9 +1662,7 @@ export class QueryEngine {
     // limit, and a later settled boundary can compact after the correction has
     // been answered or has produced tool results.
     if (this.messages.at(-1)?.metadata?.source === "steer") return null;
-    const threshold =
-      this.cfg.compactionThresholdTokens ??
-      (this.cfg.contextBudgetTokens ? Math.floor(this.cfg.contextBudgetTokens * 0.8) : 0);
+    const threshold = this.compactionThresholdTarget();
     if (threshold <= 0) return null;
 
     const estBefore = this.messages.reduce((s, m) => s + estimateMessageTokens(m), 0);
@@ -2131,7 +2152,17 @@ export class QueryEngine {
         // Budget attempts are real-token targets; convert to estimate units via
         // the live calibration so budgetMessages (which sums the raw estimator)
         // enforces the model's ACTUAL window, not the char-heuristic's guess.
-        const rawBudgetAttempts = contextBudgetAttempts(this.cfg.contextBudgetTokens ?? 0);
+        // Start the ladder from the learned serving ceiling, not the configured
+        // budget — re-walking rungs the provider already rejected burns minutes
+        // of stall watchdogs per iteration for a guaranteed failure.
+        const configuredBudget = this.cfg.contextBudgetTokens ?? 0;
+        const effectiveBudget =
+          this.learnedContextCeiling !== null
+            ? configuredBudget > 0
+              ? Math.min(configuredBudget, this.learnedContextCeiling)
+              : this.learnedContextCeiling
+            : configuredBudget;
+        const rawBudgetAttempts = contextBudgetAttempts(effectiveBudget);
         const budgetAttempts = rawBudgetAttempts.map((b) => (b > 0 ? Math.max(1, Math.floor(b / this.tokenScale)) : b));
         let modelStarted = false;
         budgetLoop: for (let attempt = 0; attempt < budgetAttempts.length; attempt++) {
@@ -2344,6 +2375,13 @@ export class QueryEngine {
                 // just burns another 90s of dead air. Shrink the history window
                 // and go again instead (bug report 4a8ac088: 90s×2+ of silence).
                 if (transientRetry >= 2 && !sawCommittedOutput && attempt < budgetAttempts.length - 1) {
+                  // Repeated stalls at this size are the provider choking on the
+                  // prompt — remember the working ceiling so later iterations
+                  // start below it instead of stalling here again.
+                  this.learnedContextCeiling = Math.min(
+                    this.learnedContextCeiling ?? Number.POSITIVE_INFINITY,
+                    rawBudgetAttempts[attempt + 1],
+                  );
                   yield {
                     type: "system_reminder_injected",
                     text: `Provider stalled ${transientRetry} times at this prompt size; retrying with a smaller recent-history window (${budgetAttempts[attempt + 1].toLocaleString()} tokens).`,
@@ -2402,6 +2440,12 @@ export class QueryEngine {
             !modelStarted &&
             attempt < budgetAttempts.length - 1
           ) {
+            // Hard evidence of the provider's real limit — remember it so the
+            // next iteration's ladder starts at a rung that can fit.
+            this.learnedContextCeiling = Math.min(
+              this.learnedContextCeiling ?? Number.POSITIVE_INFINITY,
+              rawBudgetAttempts[attempt + 1],
+            );
             yield {
               type: "system_reminder_injected",
               text: `Provider rejected the prompt as too large; retrying with a smaller recent-history window (${budgetAttempts[attempt + 1].toLocaleString()} tokens).`,

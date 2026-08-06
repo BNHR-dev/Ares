@@ -232,8 +232,15 @@ export function foldEvent(s: SessionVm, e: AresEvent): SessionVm {
       // The daemon resolved which model+lane handles this turn — attach it so
       // the user can SEE routing working, per message.
       session.turnModel = typeof e.model === "string" ? e.model : session.turnModel;
-      session.turnLane = typeof e.lane === "string" ? e.lane : session.turnLane;
+      // No lane on the event = manual routing (no router ran). Clear rather
+      // than keep a stale lane from an earlier auto-routed turn.
+      session.turnLane = typeof e.lane === "string" ? e.lane : undefined;
       session.turnProvider = typeof e.provider === "string" ? e.provider : session.turnProvider;
+      // "assigned" covers one-turn detours (vision escalation, failover, lane
+      // routing) — those must not overwrite the card's pinned selection.
+      if (typeof e.model === "string" && e.source !== "assigned") {
+        session.sessionModel = e.model;
+      }
       if (last?.kind === "assistant" && last.streaming) {
         items[items.length - 1] = { ...last, model: session.turnModel, lane: session.turnLane, provider: session.turnProvider };
       }

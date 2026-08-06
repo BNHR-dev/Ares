@@ -635,7 +635,13 @@ export function LivingSurface({ sessionId }: { sessionId: string }) {
   }, [addLine, persist]);
 
   const stopTurn = useCallback(() => {
-    if (!busyRef.current || cancellingRef.current) return;
+    if (!busyRef.current) return;
+    if (cancellingRef.current) {
+      // Second Stop escalates: the daemon force-kills what the turn is stuck
+      // on once the grace window has passed. Never a dead button.
+      void invoke("ares_interrupt", { sessionId }).catch(() => null);
+      return;
+    }
     cancellingRef.current = true;
     setCancelling(true);
     setActivity("stopping safely");
@@ -692,7 +698,7 @@ export function LivingSurface({ sessionId }: { sessionId: string }) {
         <span className="livingComposerIndex">INTENT</span>
         <input value={input} onChange={(event) => setInput(event.target.value)} placeholder={busy ? activity : "Tell Ares what this world should become…"} disabled={busy} autoFocus />
         <button type="button" className="livingMic" data-state={micState} onClick={() => void toggleMic()} aria-label="Speak to Ares"><i /><i /><i /></button>
-        {busy ? <button type="button" className="livingStop" onClick={stopTurn} disabled={cancelling}>{cancelling ? "STOPPING" : "STOP"}</button> : <button type="submit" className="livingSend" disabled={!input.trim()}>EVOLVE ↗</button>}
+        {busy ? <button type="button" className="livingStop" onClick={stopTurn} title={cancelling ? "stopping — press again to force-stop a stuck turn" : undefined}>{cancelling ? "STOPPING" : "STOP"}</button> : <button type="submit" className="livingSend" disabled={!input.trim()}>EVOLVE ↗</button>}
       </form>
 
       {permission ? (

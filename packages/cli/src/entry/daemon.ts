@@ -5,6 +5,13 @@
  *  ordinary unwind finishes first; short enough that nobody waits forever. */
 const FORCE_STOP_AFTER_MS = 12_000;
 
+/** After a forced abort, how long the killed turn gets to unwind on its own
+ *  before the daemon declares it a zombie and releases the session entry.
+ *  Covers the awaits a process kill cannot break (a hung verifier drain, a
+ *  dead promise) — the class that used to wedge "stopping safely" until the
+ *  app was restarted. */
+const FORCE_STOP_RELEASE_GRACE_MS = 10_000;
+
 import { authStatus, listSessions, loadSessionSnapshot, loadSessionRollout, deleteSession, renameSession, SessionNotFoundError, type Provider, classifyLane, runAnthropicLoginFlow, loadAnthropicTokens, sideQuery, sideQueryJson, QueryEngine, installGlobalCrashHandlers, EventRing, HeapGuard, readHeapSample, writeCrashLogSync, openWorkspaceSessionKernel, probeCredentialEncryption, connectMcpServer, disconnectMcpServer, setMcpServerEnabled, connectorNameFromUrl, runOpenAILoginFlow, runKimiLoginFlow, kimiAuthStatus } from "@ares/core";
 import { appendFile, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
@@ -236,6 +243,11 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
     /** When Stop was accepted — a Stop that never settles becomes force-eligible. */
     cancelRequestedAt?: number;
     forceStopRequested?: boolean;
+    /** Inputs whose turn was force-released after the forced abort itself
+     * failed to unwind the generator. The zombie turn's catch/finally must
+     * become a no-op: the daemon already declared the turn settled and may be
+     * running a successor on this entry (or a rehydrated one). */
+    zombieTurnInputIds?: Set<string>;
     /** Steers admitted against the active turn and not yet acknowledged. */
     pendingSteerInputIds: Set<string>;
     /** Admission/drain tasks, including the rare steer that becomes the next
@@ -1365,6 +1377,42 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
                 `Stop did not settle after ${Math.round(since / 1000)}s, so the turn's running processes were force-killed (${killed}). ` +
                 `Any side effect already in flight may be incomplete — check the workspace before continuing.`,
             });
+            // The kill usually lets the generator unwind and settle normally.
+            // When it does NOT (an await with no subprocess behind it — a hung
+            // verifier drain, a dead promise), the entry stayed wedged forever
+            // and only an app restart freed it. Grace-then-release: if the turn
+            // is still holding the entry, declare it a zombie so its eventual
+            // unwind is a no-op, release the entry, and evict the live session
+            // so the next send rehydrates from disk under lease takeover.
+            const releaseTimer = setTimeout(() => {
+              if (!entry.turnActive || entry.activeInputId !== stalledInputId) return;
+              (entry.zombieTurnInputIds ??= new Set()).add(stalledInputId);
+              entry.turnActive = false;
+              entry.activeInputId = undefined;
+              entry.cancelRequested = false;
+              entry.cancelRequestedAt = undefined;
+              entry.forceStopRequested = false;
+              entry.steeringPhase = "idle";
+              entry.activeToolIds.clear();
+              activeTurns--;
+              tagEmit(command.sessionId, { type: "interrupt_settled", inputId: stalledInputId });
+              emitBackgroundJobs(command.sessionId, entry);
+              tagEmit(command.sessionId, { type: "turn_settled", inputId: stalledInputId, continuing: false });
+              // The zombie generator may still hold the session's kernel run
+              // lease. A rehydrated session takes the lease over the same way
+              // startup recovery does after a crash; the primary entry cannot
+              // be evicted, so it keeps its live session (the common wedge —
+              // post-turn settling — has already released the lease by then).
+              if (entry !== primaryEntry) {
+                for (const [mappedSid, mapped] of sessions) {
+                  if (mapped === entry) {
+                    evictSession(mappedSid, entry, "force-stop", Date.now() - (entry.turnStartedAt ?? Date.now()));
+                    break;
+                  }
+                }
+              }
+            }, FORCE_STOP_RELEASE_GRACE_MS);
+            releaseTimer.unref?.();
           });
         return;
       }
@@ -3089,7 +3137,17 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
             if (!ownerCancellationPending()) entry.lane = lane;
           }
           if (!ownerCancellationPending()) {
-            tagEmit(command.sessionId, { type: "route_resolved", model, provider: providerName, lane, source });
+            // The lane tag is a ROUTER decision. In manual mode no router ran —
+            // advertising "CHAT"/"RESEARCH" on the badge made it look like one
+            // had overridden the user's pick. Lane still drives internal
+            // stickiness bookkeeping either way.
+            tagEmit(command.sessionId, {
+              type: "route_resolved",
+              model,
+              provider: providerName,
+              ...(settings.routingMode === "auto" ? { lane } : {}),
+              source,
+            });
           }
         } catch {
           // best-effort — never block a turn on attribution
@@ -3324,7 +3382,21 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
             turnState.fatalProvider = null;
             await streamOnce(entry.live.session.resumeTurn());
           }
-          await finishTurn(entry.live, turnState.status);
+          // Post-turn settling (verifier/journal/memory). On a CANCELLED turn
+          // this sits directly on the "stopping safely" path — bound it so
+          // bookkeeping can never outlive the Stop; the detached remainder
+          // still lands its writes whenever it finishes.
+          if (ownerCancellationPending()) {
+            await Promise.race([
+              finishTurn(entry.live, turnState.status).catch(() => undefined),
+              new Promise<void>((resolve) => {
+                const timer = setTimeout(resolve, 15_000);
+                timer.unref?.();
+              }),
+            ]);
+          } else {
+            await finishTurn(entry.live, turnState.status);
+          }
           // A completed turn may have landed a commit — reflect it into the war
           // map. Fire-and-forget; reflection never delays or breaks the turn.
           if (turnState.status === "completed" && (entry.live.session.lastWorkStatus === "verified" || entry.live.session.lastWorkStatus === "not_applicable")) {
@@ -3334,9 +3406,18 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
           }
         } catch (err) {
           turnState.status = "failed";
-          tagEmit(command.sessionId, { type: "error", error: { code: "turn_throw", message: err instanceof Error ? err.message : String(err), retriable: false } });
-          tagEmit(command.sessionId, { type: "turn_end", status: "failed", usage: {}, durationMs: 0 });
+          // A force-released turn already told the surface it settled; stale
+          // failure events from its late unwind would contradict that.
+          if (!entry.zombieTurnInputIds?.has(inputId)) {
+            tagEmit(command.sessionId, { type: "error", error: { code: "turn_throw", message: err instanceof Error ? err.message : String(err), retriable: false } });
+            tagEmit(command.sessionId, { type: "turn_end", status: "failed", usage: {}, durationMs: 0 });
+          }
         } finally {
+          // Zombie unwind after a force-release: the daemon has already settled
+          // this turn and released (possibly evicted/rehydrated) the entry — a
+          // successor may own it now. Touching entry state or emitting
+          // settlement events here would corrupt that successor. Drop out.
+          if (entry.zombieTurnInputIds?.delete(inputId)) return;
           // A vision escalation was for THIS turn only — hand the conversation
           // back to the user's pinned model. If the failover loop replaced the
           // model mid-turn (provider death), its choice wins — don't revert onto

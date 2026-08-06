@@ -572,6 +572,9 @@ function App() {
   /** Synchronous click-to-ack gate. React state may not re-render between a
    * Stop click and an immediate Enter keypress, so this closes that tiny race. */
   const stoppingSessionsRef = useRef(new Set<string>());
+  /** Titles as they were before an in-flight rename, so a failed persist can
+   * revert the optimistic update instead of lying until the next restart. */
+  const pendingRenamesRef = useRef(new Map<string, string>());
   const rosterRef = useRef<PersonaVm[]>([]);
   // While the experimental Living Surface owns this session it owns narration
   // too. The hidden Classic window must not read the JSON patch stream aloud.
@@ -1246,6 +1249,7 @@ function App() {
         case "interrupt_settled":
         case "interrupt_idle":
         case "interrupted_by_user":
+        case "interrupt_forced":
           pushLog(`[garrison] ${e.type}`);
           if (e.type === "interrupt_requested" || e.type === "interrupt_pending") {
             stoppingSessionsRef.current.add(e.sessionId ?? activeRef.current);
@@ -1292,6 +1296,16 @@ function App() {
           return true;
         case "model_switched":
           pushLog(`[garrison] model pinned · ${e.provider ?? ""}/${e.model ?? ""}`);
+          // The pin is per-session state, not just a log line — reflect it so
+          // the footer/badges agree with what the daemon will actually run.
+          if (e.model) {
+            applyTo(e.sessionId ?? activeRef.current, (s) => ({
+              ...s,
+              sessionModel: String(e.model),
+              turnModel: String(e.model),
+              ...(e.provider ? { turnProvider: String(e.provider) } : {}),
+            }));
+          }
           return true;
         case "model_switch_failed": {
           const currentProvider = String(e.currentProvider ?? prefsRef.current.provider);
@@ -1303,6 +1317,7 @@ function App() {
             ...s,
             turnProvider: currentProvider,
             turnModel: currentModel,
+            sessionModel: currentModel,
           }, { type: "desktop_error", text: `Model selection kept on ${currentProvider}/${currentModel}: ${String(e.error ?? "provider preflight failed")}` }));
           return true;
         }
@@ -1663,19 +1678,43 @@ function App() {
         }
         case "session_renamed": {
           if (e.id && e.ok !== false) {
+            pendingRenamesRef.current.delete(e.id);
             const label = typeof e.label === "string" ? e.label : "";
             setSessions((current) => current.map((session) => (
               session.id === e.id ? { ...session, title: label ? compact(label, 42) : session.title } : session
             )));
+          } else if (e.id) {
+            // The rename never persisted — revert the optimistic title so the
+            // rail doesn't show a name that will vanish on restart.
+            const previous = pendingRenamesRef.current.get(e.id);
+            pendingRenamesRef.current.delete(e.id);
+            pushLog(`[garrison] session rename failed for ${e.id} — title reverted`);
+            if (previous !== undefined) {
+              setSessions((current) => current.map((session) => (
+                session.id === e.id ? { ...session, title: previous } : session
+              )));
+            }
           }
           return true;
         }
         case "session_history":
           if (e.id) {
             const hydrated = sessionFromHistory(e.id, e.messages, e.meta);
+            // Only trust the hydrated title when the snapshot carries a real
+            // user-set label; otherwise keep the rail title (sessions_list
+            // already resolved label-or-preview) instead of regressing to the
+            // first-message fallback.
+            const metaHasLabel =
+              !!e.meta && typeof e.meta === "object" && !!(e.meta as { label?: unknown }).label &&
+              typeof (e.meta as { label?: unknown }).label === "string";
             setSessions((current) => current.map((session) => (
               session.id === e.id
-                ? { ...hydrated, updatedAt: session.updatedAt, workflowMode: hydrated.workflowMode ?? session.workflowMode }
+                ? {
+                    ...hydrated,
+                    title: metaHasLabel ? hydrated.title : session.title || hydrated.title,
+                    updatedAt: session.updatedAt,
+                    workflowMode: hydrated.workflowMode ?? session.workflowMode,
+                  }
                 : session
             )));
           }
@@ -1880,6 +1919,20 @@ function App() {
         const state = await invoke<DaemonStatus>("ares_start_daemon", { provider: prefsRef.current.provider, model: prefsRef.current.model });
         if (!mounted) return;
         setDaemon(state.running ? "running" : "stopped");
+        // Reload survival (F5 / webview crash): an already-running daemon
+        // returns its status without re-emitting daemon_ready, and daemon_ready
+        // is the only place that asked for sessions_list — so a reload booted an
+        // EMPTY rail while every session sat safe on disk. Hydrate explicitly.
+        // The sessions_list handler merges by id, so the duplicate request on a
+        // fresh spawn (where daemon_ready also fires) is harmless.
+        if (state.running) {
+          for (const type of ["sessions_list", "operator_status", "oauth_status"]) {
+            void invoke("ares_daemon_command", { command: { type } }).catch(() => null);
+          }
+          void invoke("ares_daemon_command", {
+            command: { type: "background_list", sessionId: activeRef.current || undefined },
+          }).catch(() => null);
+        }
       } catch (err) {
         if (!mounted) return;
         setDaemon("error");
@@ -2108,7 +2161,18 @@ function App() {
   const stopTurn = useCallback(() => {
     const sid = activeRef.current;
     const current = sessionsRef.current.find((session) => session.id === sid);
-    if (!current?.busy || current.cancelling || stoppingSessionsRef.current.has(sid)) return;
+    if (!current?.busy) return;
+    if (current.cancelling || stoppingSessionsRef.current.has(sid)) {
+      // Second Stop = escalation, not a no-op. The daemon force-kills whatever
+      // the turn is blocked on once the grace window has passed (and reports
+      // the countdown until then). This path used to be unreachable — every
+      // Stop control disabled itself the moment the first Stop landed, so a
+      // turn that never settled left "stopping safely" up with no way out.
+      if (native && daemon === "running") {
+        void invoke("ares_interrupt", { sessionId: sid }).catch(() => null);
+      }
+      return;
+    }
     const localPending = pendingGoal.current?.sessionId === sid ? pendingGoal.current : null;
     if (native && daemon !== "running" && localPending) {
       // No daemon owns this input yet, so Stop is a local, exact cancellation.
@@ -2637,10 +2701,17 @@ function App() {
   // take the next message — the chat lane's assignment, else the main model.
   // The old "routing (auto)" placeholder told the owner nothing and made the
   // chip look like a dead label ("all I see is on").
+  // MANUAL mode: the footer shows the ACTIVE SESSION's pinned model. Sessions
+  // deliberately keep their saved model across restarts, so the global pref
+  // can differ from what a reopened card actually runs — showing the pref
+  // there made the per-message badge look wrong when it was the honest one
+  // (the "footer says glm, turn ran deepseek" report). One-turn detours
+  // (vision/failover) still never touch sessionModel, so the readout stays
+  // solid within a session.
   const liveModelId =
     prefs.routingMode === "auto"
       ? (active?.turnModel ?? prefs.routing.chat?.model ?? prefs.model)
-      : prefs.model;
+      : (active?.sessionModel ?? prefs.model);
   /** "chat → sonnet · coding → opus-5" — the whole routing table, for the
    *  route chip's tooltip, so the mapping is legible without opening anything. */
   const routeSummary = routedLanes.length
@@ -2660,6 +2731,32 @@ function App() {
   const visibleSessions = q ? sessions.filter((s) => s.title.toLowerCase().includes(q)) : sessions;
   const pinnedSessions = visibleSessions.filter((s) => prefs.pinned.includes(s.id));
   const unpinnedSessions = visibleSessions.filter((s) => !prefs.pinned.includes(s.id));
+  // ── projects: named, collapsible session groups (client-side, like pins) ──
+  const sessionProjects = prefs.sessionProjects ?? {};
+  const allProjectNames = [...new Set(Object.values(sessionProjects))].sort((a, b) => a.localeCompare(b));
+  const projectNames = allProjectNames.filter((name) =>
+    unpinnedSessions.some((s) => sessionProjects[s.id] === name),
+  );
+  const looseSessions = unpinnedSessions.filter((s) => !sessionProjects[s.id]);
+  /** Assign a session to a project (empty name = remove from its project). */
+  const assignProject = (id: string, name: string) => {
+    const clean = name.trim().slice(0, 40);
+    const nextMap = { ...(prefs.sessionProjects ?? {}) };
+    if (clean) nextMap[id] = clean;
+    else delete nextMap[id];
+    const next = { ...prefs, sessionProjects: nextMap };
+    setPrefs(next);
+    savePrefs(next);
+  };
+  const toggleProjectCollapsed = (name: string) => {
+    const collapsed = prefs.collapsedProjects ?? [];
+    const next = {
+      ...prefs,
+      collapsedProjects: collapsed.includes(name) ? collapsed.filter((p) => p !== name) : [...collapsed, name],
+    };
+    setPrefs(next);
+    savePrefs(next);
+  };
   const togglePin = (id: string) => {
     const pinned = prefs.pinned.includes(id) ? prefs.pinned.filter((p) => p !== id) : [...prefs.pinned, id];
     const next = { ...prefs, pinned };
@@ -2667,10 +2764,17 @@ function App() {
     savePrefs(next);
   };
 
-  /** Rename a session: optimistic title update, then persist via the daemon. */
+  /** Rename a session: optimistic title update, then persist via the daemon.
+   *  The previous title is stashed so a failed persist can revert instead of
+   *  leaving an optimistic title that silently vanishes on restart. */
   const renameSession = (id: string, label: string) => {
     const clean = label.trim().slice(0, 120);
-    setSessions((current) => current.map((s) => (s.id === id ? { ...s, title: clean ? compact(clean, 42) : s.title } : s)));
+    if (!clean) return;
+    const previous = sessionsRef.current.find((s) => s.id === id)?.title;
+    if (previous !== undefined && !pendingRenamesRef.current.has(id)) {
+      pendingRenamesRef.current.set(id, previous);
+    }
+    setSessions((current) => current.map((s) => (s.id === id ? { ...s, title: compact(clean, 42) } : s)));
     daemonCmd({ type: "session_rename", id, label: clean });
   };
 
@@ -3145,18 +3249,50 @@ function App() {
             <div className="railLabel">Pinned</div>
             <nav className="sessionList pinnedList">
               {pinnedSessions.map((s) => (
-                <SessionRow key={s.id} s={s} activeId={active?.id ?? ""} pinned onSelect={openSession} onPin={togglePin} onRename={renameSession} onClose={closeSession} />
+                <SessionRow key={s.id} s={s} activeId={active?.id ?? ""} pinned project={sessionProjects[s.id]} onSelect={openSession} onPin={togglePin} onRename={renameSession} onClose={closeSession} onProject={assignProject} />
               ))}
             </nav>
           </>
         ) : null}
 
+        {projectNames.map((name) => {
+          const members = unpinnedSessions.filter((s) => sessionProjects[s.id] === name);
+          const collapsed = (prefs.collapsedProjects ?? []).includes(name);
+          return (
+            <div key={name} className="railProject">
+              <button
+                className="railLabel railProjectHeader"
+                data-collapsed={collapsed ? "1" : "0"}
+                onClick={() => toggleProjectCollapsed(name)}
+                title={collapsed ? "expand project" : "collapse project"}
+              >
+                <b>▸</b>
+                <span>{name}</span>
+                <em>{members.length}</em>
+              </button>
+              {!collapsed ? (
+                <nav className="sessionList">
+                  {members.map((s) => (
+                    <SessionRow key={s.id} s={s} activeId={active?.id ?? ""} project={name} onSelect={openSession} onPin={togglePin} onRename={renameSession} onClose={closeSession} onProject={assignProject} />
+                  ))}
+                </nav>
+              ) : null}
+            </div>
+          );
+        })}
+
         <div className="railLabel">Sessions</div>
         <nav className="sessionList">
-          {unpinnedSessions.map((s) => (
-            <SessionRow key={s.id} s={s} activeId={active?.id ?? ""} onSelect={openSession} onPin={togglePin} onRename={renameSession} onClose={closeSession} />
+          {looseSessions.map((s) => (
+            <SessionRow key={s.id} s={s} activeId={active?.id ?? ""} onSelect={openSession} onPin={togglePin} onRename={renameSession} onClose={closeSession} onProject={assignProject} />
           ))}
         </nav>
+        {/* Autocomplete of existing project names for the row-level assign input. */}
+        <datalist id="aresProjectOptions">
+          {allProjectNames.map((name) => (
+            <option key={name} value={name} />
+          ))}
+        </datalist>
 
         <div className="railFoot">
           {/* data-act lets the modern skin drop the two that moved into the
@@ -3726,7 +3862,7 @@ function App() {
             // Immediately show the picked model in the footer/composer. The next
             // turn's route_resolved event overwrites this with whatever actually
             // ran (failover-aware), but until then the readout must match the pick.
-            apply((s) => ({ ...s, turnModel: model, turnProvider: provider, turnLane: undefined }));
+            apply((s) => ({ ...s, sessionModel: model, turnModel: model, turnProvider: provider, turnLane: undefined }));
             if (native) {
               if (daemon === "running") {
                 void invoke("ares_daemon_command", { command: { type: "model_switch", provider, model, sessionId: activeRef.current } }).catch((err) => {
@@ -5958,23 +6094,31 @@ function SessionRow({
   s,
   activeId,
   pinned,
+  project,
   onSelect,
   onPin,
   onRename,
   onClose,
+  onProject,
 }: {
   s: SessionVm;
   activeId: string;
   pinned?: boolean;
+  /** Name of the project this session currently belongs to, if any. */
+  project?: string;
   onSelect: (id: string) => void;
   onPin: (id: string) => void;
   onRename: (id: string, label: string) => void;
   onClose: (id: string) => void;
+  onProject: (id: string, name: string) => void;
 }) {
   const [editing, setEditing] = useState(false);
+  const [editingProject, setEditingProject] = useState(false);
   const [draft, setDraft] = useState(s.title);
+  const [projectDraft, setProjectDraft] = useState(project ?? "");
   const [confirming, setConfirming] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const projectInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     if (editing) {
@@ -5983,10 +6127,23 @@ function SessionRow({
     }
   }, [editing, s.title]);
 
+  useEffect(() => {
+    if (editingProject) {
+      setProjectDraft(project ?? "");
+      requestAnimationFrame(() => projectInputRef.current?.select());
+    }
+  }, [editingProject, project]);
+
   const commit = () => {
     const next = draft.trim();
     if (next && next !== s.title) onRename(s.id, next);
     setEditing(false);
+  };
+
+  const commitProject = () => {
+    const next = projectDraft.trim();
+    if (next !== (project ?? "")) onProject(s.id, next);
+    setEditingProject(false);
   };
 
   if (editing) {
@@ -6008,6 +6165,27 @@ function SessionRow({
     );
   }
 
+  if (editingProject) {
+    return (
+      <div className={s.id === activeId ? "session on editing" : "session editing"}>
+        <input
+          ref={projectInputRef}
+          className="sessionRename"
+          value={projectDraft}
+          placeholder="Project name — empty removes"
+          spellCheck={false}
+          list="aresProjectOptions"
+          onChange={(e) => setProjectDraft(e.target.value)}
+          onBlur={commitProject}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") commitProject();
+            else if (e.key === "Escape") setEditingProject(false);
+          }}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className={s.id === activeId ? "session on" : "session"}>
       <button className="sessionMain" onClick={() => onSelect(s.id)} onDoubleClick={() => setEditing(true)} title="Double-click to rename">
@@ -6016,6 +6194,7 @@ function SessionRow({
       </button>
       <div className="sessionActions">
         <button className="rowBtn" title="Rename" onClick={() => setEditing(true)}>✎</button>
+        <button className="rowBtn" data-project={project ? "1" : "0"} title={project ? `Project: ${project} — click to move or remove` : "Group into a project"} onClick={() => setEditingProject(true)}>▦</button>
         <button className="pinBtn" data-pinned={pinned ? "1" : "0"} title={pinned ? "unpin" : "pin"} onClick={() => onPin(s.id)}>
           {pinned ? "◆" : "◇"}
         </button>
@@ -6482,7 +6661,7 @@ function PillBar({
           {listening ? <i className="pillSpin" /> : <MicGlyph />}
         </button>
         {busy ? (
-          <button className="pillBtn" onClick={onStop} disabled={cancelling} title={cancelling ? "turn is stopping" : "stop the turn"}>
+          <button className="pillBtn" onClick={onStop} title={cancelling ? "stopping — press again to force-stop a stuck turn" : "stop the turn"}>
             <svg viewBox="0 0 16 16" fill="currentColor"><rect x="4" y="4" width="8" height="8" rx="1.5" /></svg>
           </button>
         ) : null}
@@ -6841,9 +7020,8 @@ const Composer = React.memo(function Composer({
             <button
               className="send stop"
               onClick={onStop}
-              disabled={cancelling}
-              aria-label={cancelling ? "stopping" : "stop"}
-              title={cancelling ? "waiting for the turn to settle" : "stop this turn"}
+              aria-label={cancelling ? "force stop" : "stop"}
+              title={cancelling ? "stopping — press again to force-stop a stuck turn" : "stop this turn"}
             >
               <svg viewBox="0 0 16 16" fill="currentColor">
                 <rect x="4" y="4" width="8" height="8" rx="1.5" />

@@ -483,6 +483,20 @@ a:hover { border-bottom-color: var(--bronze-hi); }
 
 .railLabel { font: 600 10px/1 var(--mono); letter-spacing: 0.22em; color: var(--faint); padding: 4px 4px 0; }
 
+/* Project groups: a clickable rail label that collapses its member list. */
+.railProjectHeader {
+  display: flex; align-items: center; gap: 6px;
+  width: 100%;
+  background: none; border: 0; cursor: pointer;
+  text-align: left; text-transform: uppercase;
+}
+.railProjectHeader b { font-weight: 600; transition: transform 130ms ease; transform: rotate(90deg); }
+.railProjectHeader[data-collapsed="1"] b { transform: rotate(0deg); }
+.railProjectHeader span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.railProjectHeader em { font-style: normal; opacity: 0.7; margin-left: auto; }
+.railProjectHeader:hover { color: var(--muted); }
+.sessionActions .rowBtn[data-project="1"] { color: var(--accent, inherit); }
+
 .railNav { display: grid; gap: 3px; }
 .railNav button {
   display: flex; align-items: center; gap: 10px;

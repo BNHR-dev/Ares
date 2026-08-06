@@ -198,6 +198,12 @@ export interface SessionVm {
   turnModel?: string;
   turnLane?: string;
   turnProvider?: string;
+  /** The SESSION's pinned selection — what this card runs on, excluding
+   * one-turn escalations/failovers. Sessions keep their saved model across
+   * restarts, so in manual mode the footer must read THIS, not the global
+   * pref: a reopened card can legitimately run a different model than the
+   * picker shows (the "badge says deepseek, footer says glm" report). */
+  sessionModel?: string;
   /** False for a disk summary whose transcript has not been requested yet. */
   loaded?: boolean;
   loading?: boolean;
@@ -302,6 +308,7 @@ export function sessionFromSummary(summary: SessionSummaryWire): SessionVm {
     updatedAt: summary.updatedAt,
     turnModel: summary.provider?.model,
     turnProvider: summary.provider?.name,
+    sessionModel: summary.provider?.model,
   };
 }
 
@@ -372,12 +379,15 @@ export function sessionFromHistory(id: string, rawMessages: unknown, meta: unkno
   }
   const firstUser = items.find((item): item is Extract<Item, { kind: "user" }> => item.kind === "user");
   const metadata = meta && typeof meta === "object"
-    ? meta as { provider?: { name?: string; model?: string }; workflowMode?: "plan" | "build" }
+    ? meta as { label?: string; provider?: { name?: string; model?: string }; workflowMode?: "plan" | "build" }
     : undefined;
   const provider = metadata?.provider;
   return {
     id,
-    title: compact(firstUser?.text || "Saved session", 42),
+    // A user-set label (rename) always beats the first-message fallback. The
+    // old cast dropped `label`, so every transcript hydration reverted renamed
+    // sessions to their auto titles — the "my renames vanished" report.
+    title: compact(metadata?.label || firstUser?.text || "Saved session", 42),
     items,
     busy: false,
     workflowMode: metadata?.workflowMode ?? "build",
@@ -389,6 +399,7 @@ export function sessionFromHistory(id: string, rawMessages: unknown, meta: unkno
     loading: false,
     turnModel: provider?.model,
     turnProvider: provider?.name,
+    sessionModel: provider?.model,
   };
 }
 

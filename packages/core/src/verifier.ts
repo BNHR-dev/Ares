@@ -295,23 +295,30 @@ export class ContinuousVerifier {
     return this.pendingReminders.length > 0;
   }
 
-  /** Cancel any in-flight run; used on session shutdown. */
+  /** Cancel any in-flight run; used on session shutdown. Bounded: cancel sits
+   *  on the Stop path (finishTurn, disposeLiveSession), and a verify child
+   *  that ignores its abort must not hold "stopping safely" hostage — after
+   *  the deadline the orphaned run is abandoned to its own process watchdog. */
   async cancel(): Promise<void> {
     this.cancelled = true;
     if (this.debounceTimer) {
       clearTimeout(this.debounceTimer);
       this.debounceTimer = null;
     }
+    const deadline = new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 10_000);
+      timer.unref?.();
+    });
     if (this.inFlight) {
       this.inFlight.abort.abort();
       try {
-        await this.inFlight.done;
+        await Promise.race([this.inFlight.done, deadline]);
       } catch {
         // ignore
       }
       this.inFlight = null;
     }
-    await this.runChain.catch(() => undefined);
+    await Promise.race([this.runChain.catch(() => undefined), deadline]);
     dependencyIndexCache.delete(canonicalPath(this.workspace));
   }
 

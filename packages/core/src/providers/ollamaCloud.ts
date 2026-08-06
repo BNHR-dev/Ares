@@ -235,6 +235,12 @@ export class OllamaCloudPool {
     req: ProviderRequest,
   ): AsyncGenerator<StreamEvent> {
     const messages = toOllamaMessages(req.messages);
+    // Same chars/4 heuristic the engine budgets with — num_ctx must cover the
+    // prompt we are about to send plus the output allowance, or the serving
+    // side truncates/rejects a request the engine believed was in budget.
+    const estPromptTokens = Math.ceil(
+      (JSON.stringify(messages).length + JSON.stringify(req.tools).length + (req.system?.length ?? 0)) / 4,
+    );
 
     const body = {
       model,
@@ -252,7 +258,7 @@ export class OllamaCloudPool {
             }))
           : undefined,
       stream: true,
-      options: { num_ctx: ollamaNumCtx(), temperature: 0.2 },
+      options: { num_ctx: ollamaNumCtx(estPromptTokens, req.maxOutputTokens ?? 8_192), temperature: 0.2 },
       // Reasoning dial → native /api/chat "think" field. Ollama's documented think
       // enum is low|medium|high (plus a boolean) — NOT "max" — so clamp max→high
       // (mirrors openAIReasoningEffort) to avoid a 400 on models that validate it,
@@ -839,10 +845,21 @@ function buildAnthropicMessagesBody(
   return body;
 }
 
-function ollamaNumCtx(): number {
+/**
+ * Context allocation for the native /api/chat wire. A pinned
+ * ARES_OLLAMA_NUM_CTX still wins outright. Otherwise scale with the request:
+ * the old hardcoded 65,536 silently capped every prompt while the engine was
+ * budgeted far higher (glm-5.1 sessions budget 160k), so ollama-cloud
+ * rejected the 160k AND 80k rungs of the shrink ladder on every iteration —
+ * minutes of guaranteed-failing round trips per tool round before a rung
+ * could physically fit. Ask for what the request actually needs, floored at
+ * the old default; if the serving side can't honor it, the engine's ladder
+ * learns the real ceiling from the rejection.
+ */
+function ollamaNumCtx(estPromptTokens: number, maxOutputTokens: number): number {
   const raw = Number(process.env.ARES_OLLAMA_NUM_CTX);
   if (Number.isFinite(raw) && raw >= 8_192) return Math.floor(raw);
-  return 65_536;
+  return Math.max(65_536, estPromptTokens + maxOutputTokens + 2_048);
 }
 
 function toAnthropicContentBlock(block: ContentBlock): Record<string, unknown> {

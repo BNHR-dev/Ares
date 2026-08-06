@@ -34,6 +34,12 @@ export interface Prefs {
   uiEffect?: { hue?: number; speed?: "calm" | "steady" | "brisk"; label?: string };
   /** Pinned session ids (shown in their own rail section). */
   pinned: string[];
+  /** Session id → project name. Groups related sessions under a named,
+   *  collapsible rail section. Client-side like `pinned`: sessions on disk
+   *  are untouched, a project simply exists while it has members. */
+  sessionProjects?: Record<string, string>;
+  /** Project names whose rail section is currently collapsed. */
+  collapsedProjects?: string[];
   /** Accent theme for the desktop chrome. */
   theme: ThemeName;
   /** Interface style — "modern" = the glass-forge reskin (floating smoked-glass
@@ -147,6 +153,17 @@ export function loadPrefs(): Prefs {
             }
           : undefined,
       pinned: Array.isArray(raw.pinned) ? raw.pinned.filter((p): p is string => typeof p === "string") : [],
+      sessionProjects:
+        raw.sessionProjects && typeof raw.sessionProjects === "object"
+          ? Object.fromEntries(
+              Object.entries(raw.sessionProjects).filter(
+                (pair): pair is [string, string] => typeof pair[1] === "string" && pair[1].trim().length > 0,
+              ),
+            )
+          : undefined,
+      collapsedProjects: Array.isArray(raw.collapsedProjects)
+        ? raw.collapsedProjects.filter((p): p is string => typeof p === "string")
+        : undefined,
       theme: themeOk ? (raw.theme as ThemeName) : "rage",
       // Glass-revamp migration: pre-V2 saves stored "new" as the mere DEFAULT,
       // not a choice — upgrade those to "modern" once. Post-V2 saves (any
