@@ -2531,6 +2531,11 @@ export async function listSessions(workspace: string, limit = 20): Promise<Sessi
   );
   return [...canonical, ...legacy]
     .filter((s): s is SessionSummary => s !== null)
+    // Empty bootstrap husks stay OFF the rail. Every daemon boot creates a
+    // fresh primary session; ones the owner never typed into have no preview
+    // and no label, and they accumulated one "Saved session" row per app
+    // restart. A session earns a rail card by having content or a name.
+    .filter((s) => Boolean(s.label) || Boolean(s.preview?.trim()))
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
     .slice(0, Math.max(0, Math.trunc(limit)));
 }

@@ -1900,6 +1900,14 @@ export class QueryEngine {
 
     const totalUsage: Usage = { inputTokens: 0, outputTokens: 0, modelCalls: 0 };
     let stopReason: StopReason = "end_turn";
+    // ZERO-OUTPUT stall counter, turn-scoped. When the provider streams NOTHING
+    // repeatedly even after the prompt was shrunk, the prompt was never the
+    // problem — the endpoint is down/misrouted. Without this cap the shrink
+    // ladder walked every rung at 90s×2 per rung, across iterations: a field
+    // user watched "no stream events for 90s" for 996 seconds against a dead
+    // glm endpoint before the turn finally failed. Reset on any completed
+    // provider call (the provider is demonstrably alive).
+    let zeroOutputStalls = 0;
     // Big autonomous builds legitimately run long. There is deliberately NO
     // meaningful default iteration cap: the loop-kill detectors below (dead
     // failure loops, no-op repeats, sustained oscillation) are the real
@@ -2298,6 +2306,9 @@ export class QueryEngine {
                     terminalMessageEvent = ev;
                     addUsageInto(totalUsage, ev.usage);
                     stopReason = ev.stopReason;
+                    // The provider just completed a call — it is alive; the
+                    // dead-endpoint stall counter starts over.
+                    zeroOutputStalls = 0;
                     this.calibrateTokens(estPromptTokens, ev.usage);
                     // message_done is the durable assistant commit boundary. Hold
                     // it until the steering inbox has been checked below.
@@ -2369,6 +2380,23 @@ export class QueryEngine {
                 ? `${this.cfg.model} is overloaded upstream — retrying in ${(waitMs / 1000).toFixed(1)}s (attempt ${transientRetry}/${retryBudget}). Your message is safe.`
                 : `provider hiccup (${streamError.code}); retrying in ${(waitMs / 1000).toFixed(1)}s — attempt ${transientRetry}/${retryBudget}`;
               if (isStallError(streamError)) {
+                // Fail fast on a DEAD endpoint: if the provider has streamed
+                // nothing four times — including after at least one shrink —
+                // no smaller prompt is going to fix it. Surface a diagnosis the
+                // failover loop recognizes ("unreachable") instead of walking
+                // the rest of the ladder through 90-second silences.
+                if (!modelStarted) zeroOutputStalls++;
+                if (zeroOutputStalls >= 4) {
+                  streamError = {
+                    code: "provider_unresponsive",
+                    message:
+                      `${this.cfg.model} streamed nothing across ${zeroOutputStalls} attempts at multiple prompt sizes — ` +
+                      `the provider endpoint looks unreachable or unresponsive, not the prompt. ` +
+                      `Switching model/provider or retrying later is the fix; resending the same request is not.`,
+                    retriable: false,
+                  };
+                  break retryStream;
+                }
                 // Two consecutive stalls at the same window size usually mean the
                 // provider is choking on the PROMPT itself (deepseek/ollama-cloud
                 // stall silently on very large prompts) — re-issuing the same size

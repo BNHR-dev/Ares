@@ -70,7 +70,19 @@ export const CHANGELOG: ChangelogEntry[] = [
       {
         icon: "🗂",
         title: "Projects in the rail",
-        blurb: "Group related sessions under named, collapsible projects — one click on a session's grid button.",
+        blurb: "Group related sessions under named, collapsible projects — one click on a session's grid button. And the mystery \"Saved session\" cards that multiplied on every restart are gone.",
+        tag: "New",
+      },
+      {
+        icon: "🛑",
+        title: "Dead providers fail fast",
+        blurb: "When a model's servers go quiet, Ares now says so within a few minutes and moves on — instead of quietly retrying smaller and smaller requests for a quarter of an hour.",
+        tag: "Faster",
+      },
+      {
+        icon: "⬆️",
+        title: "Updates you can't miss",
+        blurb: "A softly glowing chip stays in the corner whenever a new version is ready — dismissing the banner no longer hides that an update exists.",
         tag: "New",
       },
       {

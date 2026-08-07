@@ -330,6 +330,11 @@ test("setProvider updates canonical metadata without erasing subagent fields", a
       sessionRegistryHome: workspace,
     });
 
+    // listSessions now hides content-less, unnamed bootstrap husks; this
+    // metadata-authority session has no transcript, so give it a title to
+    // stay listable (titles live on the row, not in metadata — the deepEqual
+    // below is unaffected).
+    kernel.setSessionTitle("provider-session", "metadata test session");
     await session.setProvider(unusedProvider("new-provider"), "new-model");
     const metadata = kernel.requireSession("provider-session").metadata;
     assert.deepEqual(metadata, {

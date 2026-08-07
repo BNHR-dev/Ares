@@ -497,6 +497,29 @@ a:hover { border-bottom-color: var(--bronze-hi); }
 .railProjectHeader:hover { color: var(--muted); }
 .sessionActions .rowBtn[data-project="1"] { color: var(--accent, inherit); }
 
+/* Update-ready chip: the dismissed banner's persistent, calm reminder.
+   Photosensitive doctrine: a slow 3s breathing glow, never a flash. */
+.updateChip {
+  position: fixed; top: 44px; right: 14px; z-index: 210;
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--accent, #d6402e);
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.55);
+  color: var(--accent, #d6402e);
+  font: 600 12px/1 var(--mono);
+  cursor: pointer;
+  animation: updateChipBreath 3s ease-in-out infinite alternate;
+}
+.updateChip:hover { animation-play-state: paused; opacity: 1; }
+@keyframes updateChipBreath {
+  from { box-shadow: 0 0 4px 0 rgba(214, 64, 46, 0.25); opacity: 0.78; }
+  to { box-shadow: 0 0 14px 2px rgba(214, 64, 46, 0.55); opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .updateChip { animation: none; }
+}
+
 /* Transcript window: the walk-back control for long sessions. */
 .showEarlier {
   display: block;
