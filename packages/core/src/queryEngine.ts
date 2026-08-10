@@ -1089,6 +1089,13 @@ export class QueryEngine {
    *  iteration — minutes of dead round trips per tool round. Null until a
    *  rung fails; reset on provider/model switch. */
   private learnedContextCeiling: number | null = null;
+  /** Consecutive micro passes that ended still above the micro trigger. In the
+   *  band between the micro trigger (0.72×threshold) and the full-compaction
+   *  threshold, micro fires at every boundary, reclaims a few percent, and the
+   *  real summarizer never runs — a field session logged 94 micro passes, 88 of
+   *  them reclaiming under 10%. After 3 such passes the full compaction is
+   *  forced even though the threshold hasn't been crossed. */
+  private ineffectiveMicroStreak = 0;
   /** Latest TodoWrite snapshot — so the end-of-turn gate can refuse a premature
    *  "done" while the model's own plan still has unfinished items. */
   private latestTodos: import("@ares/protocol").Todo[] = [];
@@ -1684,6 +1691,14 @@ export class QueryEngine {
       }
     }
     const estAfter = this.messages.reduce((sum, message) => sum + estimateMessageTokens(message), 0);
+    // A micro pass that leaves the conversation above its own trigger did not
+    // solve anything — it deferred nothing. Track the streak so compactIfNeeded
+    // can escalate instead of letting micro thrash forever in the band below
+    // the full-compaction threshold.
+    this.ineffectiveMicroStreak =
+      estAfter * this.tokenScale > threshold * MICROCOMPACT_TRIGGER_RATIO
+        ? this.ineffectiveMicroStreak + 1
+        : 0;
     return {
       projection: {
         type: "compaction",
@@ -1719,14 +1734,23 @@ export class QueryEngine {
 
     const estBefore = this.messages.reduce((s, m) => s + estimateMessageTokens(m), 0);
     // Compare in REAL tokens (calibrated) against the real-token threshold.
-    if (estBefore * this.tokenScale <= threshold) return null;
+    // Escalation: three consecutive micro passes that couldn't get below the
+    // micro trigger force the real summarizer even below the threshold —
+    // otherwise the 0.72T..T band is a thrash zone micro can never exit.
+    const forcedByMicroThrash = this.ineffectiveMicroStreak >= 3;
+    if (!forcedByMicroThrash && estBefore * this.tokenScale <= threshold) return null;
 
     // Keep the most recent ~35% of the threshold at full fidelity. keepTokens is
     // in estimate units (chooseCompactionSplit sums the raw estimator), so divide
     // the real-token target back out by the calibration.
     const keepTokens = Math.max(4_000, Math.floor((threshold * 0.35) / this.tokenScale));
     const split = chooseCompactionSplit(this.messages, keepTokens);
-    if (split <= 0) return null;
+    if (split <= 0) {
+      // Nothing summarizable — a forced escalation must not re-force every
+      // boundary; the streak rebuilds from live evidence if thrash continues.
+      this.ineffectiveMicroStreak = 0;
+      return null;
+    }
 
     const older = this.messages.slice(0, split);
 
@@ -1828,6 +1852,7 @@ export class QueryEngine {
     const estAfter = this.messages.reduce((s, m) => s + estimateMessageTokens(m), 0);
     const tokensBefore = Math.round(estBefore * this.tokenScale);
     const tokensAfter = Math.round(estAfter * this.tokenScale);
+    this.ineffectiveMicroStreak = 0;
     return {
       type: "compaction",
       summarizedMessages: older.length,

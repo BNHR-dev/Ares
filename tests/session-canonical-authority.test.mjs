@@ -351,3 +351,34 @@ test("setProvider updates canonical metadata without erasing subagent fields", a
     kernel.close();
   }
 });
+
+test("superseded context epochs are pruned — only the latest two survive", async () => {
+  // Every compaction appends a full message-history projection; nothing ever
+  // reads any epoch but the latest. Left unpruned they grew one field
+  // workspace's kernel to 357MB (2026-08-10). The store now deletes all but
+  // the newest two on every append (and sweeps legacy bloat at open).
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "ares-epoch-prune-"));
+  const kernel = await openWorkspaceSessionKernel(workspace);
+  try {
+    kernel.createSession({
+      id: "epoch-prune",
+      workspaceKey: workspace,
+      metadata: { provider: "p", model: "m", createdAt },
+    });
+    const fence = fenceOf(kernel.acquireRunnerLease("epoch-prune", "runner", 5_000));
+    for (let i = 1; i <= 5; i++) {
+      kernel.appendContextEpoch(fence, {
+        reason: "compaction",
+        summary: { pass: i },
+        projection: [{ filler: "x".repeat(500), pass: i }],
+        sourceVersions: { lastMessageOrdinal: 0 },
+      });
+    }
+    const epochs = kernel.listContextEpochs("epoch-prune");
+    assert.deepEqual(epochs.map((e) => e.epoch), [4, 5], "only the newest two epochs remain");
+    assert.equal(kernel.getLatestContextEpoch("epoch-prune")?.epoch, 5, "resume still sees the latest projection");
+    kernel.releaseRunnerLease(fence, { executionState: "completed", workOutcome: "not_applicable" });
+  } finally {
+    kernel.close();
+  }
+});

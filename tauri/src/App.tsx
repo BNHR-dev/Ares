@@ -3628,7 +3628,19 @@ function App() {
                 : active.items
               : []
             ).map((item) => (
-              <ItemView key={item.key} item={item} onPermission={respondPermission} onArtifact={openArtifact} onSignIn={startAnthropicSignIn} toolDisplay={prefs.toolDisplay} />
+              <ItemView
+                key={item.key}
+                item={item}
+                onPermission={respondPermission}
+                onArtifact={openArtifact}
+                onSignIn={startAnthropicSignIn}
+                onVerify={() =>
+                  send(
+                    "Run the project's REAL verification for the changes from this session — the build plus the relevant tests (or launch-and-exercise for app changes) — and report PASS or FAIL with the actual command output. If anything fails, fix it and re-run until green.",
+                  )
+                }
+                toolDisplay={prefs.toolDisplay}
+              />
             ))}
             {/* Who is answering, and why. An adopted persona is never silent:
                 this chip plus the persona's own greeting are the disclosure,
@@ -7715,12 +7727,15 @@ const ItemView = React.memo(function ItemView({
   onPermission,
   onArtifact,
   onSignIn,
+  onVerify,
   toolDisplay,
 }: {
   item: Item;
   onPermission: (id: string, decision: string) => void;
   onArtifact: (path: string, label: string) => void;
   onSignIn?: () => void;
+  /** One-click follow-up for UNVERIFIED/BLOCKED turn-end notices. */
+  onVerify?: () => void;
   toolDisplay?: "product" | "technical";
 }) {
   if (item.kind === "authPrompt") {
@@ -7940,6 +7955,11 @@ const ItemView = React.memo(function ItemView({
   return (
     <div className="notice" data-tone={item.tone}>
       {item.text}
+      {item.kind === "notice" && item.action === "verify" && onVerify ? (
+        <button className="noticeAction" onClick={onVerify} title="Run the project's verification now">
+          ▶ Verify now
+        </button>
+      ) : null}
     </div>
   );
 });

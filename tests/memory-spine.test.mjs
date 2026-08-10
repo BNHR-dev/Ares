@@ -349,3 +349,19 @@ test("noise: consolidate() durably prunes noise stored before the gate existed",
   assert.ok(!contents.some((c) => c.includes("Tool error observed")), "the error entry is gone");
   assert.ok(contents.some((c) => c.includes("penicillin")), "the real memory survives");
 });
+
+test("noise: legacy 'Recurring theme' filler is pruned wholesale", async () => {
+  // Theme promotion is gone (a single token + a count is not knowledge — 47 of
+  // 66 nodes on a real store were themes like "first" and "every"), and
+  // consolidate() now clears the population it left behind.
+  const dir = await makeDir();
+  const store = await MemoryStore.open(path.join(dir, "memory.jsonl"));
+  await store.add({ kind: "semantic", content: 'Recurring theme "first" observed across 3 episodes.', tags: ["theme:first"] });
+  await store.add({ kind: "semantic", content: 'Recurring theme "claude" observed across 4 episodes.' });
+  await store.add({ kind: "semantic", content: "Crix prefers pnpm for every build in this repo" });
+  const report = await store.consolidate();
+  assert.ok(report.pruned >= 2, `both theme nodes pruned, got ${report.pruned}`);
+  const contents = store.all().map((n) => n.content);
+  assert.ok(!contents.some((c) => c.startsWith("Recurring theme")), "theme filler is gone");
+  assert.ok(contents.some((c) => c.includes("pnpm")), "real knowledge survives");
+});

@@ -32,11 +32,11 @@ import { prepareEngineBinary } from "../engineBinary.js";
 import { captureScreen } from "../screenCapture.js";
 import { ConsciousnessWatch, WATCHER_VOICE_PROMPT } from "../watch.js";
 import { recordConsciousnessObservation } from "../consciousnessContext.js";
-import { aresAgentHome, deletePersona, listPersonas, onLifecycle, runSkill, skillHubProbe, skillHubList, skillHubGet, skillHubPublish, installHubSkill, readLocalSkillFiles, writePersona } from "@ares/agent";
+import { aresAgentHome, deletePersona, listPersonas, loadAgentConfig, onLifecycle, runDeepDream, runSkill, skillHubProbe, skillHubList, skillHubGet, skillHubPublish, installHubSkill, readLocalSkillFiles, writePersona } from "@ares/agent";
 import { adoptPersonaByName, applyPersonaToolResult, newPersonaGate, personaForMessage, personaToWire, type PersonaGate } from "./daemon/personas.js";
 import { assembleCognitiveState } from "./daemon/cognitiveState.js";
 import { QueryEngineDispatcher, OperatorBackgroundLoop, deriveLeash, domainOf, isOperatorPaused, listGoals, loadStandingOrders, materializeDueStandingOrders, type StandingOrder } from "@ares/operator";
-import { MemoryStore, reflectOnRun, detectWorkspaceProjectId, loadProjectState, buildConversationDigest, mergeDurableFacts, CONVERSATION_REFLECT_SYSTEM, DURABLE_FACTS_SCHEMA_HINT, type DurableFact } from "@ares/mind";
+import { MemoryStore, mindPaths, reflectOnRun, detectWorkspaceProjectId, loadProjectState, buildConversationDigest, mergeDurableFacts, withConsolidationLock, CONVERSATION_REFLECT_SYSTEM, DURABLE_FACTS_SCHEMA_HINT, type DurableFact } from "@ares/mind";
 import { OAUTH_PROVIDERS, PROVIDER_LABELS, startOAuthFlow, connectedProviders, getProviderConfig, setCredential, hasCredential, deleteCredential, clientIdName, clientSecretName, runAresAccountSignin, probeAresOauth } from "@ares/core";
 import { KillSwitch } from "@ares/effects";
 import { gateToolPermission } from "../policyGate.js";
@@ -684,6 +684,43 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
       }
     }, 60_000);
     idleSweep.unref?.();
+  }
+
+  // ─── Deep dreaming on the DESKTOP path ───────────────────────────────────
+  // The dream/reflection cadence lived only in `ares garrison`, which desktop
+  // users never run — so MEMORY.md promotion, memory synthesis, and SOUL-rule
+  // curation simply never happened for them (the owner's own index sat frozen
+  // for 12 days holding two garbage entries while the living store grew
+  // unconsolidated filler). The daemon now dreams too: at most once per
+  // interval, only while no turn is active, lock-guarded so a concurrently
+  // running garrison can't consolidate the same store.
+  {
+    const DREAM_MIN_INTERVAL_MS = 20 * 60 * 60 * 1000;
+    const dreamMarker = path.join(aresAgentHome(), "mind", ".last-deep-dream");
+    const maybeDream = async () => {
+      try {
+        if ([primaryEntry, ...sessions.values()].some((entry) => entry.turnActive)) return;
+        const last = await stat(dreamMarker).then((s) => s.mtimeMs).catch(() => 0);
+        if (Date.now() - last < DREAM_MIN_INTERVAL_MS) return;
+        const config = await loadAgentConfig(aresAgentHome());
+        if (!config.dreaming.enabled) return;
+        // Claim the slot BEFORE the run: a dream that crashes must not retry
+        // hot every hour — it gets its next chance after the full interval.
+        await mkdir(path.dirname(dreamMarker), { recursive: true });
+        await writeFile(dreamMarker, new Date().toISOString() + "\n", "utf8");
+        await withConsolidationLock(mindPaths(aresAgentHome()).memoryFile, () =>
+          runDeepDream({ home: aresAgentHome(), workspace: live.context.workspace, config }),
+        );
+      } catch {
+        // dreaming is maintenance — it must never touch the serving path
+      }
+    };
+    const dreamTick = setInterval(() => void maybeDream(), 60 * 60 * 1000);
+    dreamTick.unref?.();
+    // One delayed check after boot so a machine that is only on during the day
+    // (and therefore never crosses a 3am cron) still dreams regularly.
+    const bootDream = setTimeout(() => void maybeDream(), 5 * 60 * 1000);
+    bootDream.unref?.();
   }
 
   // ─── Consciousness: the always-on local watcher ──────────────────────────

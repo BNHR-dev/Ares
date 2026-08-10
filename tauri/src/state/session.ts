@@ -161,7 +161,7 @@ export type Item =
       provider?: string;
     }
   | { kind: "permission"; key: string; id: string; toolName: string; reason: string; input?: unknown; decided?: string; submitting?: string }
-  | { kind: "notice"; key: string; text: string; tone: "dim" | "warn" | "bad" }
+  | { kind: "notice"; key: string; text: string; tone: "dim" | "warn" | "bad"; action?: "verify" }
   | { kind: "authPrompt"; key: string; provider: string; text: string }
   | { kind: "artifact"; key: string; path: string; label: string }
   | { kind: "diff"; key: string; files: string[]; diff: string; truncated: boolean }
@@ -194,6 +194,11 @@ export interface SessionVm {
   /** Rejected/cancelled steers return here until the composer merges them back
    * into the owner's draft. Exact IDs prevent double restoration. */
   recoverableDrafts?: Array<{ inputId: string; text: string; images?: string[] }>;
+  /** Turn-scoped: an auth-class provider error (401/403/no_auth) was seen this
+   * turn. If the turn then FAILS with no model output, the user's message goes
+   * back to the composer — a field user retyped the same prompt three times
+   * because each send died instantly on a bad key (2026-08-06). */
+  authFailedTurn?: boolean;
   /** Model + lane the daemon resolved for the current turn (routing transparency). */
   turnModel?: string;
   turnLane?: string;

@@ -104,6 +104,7 @@ export function foldEvent(s: SessionVm, e: AresEvent): SessionVm {
       session.busy = true;
       session.cancelling = false;
       session.activity = "marshalling";
+      session.authFailedTurn = undefined;
       // Clear last turn's fleet board — UNLESS it can still resume or has
       // agents still running (background fleets survive turn boundaries; a new
       // turn must not make live background work invisible).
@@ -667,6 +668,9 @@ export function foldEvent(s: SessionVm, e: AresEvent): SessionVm {
         provider: session.turnProvider,
       });
       if (e.workStatus === "unverified" || e.workStatus === "blocked") {
+        // action: "verify" renders a one-click "Verify now" on the notice. The
+        // warning fired in 5 of 8 field sessions and was never once acted on —
+        // an honest warning nobody can act on is noise; a button is a nudge.
         items.push({
           kind: "notice",
           key: nextKey(),
@@ -674,8 +678,36 @@ export function foldEvent(s: SessionVm, e: AresEvent): SessionVm {
             ? "Turn ended BLOCKED — verification checks were still failing when the work stopped."
             : "Turn ended UNVERIFIED — changes were made without a passing post-change verification.",
           tone: "warn",
+          action: "verify",
         });
       }
+      // An auth-class failure with NO model output ate the user's message for
+      // nothing — hand it back to the composer so fixing the key is the only
+      // thing standing between them and a resend (no retyping).
+      if (e.status === "failed" && session.authFailedTurn) {
+        const lastUserIdx = items.reduce((found, it, i) => (it.kind === "user" ? i : found), -1);
+        const producedOutput = lastUserIdx >= 0 && items.slice(lastUserIdx + 1).some(
+          (it) => (it.kind === "assistant" && it.text.trim().length > 0) || it.kind === "tools",
+        );
+        const lastUser = lastUserIdx >= 0 ? (items[lastUserIdx] as Extract<Item, { kind: "user" }>) : null;
+        if (lastUser?.inputId && !producedOutput && (lastUser.text.trim() || lastUser.images?.length)) {
+          const queued = session.recoverableDrafts ?? [];
+          if (!queued.some((draft) => draft.inputId === lastUser.inputId)) {
+            session.recoverableDrafts = [...queued, {
+              inputId: lastUser.inputId,
+              text: lastUser.text,
+              ...(lastUser.images?.length ? { images: [...lastUser.images] } : {}),
+            }];
+            items.push({
+              kind: "notice",
+              key: nextKey(),
+              text: "That send failed on authentication before the model saw it — your message is back in the draft. Fix the key or sign-in, then press send.",
+              tone: "warn",
+            });
+          }
+        }
+      }
+      session.authFailedTurn = undefined;
       // QueryEngine's terminal boundary precedes daemon verification/reflection
       // and release of `turnActive`. Keep every composer in steer/Stop mode
       // until the host emits turn_settled; otherwise an immediate fresh message
@@ -856,6 +888,13 @@ export function foldEvent(s: SessionVm, e: AresEvent): SessionVm {
         items.push({ kind: "authPrompt", key: nextKey(), provider: "anthropic", text: msg });
       } else {
         items.push({ kind: "notice", key: nextKey(), text: compact(msg, 500), tone: retriable ? "warn" : "bad" });
+      }
+      // Auth-class failures (bad key, key limit, not signed in) kill the turn
+      // before any model output. Mark the turn so its settlement can hand the
+      // user's message back to the composer instead of eating it.
+      const code = errObj?.code ?? "";
+      if (code === "no_auth" || /^http_(401|403)$/.test(code) || (/^http_429$/.test(code) && !retriable)) {
+        session.authFailedTurn = true;
       }
       // Provider errors are diagnostics, not terminal turn boundaries. Retry
       // or failover may follow; only turn_end/interrupt settlement unlocks UI.

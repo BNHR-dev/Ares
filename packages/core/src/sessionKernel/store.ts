@@ -351,6 +351,33 @@ export class SessionKernelStore {
       options.migrate === false
         ? Number(db.pragma("user_version", { simple: true }) ?? 0)
         : migrateSessionKernelDatabase(db, this.now());
+    if (options.migrate !== false) this.pruneSupersededEpochs();
+  }
+
+  /** One-time-per-open sweep of the epoch bloat that predates per-append
+   *  pruning: every compaction used to append a full message-history
+   *  projection that nothing ever read again, growing one field workspace's
+   *  kernel to 357MB. Deletes all but the latest two epochs per session, then
+   *  VACUUMs only when the reclaimable fraction is large enough to be worth a
+   *  blocking rebuild (a one-time cost on damaged stores, a no-op forever
+   *  after). Best-effort: an sqlite hiccup here must never block opening. */
+  private pruneSupersededEpochs(): void {
+    try {
+      this.db
+        .prepare(
+          `DELETE FROM context_epochs
+           WHERE epoch < (
+             SELECT MAX(e2.epoch) - 1 FROM context_epochs e2
+             WHERE e2.session_id = context_epochs.session_id
+           )`,
+        )
+        .run();
+      const freelist = Number(this.db.pragma("freelist_count", { simple: true }) ?? 0);
+      const pages = Number(this.db.pragma("page_count", { simple: true }) ?? 0);
+      if (pages > 0 && freelist / pages > 0.5) this.db.exec("VACUUM");
+    } catch {
+      // maintenance only — the store is correct without it
+    }
   }
 
   get journalMode(): string {
@@ -1998,6 +2025,15 @@ export class SessionKernelStore {
       this.db
         .prepare("UPDATE sessions SET current_context_epoch = ?, updated_at_ms = ? WHERE id = ?")
         .run(epoch, now, fence.sessionId);
+      // Superseded epochs are dead weight: resume reads ONLY the latest
+      // projection, nothing lists older epochs, and each row carries a full
+      // message-history projection (megabytes on a long session). Left alone
+      // they accumulated 357MB of sqlite in one field workspace. Keep the
+      // previous one for forensics; the FK is ON DELETE SET NULL so the chain
+      // degrades safely.
+      this.db
+        .prepare("DELETE FROM context_epochs WHERE session_id = ? AND epoch < ?")
+        .run(fence.sessionId, epoch - 1);
       this.appendEventTx(fence.sessionId, fence.generation, "context.epoch_created", {
         contextEpochId: id,
         epoch,
