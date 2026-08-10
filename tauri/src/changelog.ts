@@ -38,6 +38,50 @@ export interface ChangelogEntry {
 // from the "earlier updates" strip.
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.37.0",
+    date: "August 2026",
+    title: "It remembers what you said",
+    tagline: "Two field testers and a deep dive into real session logs turned up the quiet failures — mid-chat amnesia, bug reports that couldn't send, a memory full of junk, sessions bloating to hundreds of megabytes. All of it fixed.",
+    highlights: [
+      {
+        icon: "🧠",
+        title: "No more mid-chat amnesia",
+        blurb: "A rough patch of provider stalls could make Ares forget what you said two messages ago. Your recent conversation is now protected — it can never be trimmed out from under you.",
+        tag: "Safer",
+      },
+      {
+        icon: "🗜️",
+        title: "Compaction that compacts",
+        blurb: "Long coding sessions thrashed on tiny cleanup passes while session storage ballooned past 300MB. Real compaction now steps in early, and old bloat cleans itself up on your next launch.",
+        tag: "Faster",
+      },
+      {
+        icon: "🔑",
+        title: "Bad keys can't eat your message",
+        blurb: "If a send dies on an invalid or exhausted API key, your message comes straight back to the draft box — fix the key, press send. No retyping.",
+        tag: "Polished",
+      },
+      {
+        icon: "🐛",
+        title: "Reports that always deliver",
+        blurb: "If a bug report can't upload, it saves to your Desktop as a file you can attach anywhere — and the export button now tells you exactly where your log went.",
+        tag: "New",
+      },
+      {
+        icon: "🧹",
+        title: "A memory worth keeping",
+        blurb: "Ares no longer memorizes its own error messages or mints filler notes, the desktop app finally runs the nightly memory curation, and old junk prunes itself.",
+        tag: "Safer",
+      },
+      {
+        icon: "✅",
+        title: "Verify with one click",
+        blurb: "When a turn ends without a passing check, the warning now carries a Verify now button that runs the real thing.",
+        tag: "New",
+      },
+    ],
+  },
+  {
     version: "0.36.0",
     date: "August 2026",
     title: "The field-report release",
