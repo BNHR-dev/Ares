@@ -1258,6 +1258,50 @@ export class QueryEngine {
     }
   }
 
+  /**
+   * Field-debuggable wire log: one JSONL line per outbound provider call,
+   * written BEFORE dispatch so a hang, stall, or oversized-payload rejection
+   * still leaves evidence of exactly what was about to ship. This exists
+   * because a field user watching "no stream events for 90s" had no way to
+   * see WHAT was being sent or why it was that large — the record has to
+   * exist even when the call never comes back. Bounded: rolls once past
+   * ~8MB per session. ARES_WIRE_LOG=0 opts out; failures never touch the turn.
+   */
+  private async logWirePrompt(record: Record<string, unknown>): Promise<void> {
+    if (process.env.ARES_WIRE_LOG === "0") return;
+    try {
+      const dir = path.join(this.cfg.workspace, ".ares", "wire-log");
+      await fs.mkdir(dir, { recursive: true });
+      const file = path.join(dir, `${this.sessionId}.jsonl`);
+      const st = await fs.stat(file).catch(() => null);
+      if (st && st.size > 8 * 1024 * 1024) {
+        // Windows rename refuses to clobber — clear the old generation first.
+        await fs.rm(`${file}.1`, { force: true }).catch(() => {});
+        await fs.rename(file, `${file}.1`).catch(() => {});
+      }
+      await fs.appendFile(file, JSON.stringify(record) + "\n", "utf8");
+    } catch {
+      // Bookkeeping must never kill a turn.
+    }
+  }
+
+  /** Size-first block digest for the wire log: enough to answer "what made
+   *  this prompt huge" (a 5MB screenshot shows its real serialized size)
+   *  without duplicating whole prompts to disk. */
+  private wireBlockSummary(block: ContentBlock): Record<string, unknown> {
+    const b = block as unknown as { type?: string; name?: string; text?: unknown };
+    let chars: number;
+    try {
+      chars = JSON.stringify(block)?.length ?? 0;
+    } catch {
+      chars = -1;
+    }
+    const out: Record<string, unknown> = { type: b.type ?? "unknown", chars };
+    if (typeof b.name === "string") out.tool = b.name;
+    if (typeof b.text === "string" && b.text) out.head = b.text.slice(0, 160);
+    return out;
+  }
+
   /** Stop the currently armed turn (provider stream + running tools see the
    * abort). Idle and duplicate interrupts are strict no-ops; ownership of a
    * pre-stream cancellation belongs to Session's input/generation state, never
@@ -2249,6 +2293,26 @@ export class QueryEngine {
             try {
               if (!providerAttempt.supersededBySteering) {
                 const providerInterrupt = AbortSignal.any([this.liveSignal(), providerAttempt.steeringAbort.signal]);
+                // Awaited so the record is durably on disk before the request
+                // is armed — a call that never returns still leaves its shape.
+                await this.logWirePrompt({
+                  at: new Date().toISOString(),
+                  attemptId: providerAttempt.id,
+                  provider: this.cfg.provider.name,
+                  model: this.cfg.model,
+                  attempt,
+                  budgetTokens: budgetAttempts[attempt],
+                  estPromptTokens,
+                  overheadTokens,
+                  systemChars: this.cfg.systemPrompt.length,
+                  toolCount: toolDescriptors.length,
+                  trimmedMessages: budgeted.trimmed,
+                  messages: outboundMessages.map((m) => ({
+                    role: m.role,
+                    estTokens: estimateMessageTokens(m),
+                    blocks: m.content.map((b) => this.wireBlockSummary(b)),
+                  })),
+                });
                 const stream = this.cfg.provider.stream({
                   model: this.cfg.model,
                   system: this.cfg.systemPrompt,
@@ -2410,7 +2474,7 @@ export class QueryEngine {
                   // bad provider outage, with no recovery path.
                   yield {
                     type: "system_reminder_injected",
-                    text: `Provider stalled ${transientRetry} times at this prompt size; retrying with a smaller recent-history window (${budgetAttempts[attempt + 1].toLocaleString()} tokens).`,
+                    text: `Provider stalled ${transientRetry} times at this prompt size; retrying with a smaller recent-history window (${budgetAttempts[attempt + 1].toLocaleString()} tokens). Every outbound prompt's shape is logged in .ares/wire-log/${this.sessionId}.jsonl for diagnosis.`,
                     source: "compaction",
                   };
                   if (providerAttempt.supersededBySteering) {

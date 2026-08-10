@@ -2462,7 +2462,15 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
         const sid = typeof command.sessionId === "string" ? command.sessionId : undefined;
         const entry = sid ? sessions.get(sid) : primaryEntry;
         if (!entry) {
-          process.stdout.write(JSON.stringify({ type: "daemon_error", error: "cognitive_state: unknown session" }) + "\n");
+          // A resumed card only materializes its live entry on first SEND, so
+          // the desktop's 5s HELM poll lands here for every dormant session —
+          // and answering with daemon_error folded a red "unknown session"
+          // notice into the transcript on every tick (field report,
+          // 2026-08-08). Dormant is a NORMAL answer to a read-only poll:
+          // reply with an empty snapshot (never another session's state, and
+          // never resolveEntry — a poll must not materialize sessions on disk
+          // just because the war room is open).
+          process.stdout.write(JSON.stringify({ type: "cognitive_state", cognitive: null }) + "\n");
           continue;
         }
         const state = await assembleCognitiveState({

@@ -167,7 +167,15 @@ test("cognitive_state is read-only — two calls agree, and it never mutates sta
   assert.equal(both[0].cognitive.sessionId, first.cognitive.sessionId);
 });
 
-test("an unknown session is refused rather than silently answered", async (t) => {
+test("a dormant session answers empty — never someone else's state, never an error", async (t) => {
+  // The desktop polls cognitive_state every 5s while HELM is open, and a
+  // resumed card has no live entry until its first send. When that poll was
+  // answered with daemon_error, the transcript filled with red "unknown
+  // session" notices — one per tick (field report, 2026-08-08). The contract
+  // now: a session the daemon has no live entry for gets cognitive: null
+  // (dormant), which the UI renders as its honest "no snapshot yet" state.
+  // The original invariant still holds: it must NOT answer with the primary
+  // session's snapshot.
   try {
     await access(ENTRY);
   } catch {
@@ -179,6 +187,9 @@ test("an unknown session is refused rather than silently answered", async (t) =>
   assert.ok(await daemon.waitFor((e) => e.type === "daemon_ready" || e.type === "ready", 90_000));
 
   daemon.send({ type: "cognitive_state", sessionId: "sess_does_not_exist" });
-  const err = await daemon.waitFor((e) => e.type === "daemon_error" && /cognitive_state/.test(e.error ?? ""));
-  assert.ok(err, "a bad session id errors instead of returning someone else's state");
+  const reply = await daemon.waitFor((e) => e.type === "cognitive_state");
+  assert.ok(reply, "a dormant session id still gets a reply");
+  assert.equal(reply.cognitive, null, "the reply is an empty snapshot, not another session's state");
+  const spam = daemon.events().find((e) => e.type === "daemon_error" && /cognitive_state/.test(e.error ?? ""));
+  assert.equal(spam, undefined, "no daemon_error — a 5s poll must not spam the transcript");
 });

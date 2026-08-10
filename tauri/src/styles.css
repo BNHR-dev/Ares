@@ -961,7 +961,10 @@ canvas.bubbleImage { cursor: zoom-in; }
   animation: fadeUp 200ms ease both;
   z-index: 3;
 }
-.jumpLatest:hover { background: rgba(var(--accent-rgb), 0.12); }
+/* The tint layers OVER the opaque panel: hover replaced the background with a
+   12% wash once, and the sticky pill turned see-through over the transcript —
+   prompt text read straight through the button (field report, 2026-08-08). */
+.jumpLatest:hover { background: linear-gradient(rgba(var(--accent-rgb), 0.12), rgba(var(--accent-rgb), 0.12)), var(--panel-2); }
 
 /* mermaid diagrams */
 .mermaidBlock { margin: 12px 0; padding: 14px; max-height: 520px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--panel); overflow: auto; text-align: center; animation: fadeUp 280ms ease both; }
