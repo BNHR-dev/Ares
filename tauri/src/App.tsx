@@ -3451,6 +3451,11 @@ function App() {
           onChange={(e) => setSessionQuery(e.target.value)}
         />
 
+        {/* ONE scroll container for every session group. The lists used to be
+            sibling flex:1 scrollers competing for the rail's height — past a
+            dozen sessions they overflowed the rail instead of scrolling and
+            crushed the controls above (field report, 2026-08-10). */}
+        <div className="railScroll">
         {pinnedSessions.length > 0 ? (
           <>
             <div className="railLabel">Pinned</div>
@@ -3494,6 +3499,7 @@ function App() {
             <SessionRow key={s.id} s={s} activeId={active?.id ?? ""} onSelect={openSession} onPin={togglePin} onRename={renameSession} onClose={closeSession} onProject={assignProject} />
           ))}
         </nav>
+        </div>
         {/* Autocomplete of existing project names for the row-level assign input. */}
         <datalist id="aresProjectOptions">
           {allProjectNames.map((name) => (

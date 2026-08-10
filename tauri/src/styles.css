@@ -587,7 +587,12 @@ canvas.bubbleImage { cursor: zoom-in; }
 .session .pinBtn:hover { color: var(--bronze-hi); }
 .session .pinBtn[data-pinned="1"] { opacity: 1; color: var(--bronze); }
 
-.sessionList { display: flex; flex-direction: column; gap: 4px; overflow-y: auto; flex: 1; min-height: 0; }
+/* ONE scroller owns all session groups (pinned + projects + loose). The lists
+   themselves no longer flex/scroll — multiple sibling flex:1 scrollers split
+   the rail's height equally, so a long Sessions list got half the space of a
+   one-row Pinned list and then overflowed the rail instead of scrolling. */
+.railScroll { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; padding-right: 2px; }
+.sessionList { display: flex; flex-direction: column; gap: 4px; flex: none; }
 .session {
   display: flex; align-items: center; gap: 10px;
   padding: 9px 10px;

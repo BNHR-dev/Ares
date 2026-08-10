@@ -24,6 +24,7 @@ use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 use windows_sys::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DWMWA_COLOR_NONE,
+    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
 };
 
 #[cfg(windows)]
@@ -1922,20 +1923,41 @@ fn main() {
 #[cfg(windows)]
 fn hide_windows_accent_border(window: &tauri::WebviewWindow) {
     if let Ok(hwnd) = window.hwnd() {
-        let color = DWMWA_COLOR_NONE;
-        // Suppress BOTH the window border and the top caption edge. On Win11 a
-        // frameless + transparent window otherwise bleeds the system accent
-        // colour as a line across the very top — clearing only the border
-        // leaves that top sliver, so we clear the caption colour too.
-        for attr in [DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR] {
-            unsafe {
-                let _ = DwmSetWindowAttribute(
-                    hwnd.0 as _,
-                    attr as u32,
-                    &color as *const _ as *const core::ffi::c_void,
-                    std::mem::size_of_val(&color) as u32,
-                );
-            }
+        // Suppress the top caption edge. On Win11 a frameless window otherwise
+        // bleeds the system accent colour as a line across the very top.
+        let caption = DWMWA_COLOR_NONE;
+        unsafe {
+            let _ = DwmSetWindowAttribute(
+                hwnd.0 as _,
+                DWMWA_CAPTION_COLOR as u32,
+                &caption as *const _ as *const core::ffi::c_void,
+                std::mem::size_of_val(&caption) as u32,
+            );
+        }
+        // The border gets an explicit near-black rather than NONE: with no
+        // border at all the razor-edged window visually fused with whatever
+        // sat behind it, reading as Ares "hiding" the other app's controls
+        // (field report, 2026-08-10). COLORREF is 0x00BBGGRR.
+        let border: u32 = 0x000d_0c12;
+        unsafe {
+            let _ = DwmSetWindowAttribute(
+                hwnd.0 as _,
+                DWMWA_BORDER_COLOR as u32,
+                &border as *const _ as *const core::ffi::c_void,
+                std::mem::size_of_val(&border) as u32,
+            );
+        }
+        // Native Win11 rounded corners. decorations:false loses the system
+        // rounding, shipping a sharp rectangle; DWM clips the window back to
+        // the standard rounded shape (harmless no-op on Win10).
+        let corner: i32 = DWMWCP_ROUND;
+        unsafe {
+            let _ = DwmSetWindowAttribute(
+                hwnd.0 as _,
+                DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+                &corner as *const _ as *const core::ffi::c_void,
+                std::mem::size_of_val(&corner) as u32,
+            );
         }
     }
 }
