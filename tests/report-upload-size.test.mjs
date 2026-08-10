@@ -100,3 +100,26 @@ test("trimRolloutForReport still truncates individual monster strings", () => {
   assert.ok(out.event.text.length < huge.length);
   assert.match(out.event.text, /\[trimmed \d+ chars\]/);
 });
+
+test("a failed upload degrades to a local file the tester can attach", async () => {
+  const { saveReportLocally } = await import("../packages/cli/dist/entry/daemon/report.js");
+  const { mkdtempSync } = await import("node:fs");
+  const { readFile } = await import("node:fs/promises");
+  const os = await import("node:os");
+  const path = await import("node:path");
+
+  const payload = payloadWith(bulkyEvents(5, 200));
+
+  // Desktop route: the visible, attachable place.
+  const desktop = mkdtempSync(path.join(os.tmpdir(), "ares-report-desk-"));
+  const onDesk = await saveReportLocally(payload, "sess_abcdefghij123456789", "unused-ws", desktop);
+  assert.ok(onDesk.startsWith(desktop), `saved to the desktop dir, got ${onDesk}`);
+  assert.match(path.basename(onDesk), /^ares-bug-report-sess_abcdefghij123-.*\.json\.gz$/);
+  const roundTrip = JSON.parse(gunzipSync(await readFile(onDesk)).toString("utf8"));
+  assert.equal(roundTrip.session_id, payload.session_id, "the file is the actual report payload");
+
+  // No desktop: falls back into the workspace where nothing else could fail.
+  const ws = mkdtempSync(path.join(os.tmpdir(), "ares-report-ws-"));
+  const fallback = await saveReportLocally(payload, "sess_x", ws, path.join(ws, "no-such-desktop"));
+  assert.ok(fallback.startsWith(path.join(ws, ".ares", "bug-reports")), `fell back to workspace, got ${fallback}`);
+});

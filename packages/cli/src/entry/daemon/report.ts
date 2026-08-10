@@ -24,6 +24,9 @@
 // it doesn't fit we drop OLD events until it does rather than failing.
 
 import { gzipSync } from "node:zlib";
+import { mkdir, stat, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 /** Compressed request-body ceiling. 4MB against the platform's ~4.5MB, so the
  *  headers and the gateway's own framing can't push a "just fits" body over. */
@@ -75,6 +78,32 @@ function keepTail(entries: unknown[], budget: number): unknown[] {
 
 function droppedNote(dropped: number): unknown {
   return { ts: null, seq: -1, event: { type: "report_note", text: `[${dropped} earlier events omitted to fit the size limit]` } };
+}
+
+/**
+ * Save a bug-report payload to disk when the gateway can't take it (no Ares
+ * account connected, network down, upload rejected). A field tester whose
+ * report upload fails is EXACTLY the person whose report matters — "can't send
+ * it as a bug report" must degrade to "here's the file, attach it in Discord",
+ * never to nothing (field report, 2026-08-06). Desktop first (visible,
+ * attachable), workspace .ares/bug-reports as fallback. Gzipped: these run to
+ * tens of MB raw and chat apps cap attachments.
+ */
+export async function saveReportLocally(
+  payload: Record<string, unknown>,
+  sessionId: string,
+  workspace: string,
+  desktopDir?: string,
+): Promise<string> {
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const name = `ares-bug-report-${sessionId.slice(0, 18)}-${stamp}.json.gz`;
+  const desktop = desktopDir ?? join(homedir(), "Desktop");
+  const onDesktop = await stat(desktop).then((s) => s.isDirectory()).catch(() => false);
+  const dir = onDesktop ? desktop : join(workspace, ".ares", "bug-reports");
+  if (!onDesktop) await mkdir(dir, { recursive: true });
+  const file = join(dir, name);
+  await writeFile(file, gzipSync(Buffer.from(JSON.stringify(payload), "utf8")));
+  return file;
 }
 
 /** How many real events a payload carries, ignoring any note we prepended. */

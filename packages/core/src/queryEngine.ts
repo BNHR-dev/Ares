@@ -750,6 +750,13 @@ export function budgetMessages(
   messages: readonly Message[],
   budgetTokens: number,
   overheadTokens: number,
+  // Hard floor on how few recent messages may survive trimming (mirrors
+  // chooseCompactionSplit's minKeep). Without it, a budget below the fixed
+  // overhead made this loop run to kept.length === 1 — the model got ONLY the
+  // pending message and answered as if the rest of the conversation never
+  // happened. Shipping a slightly over-budget prompt and letting the provider
+  // say no is strictly better than silently erasing the conversation.
+  minKeep = 4,
 ): { messages: Message[]; trimmed: number; dropped: Message[] } {
   if (budgetTokens <= 0 || messages.length <= 1) return { messages: [...messages], trimmed: 0, dropped: [] };
   let total = overheadTokens + messages.reduce((s, m) => s + estimateMessageTokens(m), 0);
@@ -758,7 +765,8 @@ export function budgetMessages(
   const kept = [...messages];
   const dropped: Message[] = [];
   let trimmed = 0;
-  while (total > budgetTokens && kept.length > 1) {
+  const keepFloor = Math.max(1, minKeep);
+  while (total > budgetTokens && kept.length > keepFloor) {
     const gone = kept.shift()!;
     total -= estimateMessageTokens(gone);
     dropped.push(gone);
@@ -1944,13 +1952,15 @@ export class QueryEngine {
 
     const totalUsage: Usage = { inputTokens: 0, outputTokens: 0, modelCalls: 0 };
     let stopReason: StopReason = "end_turn";
-    // ZERO-OUTPUT stall counter, turn-scoped. When the provider streams NOTHING
-    // repeatedly even after the prompt was shrunk, the prompt was never the
-    // problem — the endpoint is down/misrouted. Without this cap the shrink
-    // ladder walked every rung at 90s×2 per rung, across iterations: a field
-    // user watched "no stream events for 90s" for 996 seconds against a dead
-    // glm endpoint before the turn finally failed. Reset on any completed
-    // provider call (the provider is demonstrably alive).
+    // ZERO-OUTPUT stall counter, turn-scoped. When the provider commits NO
+    // usable output repeatedly — nothing at all, or only reasoning that stalls
+    // out — even after the prompt was shrunk, the prompt was never the
+    // problem — the endpoint is down/misrouted/unable to finish. Without this
+    // cap the shrink ladder walked every rung at 90s×2 per rung, across
+    // iterations: a field user watched "no stream events for 90s" for 996
+    // seconds against a dead glm endpoint before the turn finally failed.
+    // Reset on any completed provider call (the provider is demonstrably
+    // alive and able to finish).
     let zeroOutputStalls = 0;
     // Big autonomous builds legitimately run long. There is deliberately NO
     // meaningful default iteration cap: the loop-kill detectors below (dead
@@ -2214,8 +2224,46 @@ export class QueryEngine {
               ? Math.min(configuredBudget, this.learnedContextCeiling)
               : this.learnedContextCeiling
             : configuredBudget;
-        const rawBudgetAttempts = contextBudgetAttempts(effectiveBudget);
-        const budgetAttempts = rawBudgetAttempts.map((b) => (b > 0 ? Math.max(1, Math.floor(b / this.tokenScale)) : b));
+        // Every rung is FLOORED at overhead + a real slice of recent history.
+        // The bottom rungs (8k/4k) sat below the fixed prompt overhead (system
+        // prompt + tool schemas ≈ 10-25k estimate tokens), so reaching them
+        // didn't produce a smaller prompt — it produced a historyless one:
+        // budgetMessages stripped everything but the pending message and the
+        // model denied instructions from two turns ago (field report,
+        // 2026-08-05). Rungs that collapse to the same floored value dedupe
+        // (walking three identical sizes burns stall-watchdog minutes for the
+        // same guaranteed outcome); raw/scaled stay paired so ceiling-learning
+        // keeps indexing the REAL rung values.
+        const rawLadder = contextBudgetAttempts(effectiveBudget);
+        const scaledOf = (raw: number) => (raw > 0 ? Math.max(1, Math.floor(raw / this.tokenScale)) : raw);
+        // The TOP rung is configuration, not a guess: a deliberately tiny
+        // budget (num_ctx-style, where the provider silently truncates instead
+        // of rejecting) must be enforced proactively and exactly. The floor
+        // therefore applies only to DESCENT rungs — and never exceeds the top
+        // rung, so a tiny configured budget stays authoritative.
+        const topScaled = scaledOf(rawLadder[0]);
+        const rungFloor = Math.min(
+          overheadTokens + MIN_RECENT_HISTORY_TOKENS,
+          topScaled > 0 ? topScaled : Number.POSITIVE_INFINITY,
+        );
+        const budgetPairs: Array<{ raw: number; scaled: number }> = [];
+        rawLadder.forEach((raw, i) => {
+          const scaled = i === 0 || raw <= 0 ? scaledOf(raw) : Math.max(rungFloor, scaledOf(raw));
+          if (!budgetPairs.some((p) => p.scaled === scaled)) budgetPairs.push({ raw, scaled });
+        });
+        // The raw bottom rung survives UNFLOORED as the true last resort: a
+        // provider whose real window sits below the floor (tiny local models)
+        // must still get a sendable prompt instead of a hard-failed turn.
+        // Stall-driven shrink is capped two rungs above the end, so only hard
+        // context-limit rejections can ever walk down here — and this final
+        // rung is also the only one where budgetMessages may trim below the
+        // recent-history keep-floor.
+        const bottomRaw = rawLadder[rawLadder.length - 1];
+        const bottomScaled = scaledOf(bottomRaw);
+        if (bottomRaw > 0 && budgetPairs.length > 0 && bottomScaled < budgetPairs[budgetPairs.length - 1].scaled) {
+          budgetPairs.push({ raw: bottomRaw, scaled: bottomScaled });
+        }
+        const budgetAttempts = budgetPairs.map((p) => p.scaled);
         let modelStarted = false;
         budgetLoop: for (let attempt = 0; attempt < budgetAttempts.length; attempt++) {
           // S1 — transient-failure retry. A retriable provider error (529
@@ -2233,7 +2281,19 @@ export class QueryEngine {
             completedProviderAttemptId = null;
             modelStarted = false;
 
-            const budgeted = budgetMessages(this.messages, budgetAttempts[attempt], overheadTokens);
+            // Recent history survives trimming (minKeep 4) on DESCENT rungs —
+            // stall/rejection-driven guesses may not erase the conversation
+            // from the model's view. Two exceptions trim freely: the TOP rung
+            // (the configured budget is authoritative — silently-truncating
+            // providers need it enforced exactly) and the LAST rung, the
+            // last resort reachable only by hard context-limit evidence,
+            // where a pending-message-only prompt beats a hard-failed turn.
+            const budgeted = budgetMessages(
+              this.messages,
+              budgetAttempts[attempt],
+              overheadTokens,
+              attempt === 0 || attempt === budgetAttempts.length - 1 ? 1 : 4,
+            );
             if (budgeted.trimmed > 0) {
               // File contents in the dropped span are no longer visible to the
               // model — let the host invalidate read stamps so re-reads pass.
@@ -2444,18 +2504,20 @@ export class QueryEngine {
                 ? `${this.cfg.model} is overloaded upstream — retrying in ${(waitMs / 1000).toFixed(1)}s (attempt ${transientRetry}/${retryBudget}). Your message is safe.`
                 : `provider hiccup (${streamError.code}); retrying in ${(waitMs / 1000).toFixed(1)}s — attempt ${transientRetry}/${retryBudget}`;
               if (isStallError(streamError)) {
-                // Fail fast on a DEAD endpoint: if the provider has streamed
-                // nothing four times — including after at least one shrink —
-                // no smaller prompt is going to fix it. Surface a diagnosis the
-                // failover loop recognizes ("unreachable") instead of walking
-                // the rest of the ladder through 90-second silences.
-                if (!modelStarted) zeroOutputStalls++;
+                // Fail fast on a request that will never complete: if four
+                // attempts committed no usable output — nothing at all, or
+                // only reasoning that stalled out — no smaller prompt is going
+                // to fix it. Counting thinking-only stalls matters: a thinking
+                // model sets modelStarted on its first thinking_delta, which
+                // used to exempt it from this breaker entirely and let it walk
+                // the ladder through 180-second silences all the way down.
+                if (!sawCommittedOutput) zeroOutputStalls++;
                 if (zeroOutputStalls >= 4) {
                   streamError = {
                     code: "provider_unresponsive",
                     message:
-                      `${this.cfg.model} streamed nothing across ${zeroOutputStalls} attempts at multiple prompt sizes — ` +
-                      `the provider endpoint looks unreachable or unresponsive, not the prompt. ` +
+                      `${this.cfg.model} produced no committed output across ${zeroOutputStalls} attempts at multiple prompt sizes — ` +
+                      `the provider endpoint looks unreachable, unresponsive, or unable to finish this request; the prompt is not the problem. ` +
                       `Switching model/provider or retrying later is the fix; resending the same request is not.`,
                     retriable: false,
                   };
@@ -2466,7 +2528,13 @@ export class QueryEngine {
                 // stall silently on very large prompts) — re-issuing the same size
                 // just burns another 90s of dead air. Shrink the history window
                 // and go again instead (bug report 4a8ac088: 90s×2+ of silence).
-                if (transientRetry >= 2 && !sawCommittedOutput && attempt < budgetAttempts.length - 1) {
+                // At most TWO stall-driven shrinks per turn, and NEVER onto
+                // the final rung (the minKeep=1 last resort): a stall is weak
+                // evidence about prompt size, and unbounded descent is how a
+                // run of reasoning stalls marched the window down to rungs
+                // that couldn't hold any history at all. Context-limit
+                // rejections (hard evidence) keep the full ladder.
+                if (transientRetry >= 2 && !sawCommittedOutput && attempt < Math.min(2, budgetAttempts.length - 2)) {
                   // Shrink THIS attempt only — a stall is not evidence about
                   // prompt size (brownouts, sleep/wake, slow prefill all stall),
                   // so it must never teach a persistent ceiling. Learning here
@@ -2535,9 +2603,13 @@ export class QueryEngine {
             // a ceiling below 16k would put compaction's target under its own
             // keep-floor (compaction would then fire every single turn), and no
             // real serving layer rejects 16k prompts — below that, shrink this
-            // attempt without persisting.
-            const learnedRung = rawBudgetAttempts[attempt + 1];
-            if (learnedRung >= 16_000) {
+            // attempt without persisting. Payload-size rejections (413) still
+            // shrink THIS attempt — fewer messages and images genuinely shrink
+            // the body — but teach nothing: they're evidence about request
+            // BYTES (usually one big image), not the model's token window, and
+            // learning them permanently crippled hours-long sessions.
+            const learnedRung = budgetPairs[attempt + 1].raw;
+            if (learnedRung >= 16_000 && !isPayloadSizeError(streamError)) {
               this.learnedContextCeiling = Math.min(
                 this.learnedContextCeiling ?? Number.POSITIVE_INFINITY,
                 learnedRung,
@@ -2657,10 +2729,13 @@ export class QueryEngine {
       if (streamError) {
         this.activeProviderAttempt = null;
         this.turnPhase = "boundary";
-        // Provider-emitted errors were already forwarded from the stream. The
-        // premature-close error is synthesized locally, so surface it once only
-        // after its retry budget is exhausted.
-        if (streamError.code === "no_message_done") {
+        // Provider-emitted errors were already forwarded from the stream.
+        // LOCALLY SYNTHESIZED errors were not: they replace streamError after
+        // the raw event went out, so without this yield the diagnosis never
+        // reaches the consumer — the unresponsive-breaker's "switch provider,
+        // don't resend" verdict was invisible, and the turn just read as one
+        // more stall.
+        if (streamError.code === "no_message_done" || streamError.code === "provider_unresponsive") {
           this.markTurnTerminal();
           yield { type: "error", error: streamError };
         }
@@ -5364,6 +5439,13 @@ function toolCallCeiling(): number {
   return Number.isFinite(raw) && raw >= 10 ? Math.floor(raw) : 5000;
 }
 
+/** Minimum estimate-tokens of RECENT HISTORY every ladder rung must be able to
+ *  hold beyond the fixed prompt overhead. A rung smaller than the overhead
+ *  made budgetMessages strip everything but the pending message — the model,
+ *  knowing nothing the user said two turns ago, replied "you didn't tell me to
+ *  do that" (field report, 2026-08-05). */
+const MIN_RECENT_HISTORY_TOKENS = 12_000;
+
 function contextBudgetAttempts(configuredBudgetTokens: number): number[] {
   if (configuredBudgetTokens <= 0) return [0, 32_000, 16_000, 8_000, 4_000];
   const candidates = [
@@ -5383,6 +5465,22 @@ function contextBudgetAttempts(configuredBudgetTokens: number): number[] {
       seen.add(budget);
       return true;
     });
+}
+
+/** A too-big REQUEST BODY (HTTP 413 / payload too large). Subset of
+ *  isContextLimitError: it still walks the shrink ladder (smaller history +
+ *  fewer images genuinely shrinks the body), but it is evidence about BYTES,
+ *  not about the model's token window — one oversized pasted image must never
+ *  teach learnedContextCeiling and permanently cripple the session's context
+ *  (field report, 2026-08-05: hours-long sessions losing recent turns). */
+function isPayloadSizeError(error: { code: string; message: string }): boolean {
+  const text = `${error.code} ${error.message}`.toLowerCase();
+  return (
+    text.includes("http_413") ||
+    text.includes("entity too large") ||
+    text.includes("payload too large") ||
+    text.includes("payload_too_large")
+  );
 }
 
 function isContextLimitError(error: { code: string; message: string }): boolean {

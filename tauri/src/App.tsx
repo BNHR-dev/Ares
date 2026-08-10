@@ -766,11 +766,29 @@ function App() {
     out.push(...logLines);
     const content = out.join("\n");
     if (native) {
+      // Feedback must be VISIBLE: both outcomes used to go only to the
+      // Garrison log, so a user who pressed ⤓ and saw nothing happen read the
+      // button as broken even when it worked (field report, 2026-08-06).
       try {
         const path = await invoke<string>("ares_export_log", { content });
         pushLog(`[export] session log saved → ${path}`);
+        pushGatewayToast(`⤓ Session log saved to ${path}`);
       } catch (err) {
         pushLog(`[export] failed: ${String(err)}`);
+        // A giant transcript can choke the IPC hop — retry once with the tail,
+        // which is where whatever prompted the export almost always lives.
+        const TAIL = 4 * 1024 * 1024;
+        if (content.length > TAIL) {
+          try {
+            const clipped = `[export truncated: first ${content.length - TAIL} chars omitted after a full-size save failed]\n` + content.slice(-TAIL);
+            const path = await invoke<string>("ares_export_log", { content: clipped });
+            pushGatewayToast(`⤓ Session log saved to ${path} (truncated — the full transcript was too large to export)`);
+            return;
+          } catch {
+            // fall through to the failure toast
+          }
+        }
+        pushGatewayToast(`Export failed: ${String(err)}`);
       }
     } else {
       const a = document.createElement("a");
@@ -778,7 +796,7 @@ function App() {
       a.download = `ares-session-${Date.now()}.txt`;
       a.click();
     }
-  }, [active, logLines, prefs, native, pushLog]);
+  }, [active, logLines, prefs, native, pushLog, pushGatewayToast]);
 
   /** Send a control command to the daemon (sessions_list, skills_list, etc.). */
   const daemonCmd = useCallback(
@@ -1688,14 +1706,20 @@ function App() {
           // as complete sends whoever reads it looking for events that were
           // never sent.
           const dropped = (e as { droppedEvents?: number }).droppedEvents ?? 0;
+          // A failed upload that still produced a local file is a SUCCESS with
+          // a different delivery route — say where the file is, don't just
+          // report failure (field report: "can't send it as a bug report").
+          const savedPath = typeof e.savedPath === "string" ? e.savedPath : null;
           pushGatewayToast(
             e.ok
               ? dropped > 0
                 ? `🐛 Bug report sent — thank you. The session was too big for one upload, so the ${dropped} oldest events were left out; everything recent went through.`
                 : "🐛 Bug report sent — thank you, this helps improve Ares."
-              : `Report failed: ${e.error ? stringify(e.error) : "unknown"}`,
+              : savedPath
+                ? `Upload didn't go through (${e.error ? stringify(e.error) : "unknown"}) — the report was saved to ${savedPath} instead. Attach that file wherever you report bugs.`
+                : `Report failed: ${e.error ? stringify(e.error) : "unknown"}`,
           );
-          if (e.ok) setReportOpen(false);
+          if (e.ok || savedPath) setReportOpen(false);
           return true;
         }
         case "custom_models":

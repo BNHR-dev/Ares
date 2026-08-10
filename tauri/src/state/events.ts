@@ -55,6 +55,9 @@ export interface AresEvent {
   /** cognitive_state payload. Deliberately NOT `state` — that name is already
    *  taken on this type by daemon/consciousness status strings. */
   cognitive?: unknown;
+  /** bug_report_result: where the report was written locally when the gateway
+   *  upload didn't happen (no account) or didn't succeed. */
+  savedPath?: unknown;
   origin?: string;
   provider?: string;
   model?: string;

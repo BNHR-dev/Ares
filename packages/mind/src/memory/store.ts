@@ -19,6 +19,7 @@ import { currentStrength, reinforce, weaken } from "./strength.js";
 import { recall, type RecallOptions, type RecallResult } from "./recall.js";
 import { contentHash, type EmbedIndex, type Embedder } from "./embedIndex.js";
 import { buildIdf } from "./idf.js";
+import { isOperationalNoise } from "./noise.js";
 import { clusterByConcept, detectRecurringFailures, type Phraser } from "./synthesis.js";
 import { MEMORY_SCHEMA_VERSION, type CrucibleCheck, type HypothesisStatus, type MemoryKind, type MemoryNode, type ReflectionResult, type ReflectionSurface } from "./types.js";
 
@@ -460,6 +461,15 @@ export class MemoryStore {
 
     // 1. Forget faded one-off episodes and stale filler "theme" semantics.
     for (const node of this.all()) {
+      // Operational noise (tool/provider error text) is never knowledge, no
+      // matter its kind or source — stores populated BEFORE the write-spine
+      // noise gate existed still carry these (a field index was 83% error
+      // entries, 2026-08-06), and this sweep is what durably cleans them out.
+      if (isOperationalNoise(node.content)) {
+        this.deleteNode(node.id);
+        pruned++;
+        continue;
+      }
       // Crystallized insight/belief nodes the deep dream synthesized are normally
       // spared pruning — but not unconditionally: a synthesized belief that keeps
       // getting DISPROVEN via recordOutcome (driven down to PRUNE_FLOOR by repeat

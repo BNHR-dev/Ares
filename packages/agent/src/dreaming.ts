@@ -9,7 +9,7 @@ import { emitLifecycle } from "./lifecycle/bus.js";
 import { loadSelfModel } from "./self/store.js";
 import { reflect } from "./self/reflect.js";
 import { gainForTarget } from "./voice.js";
-import { MemoryRouter, MemoryStore as LivingMemoryStore, migrateLegacyVectors, mindPaths } from "@ares/mind";
+import { MemoryRouter, MemoryStore as LivingMemoryStore, isOperationalNoise, migrateLegacyVectors, mindPaths } from "@ares/mind";
 
 const DREAM_MEMORY_ITEM_CHARS = 420;
 const DREAM_MEMORY_MAX_ITEMS = 120;
@@ -34,7 +34,9 @@ export async function runLightDream(opts: {
   emitLifecycle({ type: "dream_phase_started", phase: "light" });
   const now = opts.now ?? new Date();
   const events = opts.transcriptPath ? await readTextIfExists(opts.transcriptPath, 2_000_000) : "";
-  const snippets = extractSessionSignals(events ?? "").slice(0, 5);
+  // Noise-gated at the source: a pasted stack trace in a user message is
+  // still a user message to extractSessionSignals, but it is not knowledge.
+  const snippets = extractSessionSignals(events ?? "").filter((s) => !isOperationalNoise(s)).slice(0, 5);
   const daily = path.join(paths.memoryDir, `${now.toISOString().slice(0, 10)}.md`);
   await mkdir(path.dirname(daily), { recursive: true });
   if (snippets.length > 0) {
@@ -76,9 +78,16 @@ export async function runDeepDream(opts: {
   emitLifecycle({ type: "dream_phase_started", phase: "deep" });
   const store = await createMemoryStore(opts.config, home);
   const memories = await store.list();
+  // The noise gate applies at PROMOTION, not just at write time: the v4 vector
+  // store is append-only (no delete API), so "Tool error observed:" rows
+  // harvested by long-gone code re-surfaced into MEMORY.md on every deep dream
+  // — a field user's index was 24 error entries against 5 real memories
+  // (2026-08-06). Filtering here starves legacy noise out of the index for
+  // good, because this pass REWRITES MEMORY.md wholesale.
   const promoted = memories.filter((memory) =>
     memory.score >= opts.config.dreaming.minScore &&
-    (memory.hits >= opts.config.dreaming.minRecallCount || memory.source === "light-dreaming")
+    (memory.hits >= opts.config.dreaming.minRecallCount || memory.source === "light-dreaming") &&
+    !isOperationalNoise(memory.content)
   );
   if (promoted.length > 0) {
     const lines = ["# Memory", "", "_(Curated long-term memory. Only DEEP dreaming writes here.)_", ""];

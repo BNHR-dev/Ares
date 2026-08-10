@@ -63,7 +63,7 @@ import { buildSystemPrompt, disposeLiveSession, finishTurn, gatherGitRunFacts, l
 //   daemon/mcp.ts          — mcpDirectorySnapshot
 import { applyEngineConfigEnv, normalizeEngineConfig } from "./daemon/engineConfig.js";
 import { normalizeRoutingCommand } from "./daemon/routing.js";
-import { trimRolloutForReport } from "./daemon/report.js";
+import { saveReportLocally, trimRolloutForReport } from "./daemon/report.js";
 import { daemonSkillsList } from "./daemon/skills.js";
 import { daemonUsageStats } from "./daemon/usageStats.js";
 import { DaemonCommandRouter, type DaemonInputCommand } from "./daemon/protocol.js";
@@ -2388,7 +2388,15 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
             transcript: { meta: rollout.meta, events },
           };
           const result = await postAresGatewayReport(aresGatewayBase(brSettings), brSettings.aresGatewayToken, payload);
-          process.stdout.write(JSON.stringify({ type: "bug_report_result", ...result }) + "\n");
+          if (!result.ok) {
+            // The upload failing (no account, network, gateway down) must not
+            // eat the report — the tester with the broken session is the whole
+            // audience of this feature. Degrade to a local file they can attach.
+            const savedPath = await saveReportLocally(payload, id, live.context.workspace).catch(() => undefined);
+            process.stdout.write(JSON.stringify({ type: "bug_report_result", ...result, savedPath }) + "\n");
+          } else {
+            process.stdout.write(JSON.stringify({ type: "bug_report_result", ...result }) + "\n");
+          }
         } catch (err) {
           process.stdout.write(JSON.stringify({ type: "bug_report_result", ok: false, error: err instanceof Error ? err.message : String(err) }) + "\n");
         }
