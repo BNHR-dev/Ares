@@ -2610,9 +2610,13 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
 .bootRing1 { inset: 0; border-top-color: var(--ember); border-right-color: rgba(var(--ember-rgb),0.4); animation: spin360 4.5s linear infinite; box-shadow: 0 0 24px -6px rgba(var(--ember-rgb),0.5); }
 .bootRing2 { inset: 14px; border-bottom-color: var(--ember-hi); border-left-color: rgba(255,178,77,0.4); animation: spin360 3s linear infinite reverse; }
 .bootSigil {
-  width: 70px; height: 88px;
-  background: var(--god-uri) center/contain no-repeat;
-  filter: drop-shadow(0 0 16px rgba(var(--ember-rgb), 0.6));
+  /* The real mark, not the line-art god glyph. It is a full-colour raster, so
+     it does NOT inherit the accent the way the old glyph did — that is the
+     accepted trade for a finished logo, and it stays on-brand in every theme
+     because the mark carries its own palette. */
+  width: 92px; height: 92px;
+  background: url("/ares-logo.png") center/contain no-repeat;
+  filter: drop-shadow(0 0 18px rgba(var(--ember-rgb), 0.45));
   animation: bootSigilIgnite 2s ease-in-out forwards;
 }
 @keyframes bootSigilIgnite {
@@ -4698,3 +4702,23 @@ html[data-perf="lite"] .brandBtn, html[data-perf="lite"] .hudVersion { animation
   color: var(--faint);
 }
 .hmVoiceHint { font: 450 11.5px/1.4 var(--body); color: var(--faint); flex: 1 1 220px; }
+
+/* ── THE MARK ─────────────────────────────────────────────────────────────
+   The Ares logo: a Corinthian helmet inside a laurel wreath. --god-uri was
+   the old line-art relief and is read by ten different surfaces (titlebar
+   emblem, the empty-stage hero, auth prompts, About, Settings hero, artifact
+   rows, the What is New mark, the modern medallion), so repointing the single
+   variable swaps the mark everywhere instead of touching each rule.
+
+   The relief was a TALL 4:5 glyph; the logo is square, so the handful of
+   surfaces that hard-coded that aspect are squared up here or the mark would
+   letterbox and float. */
+:root { --god-uri: url("/ares-logo.png"); }
+.titlebar .emblem { width: 26px; height: 26px; }
+.empty .emptyEmblem { width: 124px; height: 124px; }
+.authPromptMark { width: 32px; height: 32px; }
+.authModalMark { width: 52px; height: 52px; }
+.aboutMark { width: 84px; height: 84px; }
+.settingsHeroMark { width: 44px; height: 44px; }
+.artifact i { width: 32px; height: 32px; }
+.wnMark { width: 240px; height: 240px; }
