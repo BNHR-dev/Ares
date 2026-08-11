@@ -40,14 +40,32 @@ export const CHANGELOG: ChangelogEntry[] = [
   {
     version: "0.37.2",
     date: "August 2026",
-    title: "The frame comes alive",
-    tagline: "The working glow stamped hard square corners inside a rounded window. Now it hugs the frame, a hairline light travels the edge while Ares works — and two quiet new themes join the war-bands.",
+    title: "Laws, laurels, and light",
+    tagline: "Your standing orders finally stick, the app wears its new crest, appearance becomes two clean dials, and the working glow learns to hug the frame.",
     highlights: [
       {
-        icon: "🎨",
-        title: "Basic (light) and Basic (dark)",
-        blurb: "Two plain themes for when the forge is too much: flat neutral greys, one blue accent, no embers or glow. Every existing theme is untouched.",
+        icon: "⚖️",
+        title: "Your word is law",
+        blurb: "Tell Ares \"stop doing X\" or \"always Y\" once — it's recorded as a standing order carried in every single turn, overriding its own habits. No more repeating yourself.",
         tag: "New",
+      },
+      {
+        icon: "🛡️",
+        title: "The Spartan wreath",
+        blurb: "A real crest — helmet and laurels — as the app icon, boot splash, and every in-app mark, re-tinting itself to match your accent.",
+        tag: "New",
+      },
+      {
+        icon: "🎨",
+        title: "Pick a surface, pick a color",
+        blurb: "Appearance is now two simple dials — four surfaces including flat Basic light and dark, seven accents that work on any of them — instead of a wall of theme cards.",
+        tag: "New",
+      },
+      {
+        icon: "🧯",
+        title: "One deletion, permanently banned",
+        blurb: "The one git command that destroys files nothing can restore is now refused outright — even in YOLO mode — with the safe alternatives spelled out.",
+        tag: "Safer",
       },
       {
         icon: "✨",
