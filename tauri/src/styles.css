@@ -37,6 +37,13 @@
   --r-sm: 8px;
   --r-md: 12px;
   --r-lg: 16px;
+  /* Matches the shell's native Win11 corner rounding (DWMWCP_ROUND). Every
+     full-bleed overlay uses it so a glow can never paint square corners
+     inside a rounded window — that mismatch is what read as "tacky". */
+  --win-radius: 8px;
+  /* Expo-out: leaves instantly, settles precisely, no float or bounce. Sharp
+     motion reads as engineered; soft easing reads as decorative. */
+  --ease-sharp: cubic-bezier(0.16, 1, 0.3, 1);
 
   --god-uri: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 800 1000' fill='none' stroke='%23d6402e' stroke-linecap='round' stroke-linejoin='round'%3E%3Cg stroke-width='2.5' stroke-opacity='0.55'%3E%3Ccircle cx='215' cy='600' r='205'/%3E%3Ccircle cx='215' cy='600' r='162'/%3E%3Ccircle cx='215' cy='600' r='34'/%3E%3Cpath d='M215 438 L215 470 M215 730 L215 762 M53 600 L85 600 M345 600 L377 600'/%3E%3C/g%3E%3Cg stroke-width='3' stroke-opacity='0.8'%3E%3Cpath d='M150 952 L618 118'/%3E%3Cpath d='M618 118 C 596 154, 590 176, 596 206 C 616 186, 632 168, 640 138 C 638 126, 630 118, 618 118 Z'/%3E%3Cpath d='M150 952 L136 978'/%3E%3C/g%3E%3Cg stroke-width='3'%3E%3Cpath d='M330 96 C 420 22, 560 30, 640 132 C 588 106, 528 98, 470 112'/%3E%3Cpath d='M362 120 C 430 70, 530 72, 596 138'/%3E%3Cpath d='M396 146 C 448 110, 516 112, 564 158'/%3E%3C/g%3E%3Cg transform='translate(168,118) scale(1.42)' stroke-width='2.6'%3E%3Cpath d='M200 28 C 116 28 64 96 60 178 C 57 236 70 284 78 330 C 86 376 88 420 84 470 C 120 448 142 436 152 410 L 162 348 C 165 330 162 318 150 306 C 138 292 132 272 132 252 L 132 216'/%3E%3Cpath d='M200 28 C 284 28 336 96 340 178 C 343 236 330 284 322 330 C 314 376 312 420 316 470 C 280 448 258 436 248 410 L 238 348 C 235 330 238 318 250 306 C 262 292 268 272 268 252 L 268 216'/%3E%3Cpath d='M132 216 C 152 204 172 198 188 198 L 188 300 C 188 318 192 330 200 340 C 208 330 212 318 212 300 L 212 198 C 228 198 248 204 268 216'/%3E%3Cpath d='M142 238 C 154 230 168 226 180 228 C 176 244 166 254 150 256 C 144 252 142 246 142 238 Z'/%3E%3Cpath d='M258 238 C 246 230 232 226 220 228 C 224 244 234 254 250 256 C 256 252 258 246 258 238 Z'/%3E%3C/g%3E%3Cg stroke-width='2.6' stroke-opacity='0.85'%3E%3Cpath d='M286 822 C 352 770, 540 770, 606 822'/%3E%3Cpath d='M250 880 C 270 844, 296 826, 326 818 M 642 880 C 622 844, 596 826, 566 818'/%3E%3Cpath d='M330 866 C 390 838, 502 838, 562 866'/%3E%3Cpath d='M446 778 L 446 712'/%3E%3C/g%3E%3C/svg%3E");
   --font: ui-sans-serif, "Segoe UI", "Aptos", system-ui, sans-serif;
@@ -128,6 +135,9 @@ a:hover { border-bottom-color: var(--bronze-hi); }
   height: 100%;
   position: relative;
   overflow: hidden;
+  /* overflow:hidden + a radius clips EVERY absolutely-positioned overlay
+     (workGlow, embers, the rage veil) to the rounded window shape. */
+  border-radius: var(--win-radius);
   /* Paint the themed background HERE, not just on <body>. The theme lives on
      this element, so body's var(--bg) resolves to the ROOT (dark) default â€”
      in daylight that left the center stage showing near-black through the
@@ -674,7 +684,7 @@ canvas.bubbleImage { cursor: zoom-in; }
 }
 
 .chat > * {
-  animation: transcriptIn 360ms cubic-bezier(0.2, 0.9, 0.3, 1) both;
+  animation: transcriptIn 300ms var(--ease-sharp) both;
   /* flex items shrink when the column fills, and overflow:hidden children
      (tool cards, diff cards) have a 0 minimum â€” they were getting crushed to
      their 2px borders in long transcripts. Never shrink; scrolling handles it. */
@@ -682,7 +692,7 @@ canvas.bubbleImage { cursor: zoom-in; }
 }
 /* a more spatial entrance â€” items rise, scale up from 98.5%, and sharpen in */
 @keyframes transcriptIn {
-  from { transform: translateY(10px) scale(0.985); opacity: 0; filter: blur(1.5px); }
+  from { transform: translateY(8px) scale(0.99); opacity: 0; filter: blur(1px); }
   to { transform: none; opacity: 1; filter: blur(0); }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -2195,12 +2205,17 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
   --flame-edge: 26px;
   position: fixed; inset: 0; z-index: 46; pointer-events: none;
   opacity: 0; transition: opacity 420ms ease;
+  /* fixed positioning escapes .ares's overflow clip, so this carries the
+     window radius itself — otherwise the working rim squared off the corners */
+  border-radius: var(--win-radius);
+  overflow: hidden;
 }
 .ares[data-working="1"] .screenFlame { opacity: 1; }
 /* ULTRA working: the flames give way to hacker rain on the rims. */
 .ares[data-ultra="1"][data-working="1"] .screenFlame { opacity: 0; }
 .hackerRain {
   position: fixed; inset: 0; z-index: 47; pointer-events: none;
+  border-radius: var(--win-radius);
   /* rain only on the rims â€” the center is masked transparent so the transcript stays readable */
   -webkit-mask: radial-gradient(ellipse 64% 60% at 50% 50%, transparent 52%, #000 80%);
   mask: radial-gradient(ellipse 64% 60% at 50% 50%, transparent 52%, #000 80%);
@@ -2237,8 +2252,47 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
    off     = the hard kill switch: nothing renders, nothing animates. */
 .ares[data-flame="glow"] .screenFlame .fStrip { display: none; }
 .ares[data-flame="glow"] .screenFlame {
+  /* the inset rim now follows border-radius, so it hugs the rounded window
+     instead of stamping a hard rectangle across the corners */
   box-shadow: inset 0 0 64px -12px rgba(var(--ember-rgb), 0.26), inset 0 0 0 1px rgba(var(--ember-rgb), 0.10);
   animation: none;
+}
+
+/* ── the rim sweep — the one "alive" motion on the frame ───────────────────
+   A hairline conic highlight travelling around the window edge while Ares
+   works. It animates an ANGLE only: every pixel's brightness is constant over
+   time and one lap takes 9s (~0.11Hz), so it cannot read as a flash. This is
+   the photosensitive-safe way to make the frame feel powered rather than
+   painted — no breathing, no pulsing, nothing oscillating luminance. */
+@property --rim-angle {
+  syntax: "<angle>";
+  initial-value: 0deg;
+  inherits: false;
+}
+.ares[data-flame="glow"][data-working="1"] .screenFlame::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: conic-gradient(
+    from var(--rim-angle),
+    transparent 0deg 200deg,
+    rgba(var(--ember-rgb), 0.5) 268deg,
+    rgba(255, 214, 170, 0.85) 300deg,
+    rgba(var(--accent-rgb), 0.5) 330deg,
+    transparent 360deg
+  );
+  /* draw ONLY the 1px rim: fill the padding box, punch out the content box */
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  animation: rimSweep 9s linear infinite;
+}
+@keyframes rimSweep { to { --rim-angle: 360deg; } }
+@media (prefers-reduced-motion: reduce) {
+  .ares[data-flame="glow"][data-working="1"] .screenFlame::after { animation: none; }
 }
 /* the ember particles keep their smooth upward drift but never the "roar"
    speed-up; the veil and stage glow hold a constant opacity while working */

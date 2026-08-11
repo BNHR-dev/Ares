@@ -38,6 +38,32 @@ export interface ChangelogEntry {
 // from the "earlier updates" strip.
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.37.2",
+    date: "August 2026",
+    title: "The frame comes alive",
+    tagline: "The working glow stamped hard square corners inside a rounded window. Now it hugs the frame — and a hairline light travels the edge while Ares works.",
+    highlights: [
+      {
+        icon: "✨",
+        title: "A glow that fits the window",
+        blurb: "Every full-screen effect now follows the window's rounded corners instead of squaring off against them.",
+        tag: "Polished",
+      },
+      {
+        icon: "🌀",
+        title: "A living edge",
+        blurb: "While Ares works, a thin light travels around the frame — motion that says \"powered\", with nothing flashing or pulsing.",
+        tag: "New",
+      },
+      {
+        icon: "⚡",
+        title: "Sharper motion",
+        blurb: "Messages and cards arrive with faster, more precise easing — decisive instead of floaty.",
+        tag: "Polished",
+      },
+    ],
+  },
+  {
     version: "0.37.1",
     date: "August 2026",
     title: "Rounded off",
