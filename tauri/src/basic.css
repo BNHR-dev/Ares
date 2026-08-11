@@ -184,33 +184,43 @@
    accents replaces what used to be a twelve-card grid. The attribute is repeated to outrank the modern-scoped surface blocks,
    which carry four compound selectors of their own — without that, picking an
    accent on Basic light silently resolved back to the surface's blue. */
+/* --mark-hue: how far to rotate the logo's own blue (~220deg) to land on this
+   accent. The mark is a raster, so this is what lets the splash and every
+   in-app copy of it follow the accent instead of staying blue forever. */
 .ares[data-accent="ember"][data-accent][data-accent][data-accent] {
   --accent: #e26634; --accent-hi: #ff8a5c; --accent-rgb: 226, 102, 52;
   --ember: #ff6a30; --ember-hi: #ffb24d; --ember-rgb: 255, 106, 48;
+  --mark-hue: 157deg;
 }
 .ares[data-accent="bronze"][data-accent][data-accent][data-accent] {
   --accent: #c79a4e; --accent-hi: #e6bd72; --accent-rgb: 199, 154, 78;
   --ember: #e0a93c; --ember-hi: #ffd877; --ember-rgb: 224, 169, 60;
+  --mark-hue: 178deg;
 }
 .ares[data-accent="crimson"][data-accent][data-accent][data-accent] {
   --accent: #c0504a; --accent-hi: #e87a72; --accent-rgb: 192, 80, 74;
   --ember: #e36258; --ember-hi: #ff9a8f; --ember-rgb: 227, 98, 88;
+  --mark-hue: 143deg;
 }
 .ares[data-accent="steel"][data-accent][data-accent][data-accent] {
   --accent: #6fb3ae; --accent-hi: #a6e0da; --accent-rgb: 111, 179, 174;
   --ember: #5fb8b0; --ember-hi: #95e6dd; --ember-rgb: 95, 184, 176;
+  --mark-hue: -44deg;
 }
 .ares[data-accent="violet"][data-accent][data-accent][data-accent] {
   --accent: #8b8bd9; --accent-hi: #b6b6f5; --accent-rgb: 139, 139, 217;
   --ember: #9a8bef; --ember-hi: #c4b6ff; --ember-rgb: 154, 139, 239;
+  --mark-hue: 20deg;
 }
 .ares[data-accent="verdant"][data-accent][data-accent][data-accent] {
   --accent: #6dc398; --accent-hi: #9fe7bd; --accent-rgb: 109, 195, 152;
   --ember: #59c08c; --ember-hi: #93eab8; --ember-rgb: 89, 192, 140;
+  --mark-hue: -70deg;
 }
 .ares[data-accent="blue"][data-accent][data-accent][data-accent] {
   --accent: #2f6fed; --accent-hi: #5b8ff5; --accent-rgb: 47, 111, 237;
   --ember: #2f6fed; --ember-hi: #5b8ff5; --ember-rgb: 47, 111, 237;
+  --mark-hue: 0deg;
 }
 /* on the light surface the accent must darken, not brighten, to stay legible */
 .ares[data-theme="basic-light"][data-accent][data-accent] {
