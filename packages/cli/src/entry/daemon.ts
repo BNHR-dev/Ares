@@ -13,7 +13,7 @@ const FORCE_STOP_AFTER_MS = 12_000;
  *  a healthy-but-slow settle must finish, not get zombified mid-write. */
 const FORCE_STOP_RELEASE_GRACE_MS = 20_000;
 
-import { authStatus, listSessions, loadSessionSnapshot, loadSessionRollout, deleteSession, renameSession, SessionNotFoundError, type Provider, classifyLane, runAnthropicLoginFlow, loadAnthropicTokens, sideQuery, sideQueryJson, QueryEngine, installGlobalCrashHandlers, EventRing, HeapGuard, readHeapSample, writeCrashLogSync, openWorkspaceSessionKernel, probeCredentialEncryption, connectMcpServer, disconnectMcpServer, setMcpServerEnabled, connectorNameFromUrl, runOpenAILoginFlow, runKimiLoginFlow, kimiAuthStatus } from "@ares/core";
+import { authStatus, listSessions, loadSessionSnapshot, loadSessionRollout, deleteSession, renameSession, SessionNotFoundError, type Provider, classifyLane, runAnthropicLoginFlow, loadAnthropicTokens, sideQuery, sideQueryJson, QueryEngine, installGlobalCrashHandlers, EventRing, HeapGuard, readHeapSample, writeCrashLogSync, openWorkspaceSessionKernel, probeCredentialEncryption, connectMcpServer, disconnectMcpServer, setMcpServerEnabled, setMcpServerToken, connectorNameFromUrl, runOpenAILoginFlow, runKimiLoginFlow, kimiAuthStatus } from "@ares/core";
 import { appendFile, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -2233,7 +2233,46 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
                 process.stdout.write(JSON.stringify({ type: "oauth_url", url: authUrl }) + "\n");
               },
             });
-            process.stdout.write(JSON.stringify({ type: "mcp_connect_result", ok: true, name: result.name, toolCount: result.toolCount ?? null }) + "\n");
+            process.stdout.write(
+              JSON.stringify({
+                type: "mcp_connect_result",
+                ok: true,
+                name: result.name,
+                toolCount: result.toolCount ?? null,
+                verified: result.verified,
+                verifyError: result.verifyError ?? null,
+              }) + "\n",
+            );
+            process.stdout.write(JSON.stringify({ type: "mcp_directory", connectors: await mcpDirectorySnapshot() }) + "\n");
+          } catch (err) {
+            process.stdout.write(JSON.stringify({ type: "mcp_connect_result", ok: false, name, error: err instanceof Error ? err.message : String(err) }) + "\n");
+          }
+        })();
+        continue;
+      }
+      if (command.type === "mcp_set_token") {
+        // API-key connectors: a pasted token goes into the ENCRYPTED vault as a
+        // static bundle (never plaintext on disk) and is verified via tools/list.
+        const url = typeof command.url === "string" ? command.url.trim() : "";
+        const token = typeof command.token === "string" ? command.token.trim() : "";
+        const name = typeof command.name === "string" && command.name.trim() ? command.name.trim() : connectorNameFromUrl(url);
+        if (!url || !token) {
+          process.stdout.write(JSON.stringify({ type: "mcp_connect_result", ok: false, name, error: "a connector URL and token are required" }) + "\n");
+          continue;
+        }
+        void (async () => {
+          try {
+            const result = await setMcpServerToken(url, token, { name });
+            process.stdout.write(
+              JSON.stringify({
+                type: "mcp_connect_result",
+                ok: true,
+                name: result.name,
+                toolCount: result.toolCount ?? null,
+                verified: result.verified,
+                verifyError: result.verifyError ?? null,
+              }) + "\n",
+            );
             process.stdout.write(JSON.stringify({ type: "mcp_directory", connectors: await mcpDirectorySnapshot() }) + "\n");
           } catch (err) {
             process.stdout.write(JSON.stringify({ type: "mcp_connect_result", ok: false, name, error: err instanceof Error ? err.message : String(err) }) + "\n");

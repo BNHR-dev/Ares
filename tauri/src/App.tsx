@@ -1747,10 +1747,22 @@ function App() {
           }
           return true;
         }
-        case "mcp_connect_result":
+        case "mcp_connect_result": {
           setMcpConnecting(null);
-          pushGatewayToast(e.ok ? `🔌 Connected ${e.name ?? "connector"} — its tools are live.` : `Connect failed: ${e.error ? stringify(e.error) : "unknown"}`);
+          // "Connected" only reads as proven when the post-connect tools/list
+          // probe succeeded — an issued-but-rejected token says so out loud.
+          const verified = (e as { verified?: unknown }).verified !== false;
+          const toolCount = typeof (e as { toolCount?: unknown }).toolCount === "number" ? (e as { toolCount: number }).toolCount : null;
+          const verifyError = typeof (e as { verifyError?: unknown }).verifyError === "string" ? (e as { verifyError: string }).verifyError : null;
+          pushGatewayToast(
+            !e.ok
+              ? `Connect failed: ${e.error ? stringify(e.error) : "unknown"}`
+              : verified
+                ? `🔌 Connected ${e.name ?? "connector"} — verified, ${toolCount ?? "?"} tool${toolCount === 1 ? "" : "s"} live.`
+                : `🔌 Connected ${e.name ?? "connector"} — but verification failed (${verifyError ?? "unreachable"}). Its tools may not work yet.`,
+          );
           return true;
+        }
         case "mcp_search_results": {
           const text = typeof (e as { text?: unknown }).text === "string" ? (e as { text: string }).text : "";
           const results = Array.isArray((e as { results?: unknown }).results) ? ((e as unknown as { results: McpRegistryResult[] }).results) : [];
@@ -4079,6 +4091,10 @@ function App() {
             setMcpConnecting(name);
             daemonCmd({ type: "mcp_connect", url, name });
           }}
+          onConnectWithToken={(url, name, token) => {
+            setMcpConnecting(name);
+            daemonCmd({ type: "mcp_set_token", url, name, token });
+          }}
           onDisconnect={(name) => daemonCmd({ type: "mcp_disconnect", name })}
           onToggle={(name, enabled) => daemonCmd({ type: "mcp_toggle", name, enabled })}
           onListTools={(name) => {
@@ -4461,6 +4477,7 @@ function ConnectorDirectory({
   connecting,
   tools,
   onConnect,
+  onConnectWithToken,
   onDisconnect,
   onToggle,
   onListTools,
@@ -4472,6 +4489,8 @@ function ConnectorDirectory({
   connecting: string | null;
   tools: Record<string, McpToolsVm>;
   onConnect: (url: string, name: string) => void;
+  /** API-key path: the pasted token goes to the encrypted vault via mcp_set_token. */
+  onConnectWithToken: (url: string, name: string, token: string) => void;
   onDisconnect: (name: string) => void;
   onToggle: (name: string, enabled: boolean) => void;
   onListTools: (name: string) => void;
@@ -4480,6 +4499,7 @@ function ConnectorDirectory({
   onClose: () => void;
 }) {
   const [query, setQuery] = useState("");
+  const [customToken, setCustomToken] = useState("");
   // Registry search rides the same box, debounced — presets filter instantly,
   // the whole public MCP registry answers a beat later.
   useEffect(() => {
@@ -4647,16 +4667,33 @@ function ConnectorDirectory({
               const url = customUrl.trim();
               try {
                 const host = new URL(url).host.replace(/^www\.|^mcp\.|^api\./, "").split(".")[0];
-                onConnect(url, host || "connector");
+                const token = customToken.trim();
+                if (token) onConnectWithToken(url, host || "connector", token);
+                else onConnect(url, host || "connector");
                 setCustomUrl("");
+                setCustomToken("");
               } catch { /* invalid url ignored (button is gated anyway) */ }
             }}
           >
-            Connect
+            {customToken.trim() ? "Connect with key" : "Connect"}
           </button>
         </div>
+        <div className="dirCustom">
+          {/* The API-key lane: registry rows flagged "needs API key" (and any
+              server without dynamic registration) can't OAuth — paste the key
+              here instead. It lands in the encrypted vault, never on disk. */}
+          <input
+            className="dirSearch"
+            type="password"
+            value={customToken}
+            onChange={(e) => setCustomToken(e.target.value)}
+            placeholder="API key / token (optional — for servers that need one)"
+            spellCheck={false}
+            autoComplete="off"
+          />
+        </div>
         <p className="dirFootnote">
-          A browser window opens for you to approve access. Tokens are stored encrypted on your machine — never in plain text.
+          A browser window opens for you to approve access — or paste an API key for servers that use one. Tokens are stored encrypted on your machine — never in plain text.
         </p>
       </div>
     </div>

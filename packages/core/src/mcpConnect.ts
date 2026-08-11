@@ -1,9 +1,21 @@
 // MCP connect — turns the OAuth brain (mcpOAuth.ts) into a one-click action:
 // discover → dynamically register → PKCE authorize (loopback callback) →
-// exchange → persist. Tokens are stored ENCRYPTED in the credential vault; the
-// on-disk server list (~/.ares/mcp-remote.json) never holds a secret. The tools
-// layer resolves a fresh access token at call-time via getMcpAccessToken (which
-// refreshes transparently), so connectors keep working across restarts.
+// exchange → persist → VERIFY. Tokens are stored ENCRYPTED in the credential
+// vault; the on-disk server list (~/.ares/mcp-remote.json) never holds a
+// secret. The tools layer resolves a fresh access token at call-time via
+// getMcpAccessToken (which refreshes transparently), so connectors keep
+// working across restarts.
+//
+// Hardening (2026-08-11):
+//   - post-connect verification: a tools/list probe with the fresh token, so
+//     "connected" means the server actually accepts it (toolCount populated;
+//     an issued-but-rejected token no longer reads as success);
+//   - reconnect preserves state: enabled:false pauses, custom headers and
+//     display names survive a re-auth instead of being wiped;
+//   - API-key connectors: setMcpServerToken stores a pasted token in the SAME
+//     encrypted vault (as a static bundle) — never plaintext on disk;
+//   - loopback port fallback: a busy 53682 falls back to an ephemeral port and
+//     registers the redirect URI with the port actually bound.
 
 import { createServer, type Server } from "node:http";
 import { randomBytes } from "node:crypto";
@@ -22,6 +34,7 @@ import {
 
 const DEFAULT_PORT = 53682; // distinct from the provider-OAuth loopback (53691)
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
+const MCP_PROTOCOL_VERSION = "2025-06-18";
 
 function aresHome(home?: string): string {
   return home ?? process.env.ARES_HOME ?? path.join(os.homedir(), ".ares");
@@ -34,12 +47,17 @@ function tokenKey(name: string): string {
 }
 
 /** A connector as stored on disk — no secret here, only where to reach it and
- *  that it authenticates via the vault-held OAuth bundle. `authToken` is only
- *  used for the manual paste-a-token path (no OAuth). */
+ *  how its bearer resolves. `oauth` = vault-held OAuth bundle (auto-refresh);
+ *  `vault` = vault-held static token (pasted API key, no refresh). `authToken`
+ *  is only the legacy manual-paste path and is discouraged — new pastes go
+ *  through setMcpServerToken into the vault. */
 export interface RemoteMcpEntry {
   url: string;
   oauth?: boolean;
+  /** Static vault token connector (API key pasted by the owner). */
+  vault?: boolean;
   authToken?: string;
+  headers?: Record<string, string>;
   displayName?: string;
   connectedAt?: string;
   /** false = connected but paused: tokens stay in the vault, tools don't load.
@@ -47,7 +65,8 @@ export interface RemoteMcpEntry {
   enabled?: boolean;
 }
 
-/** The encrypted-at-rest OAuth bundle (JSON) kept in the vault per connector. */
+/** The encrypted-at-rest OAuth bundle (JSON) kept in the vault per connector.
+ *  A static (pasted) token is the same shape with no refresh material. */
 interface McpTokenBundle {
   accessToken: string;
   refreshToken?: string;
@@ -99,6 +118,79 @@ export function connectorNameFromUrl(url: string): string {
   }
 }
 
+type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
+
+/** Parse a Streamable-HTTP reply that may be plain JSON or a single-shot SSE. */
+async function readJsonRpcBody(res: Response): Promise<unknown> {
+  const text = await res.text();
+  const type = res.headers.get("content-type") ?? "";
+  if (type.includes("text/event-stream")) {
+    for (const line of text.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("data:")) continue;
+      try {
+        return JSON.parse(trimmed.slice(5).trim());
+      } catch {
+        // keep scanning
+      }
+    }
+    throw new Error("no JSON-RPC payload in SSE reply");
+  }
+  return JSON.parse(text);
+}
+
+export interface McpProbeResult {
+  toolCount: number;
+}
+
+/**
+ * Verify a bearer against a live MCP server: initialize, then tools/list, and
+ * count. This is what makes "connected" mean something — a token the server
+ * rejects fails HERE, at connect time, not on the agent's first tool call.
+ */
+export async function probeMcpTools(
+  url: string,
+  bearer: string | undefined,
+  fetchImpl: FetchLike = fetch,
+): Promise<McpProbeResult> {
+  const baseHeaders: Record<string, string> = {
+    "content-type": "application/json",
+    accept: "application/json, text/event-stream",
+    "mcp-protocol-version": MCP_PROTOCOL_VERSION,
+  };
+  if (bearer) baseHeaders.authorization = `Bearer ${bearer}`;
+  const init = await fetchImpl(url, {
+    method: "POST",
+    headers: baseHeaders,
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: MCP_PROTOCOL_VERSION,
+        capabilities: {},
+        clientInfo: { name: "ares", version: "connect-verify" },
+      },
+    }),
+  });
+  if (init.status === 401 || init.status === 403) {
+    throw new Error(`the server rejected the token (HTTP ${init.status})`);
+  }
+  if (!init.ok) throw new Error(`initialize failed (HTTP ${init.status})`);
+  await readJsonRpcBody(init).catch(() => undefined); // some servers reply with an empty ack
+  const session = init.headers.get("mcp-session-id");
+  const listHeaders = session ? { ...baseHeaders, "mcp-session-id": session } : baseHeaders;
+  const list = await fetchImpl(url, {
+    method: "POST",
+    headers: listHeaders,
+    body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }),
+  });
+  if (!list.ok) throw new Error(`tools/list failed (HTTP ${list.status})`);
+  const body = (await readJsonRpcBody(list)) as { result?: { tools?: unknown[] }; error?: { message?: string } };
+  if (body.error) throw new Error(body.error.message ?? "tools/list returned an error");
+  return { toolCount: body.result?.tools?.length ?? 0 };
+}
+
 export interface ConnectMcpOptions {
   name?: string;
   displayName?: string;
@@ -107,12 +199,44 @@ export interface ConnectMcpOptions {
   timeoutMs?: number;
   /** The daemon opens this in the user's real browser (emits an oauth_url frame). */
   onAuthorizeUrl: (url: string) => void;
+  /** Test seam for the verification probe's HTTP. */
+  fetchImpl?: FetchLike;
 }
 
 export interface ConnectMcpResult {
   name: string;
   url: string;
+  /** Populated by the post-connect tools/list probe (undefined when unverified). */
   toolCount?: number;
+  /** True when the fresh token was proven against the server's tools/list. */
+  verified: boolean;
+  /** Why verification failed, when it did. Tokens are stored either way. */
+  verifyError?: string;
+}
+
+/** Bind on the preferred port; a busy port falls back to an ephemeral one so
+ *  two concurrent connects (or a squatter on 53682) can't kill the flow. */
+function listenWithFallback(server: Server, preferred: number): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const onError = (err: NodeJS.ErrnoException) => {
+      if (err.code === "EADDRINUSE") {
+        server.removeListener("error", onError);
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", () => {
+          const addr = server.address();
+          resolve(typeof addr === "object" && addr ? addr.port : preferred);
+        });
+        return;
+      }
+      reject(err);
+    };
+    server.once("error", onError);
+    server.listen(preferred, "127.0.0.1", () => {
+      server.removeListener("error", onError);
+      const addr = server.address();
+      resolve(typeof addr === "object" && addr ? addr.port : preferred);
+    });
+  });
 }
 
 /** Run the full OAuth connect for a remote MCP server. Resolves once the user
@@ -120,29 +244,26 @@ export interface ConnectMcpResult {
 export async function connectMcpServer(url: string, opts: ConnectMcpOptions): Promise<ConnectMcpResult> {
   const name = (opts.name ?? connectorNameFromUrl(url)).trim();
   const home = opts.home;
-  const port = opts.port ?? DEFAULT_PORT;
-  const redirectUri = `http://localhost:${port}/oauth/callback`;
 
+  // Discovery needs no port — do it before binding so a dead server fails fast.
   const authServer = await discoverMcpAuth(url);
   if (!authServer.registrationEndpoint) {
     // Some servers require a pre-registered client. Surface a clear next step
     // instead of failing deep in the flow.
     throw new Error(
-      `${name} doesn't support automatic app registration. It may need a token you paste directly, or a pre-registered client.`,
+      `${name} doesn't support automatic app registration. It may need a token you paste directly (use the token field), or a pre-registered client.`,
     );
   }
-  const reg = await registerMcpClient(authServer.registrationEndpoint, redirectUri);
-  const pkce = generatePkce();
-  const state = randomBytes(16).toString("hex");
-  const authorizeUrl = buildMcpAuthorizeUrl({
-    authorizationEndpoint: authServer.authorizationEndpoint,
-    clientId: reg.clientId,
-    redirectUri,
-    challenge: pkce.challenge,
-    state,
-    scopes: authServer.scopesSupported,
-    resource: authServer.resource,
-  });
+
+  // The callback context is populated AFTER the port is known (registration
+  // needs the real redirect URI). Requests racing ahead of it get a 503.
+  let ctx: {
+    state: string;
+    verifier: string;
+    redirectUri: string;
+    clientId: string;
+    clientSecret?: string;
+  } | null = null;
 
   const tokens = await new Promise<Awaited<ReturnType<typeof exchangeMcpCode>>>((resolve, reject) => {
     let settled = false;
@@ -153,10 +274,16 @@ export async function connectMcpServer(url: string, opts: ConnectMcpOptions): Pr
       settled = true; cleanup();
       reject(new Error(`connecting ${name} timed out — authorization wasn't completed`));
     }, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+    const fail = (err: unknown) => {
+      if (settled) return;
+      settled = true; clearTimeout(timer); cleanup();
+      reject(err instanceof Error ? err : new Error(String(err)));
+    };
 
     server = createServer(async (req, res) => {
       if (settled) { res.end(); return; }
-      const u = new URL(req.url ?? "/", `http://localhost:${port}`);
+      if (!ctx) { res.writeHead(503); res.end("Not ready"); return; }
+      const u = new URL(req.url ?? "/", ctx.redirectUri);
       if (u.pathname !== "/oauth/callback") { res.writeHead(404); res.end("Not found"); return; }
       const code = u.searchParams.get("code");
       const returnedState = u.searchParams.get("state");
@@ -166,18 +293,18 @@ export async function connectMcpServer(url: string, opts: ConnectMcpOptions): Pr
         res.end(resultHtml(false, `Authorization was denied (${error}).`)); cleanup();
         reject(new Error(`authorization denied: ${error}`)); return;
       }
-      if (!code || returnedState !== state) {
+      if (!code || returnedState !== ctx.state) {
         res.writeHead(400, { "content-type": "text/html" });
         res.end(resultHtml(false, "State mismatch or missing code.")); return;
       }
       try {
         const tok = await exchangeMcpCode({
           tokenEndpoint: authServer.tokenEndpoint,
-          clientId: reg.clientId,
-          clientSecret: reg.clientSecret,
+          clientId: ctx.clientId,
+          clientSecret: ctx.clientSecret,
           code,
-          verifier: pkce.verifier,
-          redirectUri,
+          verifier: ctx.verifier,
+          redirectUri: ctx.redirectUri,
           resource: authServer.resource,
         });
         settled = true; clearTimeout(timer); res.writeHead(200, { "content-type": "text/html" });
@@ -190,8 +317,26 @@ export async function connectMcpServer(url: string, opts: ConnectMcpOptions): Pr
         reject(err instanceof Error ? err : new Error(msg));
       }
     });
-    server.on("error", (err) => { if (!settled) { settled = true; clearTimeout(timer); cleanup(); reject(err); } });
-    server.listen(port, "127.0.0.1", () => opts.onAuthorizeUrl(authorizeUrl));
+
+    void (async () => {
+      const port = await listenWithFallback(server!, opts.port ?? DEFAULT_PORT);
+      const redirectUri = `http://localhost:${port}/oauth/callback`;
+      const reg = await registerMcpClient(authServer.registrationEndpoint!, redirectUri);
+      const pkce = generatePkce();
+      const state = randomBytes(16).toString("hex");
+      ctx = { state, verifier: pkce.verifier, redirectUri, clientId: reg.clientId, clientSecret: reg.clientSecret };
+      opts.onAuthorizeUrl(
+        buildMcpAuthorizeUrl({
+          authorizationEndpoint: authServer.authorizationEndpoint,
+          clientId: reg.clientId,
+          redirectUri,
+          challenge: pkce.challenge,
+          state,
+          scopes: authServer.scopesSupported,
+          resource: authServer.resource,
+        }),
+      );
+    })().catch(fail);
   });
 
   // Persist: encrypted token bundle in the vault, secret-free entry on disk.
@@ -200,15 +345,84 @@ export async function connectMcpServer(url: string, opts: ConnectMcpOptions): Pr
     refreshToken: tokens.refreshToken,
     expiresAt: tokens.expiresAt,
     tokenEndpoint: authServer.tokenEndpoint,
-    clientId: reg.clientId,
-    clientSecret: reg.clientSecret,
+    clientId: ctx!.clientId,
+    clientSecret: ctx!.clientSecret,
     resource: authServer.resource,
   };
   await setCredential(tokenKey(name), JSON.stringify(bundle), { home });
   const servers = await loadRemoteMcpServers(home);
-  servers[name] = { url, oauth: true, displayName: opts.displayName ?? name, connectedAt: new Date().toISOString() };
+  // A RE-connect must not wipe what the owner configured: the pause state,
+  // custom headers, and display name all survive re-auth.
+  const prev = servers[name];
+  servers[name] = {
+    ...prev,
+    url,
+    oauth: true,
+    vault: undefined,
+    authToken: undefined,
+    displayName: opts.displayName ?? prev?.displayName ?? name,
+    connectedAt: new Date().toISOString(),
+  };
   await saveRemoteMcpServers(servers, home);
-  return { name, url };
+
+  // Post-connect verification: prove the token against tools/list. Failure does
+  // NOT roll back the stored tokens (the server may be briefly unhappy) — it is
+  // surfaced so the UI says "connected but unverified" instead of lying.
+  try {
+    const probe = await probeMcpTools(url, tokens.accessToken, opts.fetchImpl);
+    return { name, url, toolCount: probe.toolCount, verified: true };
+  } catch (err) {
+    return { name, url, verified: false, verifyError: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+export interface SetMcpTokenResult {
+  name: string;
+  url: string;
+  toolCount?: number;
+  verified: boolean;
+  verifyError?: string;
+}
+
+/**
+ * Connect a server with a PASTED token (API-key connectors — the registry rows
+ * flagged needsKey, and servers without dynamic registration). The token goes
+ * into the encrypted vault as a static bundle — NEVER plaintext on disk — and
+ * is verified against tools/list before we call it connected.
+ */
+export async function setMcpServerToken(
+  url: string,
+  token: string,
+  opts: { name?: string; displayName?: string; home?: string; fetchImpl?: FetchLike } = {},
+): Promise<SetMcpTokenResult> {
+  const name = (opts.name ?? connectorNameFromUrl(url)).trim();
+  const trimmed = token.trim();
+  if (!trimmed) throw new Error("a connector token can't be empty");
+  const bundle: McpTokenBundle = {
+    accessToken: trimmed,
+    tokenEndpoint: "",
+    clientId: "",
+    resource: url,
+  };
+  await setCredential(tokenKey(name), JSON.stringify(bundle), { home: opts.home });
+  const servers = await loadRemoteMcpServers(opts.home);
+  const prev = servers[name];
+  servers[name] = {
+    ...prev,
+    url,
+    oauth: undefined,
+    vault: true,
+    authToken: undefined,
+    displayName: opts.displayName ?? prev?.displayName ?? name,
+    connectedAt: new Date().toISOString(),
+  };
+  await saveRemoteMcpServers(servers, opts.home);
+  try {
+    const probe = await probeMcpTools(url, trimmed, opts.fetchImpl);
+    return { name, url, toolCount: probe.toolCount, verified: true };
+  } catch (err) {
+    return { name, url, verified: false, verifyError: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 /** Remove a connector: delete its on-disk entry and its vault token. */
@@ -224,7 +438,7 @@ export async function disconnectMcpServer(name: string, home?: string): Promise<
 /** Return a VALID access token for a connected server, refreshing transparently
  *  when the stored one is near expiry. Used by the tools layer at call-time so a
  *  live token never has to sit in the on-disk config. Returns null when the
- *  connector isn't OAuth-connected (the caller falls back to authToken). */
+ *  connector isn't vault-connected (the caller falls back to authToken). */
 export async function getMcpAccessToken(name: string, home?: string, now: () => number = Date.now): Promise<string | null> {
   const raw = await getCredential(tokenKey(name), { home });
   if (!raw) return null;

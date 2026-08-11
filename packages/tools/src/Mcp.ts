@@ -45,6 +45,8 @@ interface RemoteServerConfig {
   authToken?: string;
   /** OAuth connector — the bearer lives in the encrypted vault, not here. */
   oauth?: boolean;
+  /** Static vault-token connector (pasted API key) — bearer in the vault too. */
+  vault?: boolean;
   /** Injected at load time (the config-map key) so the vault token resolves. */
   serverName?: string;
 }
@@ -406,11 +408,12 @@ async function withMcpClient<T>(
 ): Promise<T> {
   if (isRemote(cfg)) {
     const headers: Record<string, string> = { ...(cfg.headers ?? {}) };
-    // OAuth connectors carry no secret on disk — resolve a fresh (auto-refreshed)
-    // access token from the encrypted vault at call-time. A manually pasted
-    // authToken is used as-is. Either way it becomes the bearer.
+    // OAuth AND static vault connectors carry no secret on disk — resolve the
+    // bearer from the encrypted vault at call-time (OAuth bundles auto-refresh;
+    // static bundles come back as-is). A legacy plaintext authToken is the
+    // fallback. Either way it becomes the bearer.
     let bearer = cfg.authToken;
-    if (cfg.oauth && cfg.serverName) {
+    if ((cfg.oauth || cfg.vault) && cfg.serverName) {
       bearer = (await getMcpAccessToken(cfg.serverName).catch(() => null)) ?? bearer;
     }
     if (bearer && !headers.Authorization && !headers.authorization) {

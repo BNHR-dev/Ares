@@ -275,12 +275,16 @@ export {
   connectMcpServer,
   disconnectMcpServer,
   setMcpServerEnabled,
+  setMcpServerToken,
+  probeMcpTools,
   getMcpAccessToken,
   loadRemoteMcpServers,
   connectorNameFromUrl,
   type RemoteMcpEntry,
   type ConnectMcpOptions,
   type ConnectMcpResult,
+  type SetMcpTokenResult,
+  type McpProbeResult,
 } from "./mcpConnect.js";
 
 export {
