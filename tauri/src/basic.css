@@ -1,7 +1,7 @@
-/* Basic (light) / Basic (dark) — the quiet themes.
+﻿/* Basic (light) / Basic (dark) â€” the quiet themes.
  *
  * Every other theme is a war-band: forge heat, gold hairlines, embers drifting,
- * a serif display voice. These two are the opposite by design — flat neutral
+ * a serif display voice. These two are the opposite by design â€” flat neutral
  * greys, ONE blue accent, no ornament, no glass, no glow. The reference is a
  * plain modern chat client: white or near-black field, a slightly tinted
  * sidebar, hairline dividers, and type doing all the work.
@@ -19,7 +19,7 @@
  *      flashes, exactly as in every other theme.
  */
 
-/* ── tokens ──────────────────────────────────────────────────────────────── */
+/* â”€â”€ tokens â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 
 /* basic-light is declared BEFORE the shared dark ramp below, so its selectors
    carry a repeated [data-theme] to outrank it on specificity rather than
@@ -54,7 +54,7 @@
   --ember-rim: rgba(47, 111, 237, 0.35);
   --ember-rgb: 47, 111, 237;
 
-  /* gold carries structure/labels in the modern skin — neutralize to grey */
+  /* gold carries structure/labels in the modern skin â€” neutralize to grey */
   --gold: #52525b;
   --gold-hi: #3f3f46;
   --gold-glyph: #52525b;
@@ -74,7 +74,7 @@
   --glass-blur: blur(0px);
   --glass-lift: 0 1px 2px rgba(0, 0, 0, 0.06);
 
-  /* one voice — the serif display face is part of the war-band, not this */
+  /* one voice â€” the serif display face is part of the war-band, not this */
   --display: var(--font);
 }
 
@@ -130,8 +130,8 @@
   --display: var(--font);
 }
 
-/* ── Appearance controls: two dials, not a grid ──────────────────────────── */
-/* Deliberately unscoped by theme — the panel itself should be compact in
+/* â”€â”€ Appearance controls: two dials, not a grid â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+/* Deliberately unscoped by theme â€” the panel itself should be compact in
    every surface, since the clutter was structural, not thematic. */
 .surfaceRow {
   display: grid;
@@ -178,36 +178,37 @@
 .accentDot:hover { transform: translateY(-1px); border-color: var(--line-strong); }
 .accentDot[data-on="1"] { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.22); }
 
-/* ── the accent dial ─────────────────────────────────────────────────────── */
-/* Colour is now independent of surface: data-accent re-tints ANY base — the
-   obsidian shells and the flat ones alike — so four surfaces times seven
-   accents replaces what used to be a twelve-card grid. The doubled attribute
-   keeps these above every surface's own token block. */
-.ares[data-accent="ember"][data-accent] {
+/* â”€â”€ the accent dial â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+/* Colour is now independent of surface: data-accent re-tints ANY base â€” the
+   obsidian shells and the flat ones alike â€” so four surfaces times seven
+   accents replaces what used to be a twelve-card grid. The attribute is repeated to outrank the modern-scoped surface blocks,
+   which carry four compound selectors of their own — without that, picking an
+   accent on Basic light silently resolved back to the surface's blue. */
+.ares[data-accent="ember"][data-accent][data-accent][data-accent] {
   --accent: #e26634; --accent-hi: #ff8a5c; --accent-rgb: 226, 102, 52;
   --ember: #ff6a30; --ember-hi: #ffb24d; --ember-rgb: 255, 106, 48;
 }
-.ares[data-accent="bronze"][data-accent] {
+.ares[data-accent="bronze"][data-accent][data-accent][data-accent] {
   --accent: #c79a4e; --accent-hi: #e6bd72; --accent-rgb: 199, 154, 78;
   --ember: #e0a93c; --ember-hi: #ffd877; --ember-rgb: 224, 169, 60;
 }
-.ares[data-accent="crimson"][data-accent] {
+.ares[data-accent="crimson"][data-accent][data-accent][data-accent] {
   --accent: #c0504a; --accent-hi: #e87a72; --accent-rgb: 192, 80, 74;
   --ember: #e36258; --ember-hi: #ff9a8f; --ember-rgb: 227, 98, 88;
 }
-.ares[data-accent="steel"][data-accent] {
+.ares[data-accent="steel"][data-accent][data-accent][data-accent] {
   --accent: #6fb3ae; --accent-hi: #a6e0da; --accent-rgb: 111, 179, 174;
   --ember: #5fb8b0; --ember-hi: #95e6dd; --ember-rgb: 95, 184, 176;
 }
-.ares[data-accent="violet"][data-accent] {
+.ares[data-accent="violet"][data-accent][data-accent][data-accent] {
   --accent: #8b8bd9; --accent-hi: #b6b6f5; --accent-rgb: 139, 139, 217;
   --ember: #9a8bef; --ember-hi: #c4b6ff; --ember-rgb: 154, 139, 239;
 }
-.ares[data-accent="verdant"][data-accent] {
+.ares[data-accent="verdant"][data-accent][data-accent][data-accent] {
   --accent: #6dc398; --accent-hi: #9fe7bd; --accent-rgb: 109, 195, 152;
   --ember: #59c08c; --ember-hi: #93eab8; --ember-rgb: 89, 192, 140;
 }
-.ares[data-accent="blue"][data-accent] {
+.ares[data-accent="blue"][data-accent][data-accent][data-accent] {
   --accent: #2f6fed; --accent-hi: #5b8ff5; --accent-rgb: 47, 111, 237;
   --ember: #2f6fed; --ember-hi: #5b8ff5; --ember-rgb: 47, 111, 237;
 }
@@ -218,7 +219,7 @@
   --ember-rim: color-mix(in srgb, var(--accent) 40%, transparent);
 }
 
-/* ── the coloured flat themes ────────────────────────────────────────────── */
+/* â”€â”€ the coloured flat themes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 /* Same flat design, same dark ramp, different accent. Everything downstream
    reads --accent/--ember, so a theme is just its colour. */
 
@@ -244,7 +245,7 @@
   --coin-ember: linear-gradient(180deg, #1c3230, #152624);
 }
 
-/* ── strip the ornament ──────────────────────────────────────────────────── */
+/* â”€â”€ strip the ornament â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 /* !important because these layers are painted by several skins at equal
    specificity; a theme that means "no ornament" has to win outright. */
 
@@ -267,9 +268,9 @@
 /* the emblem watermark behind the empty stage is forge iconography too */
 .ares[data-theme^="basic-"] .empty .emptyEmblem { opacity: 0.08 !important; filter: grayscale(1); }
 
-/* ── the photographic layers ─────────────────────────────────────────────── */
+/* â”€â”€ the photographic layers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 /* backdrop-helm.png / backdrop.jpg are painted by FOUR separate layers, not
-   one — the shell backdrop, the sanctum hero behind the empty stage, the HELM
+   one â€” the shell backdrop, the sanctum hero behind the empty stage, the HELM
    canvas, and the boot hero. Hiding only the first left the war photo bleeding
    through an otherwise flat theme. */
 .ares[data-theme^="basic-"] .chat:has(> .empty)::before,
@@ -280,7 +281,7 @@
   display: none !important;
 }
 
-/* ── the boot splash ─────────────────────────────────────────────────────── */
+/* â”€â”€ the boot splash â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 /* It has its own palette baked in literals, so a flat theme booted into a
    black screen with a glowing forge coin before the themed UI appeared. */
 .ares[data-theme^="basic-"] .boot { background: var(--bg) !important; }
@@ -302,7 +303,7 @@
 .ares[data-theme^="basic-"] .bootBar { background: var(--panel-2) !important; }
 .ares[data-theme^="basic-"] .bootBar i { background: var(--accent) !important; }
 
-/* ── flatten the surfaces modern.css paints with literal hex ─────────────── */
+/* â”€â”€ flatten the surfaces modern.css paints with literal hex â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 
 .ares[data-theme^="basic-"],
 .ares[data-style="modern"][data-theme^="basic-"] { background: var(--bg); }
@@ -387,9 +388,9 @@
 }
 .ares[data-theme^="basic-"] .primary:hover { background: var(--accent-hi); border-color: var(--accent-hi); }
 
-/* ── re-map hard-coded text colors ───────────────────────────────────────── */
+/* â”€â”€ re-map hard-coded text colors â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 /* modern.css writes many text colors as literal parchment/gold values rather
-   than through tokens (rgba(239,227,207,…), rgba(232,200,147,…)). Those are
+   than through tokens (rgba(239,227,207,â€¦), rgba(232,200,147,â€¦)). Those are
    invisible on a white field, so every one of them is mapped back onto the
    theme's own text ramp. !important because several of these rules carry a
    deeper selector than a theme can reach. */
@@ -433,15 +434,15 @@
 .ares[data-theme^="basic-"] .modelBadge em,
 .ares[data-theme^="basic-"] .railNav em { color: var(--muted) !important; }
 
-/* the New session button keeps white-on-accent — that pair is already correct */
+/* the New session button keeps white-on-accent â€” that pair is already correct */
 .ares[data-theme^="basic-"] .primary,
 .ares[data-theme^="basic-"] .primaryLabel { color: #ffffff !important; }
 
-/* ── the surfaces modern.css paints with literal dark hex ────────────────── */
+/* â”€â”€ the surfaces modern.css paints with literal dark hex â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 /* The Modern skin was authored for a dark room, so ~29 of its rules set a
    near-black background directly instead of through --panel/--bg-raised.
-   Those surfaces stayed black under a light theme — the settings panel, the
-   boot screen, popovers and every HELM card — which is what made Basic
+   Those surfaces stayed black under a light theme â€” the settings panel, the
+   boot screen, popovers and every HELM card â€” which is what made Basic
    (light) look half-applied. Each one is mapped back onto the theme's own
    surfaces here. (This is also why the older Daylight theme never looked
    right in this skin.) !important because several carry an html[data-perf]
@@ -490,6 +491,37 @@
   background: var(--coin) !important;
 }
 
+/* The settings dialog is its OWN shell (settingsShell / settingsNav), not one
+   of the .palette overlays, so it kept modern.css's warm dark gradient while
+   the theme had already switched the text to near-black — dark on dark, the
+   "settings don't change" report. */
+.ares[data-style="modern"][data-theme^="basic-"] .settingsShell,
+.ares[data-theme^="basic-"] .settingsShell {
+  background: var(--panel) !important;
+  border-color: var(--line);
+}
+.ares[data-style="modern"][data-theme^="basic-"] .settingsNav,
+.ares[data-theme^="basic-"] .settingsNav {
+  background: var(--panel-2) !important;
+  border-color: var(--line);
+}
+/* ...and the dialog's own type carries the same parchment literals */
+.ares[data-theme^="basic-"] .settingsNav strong,
+.ares[data-theme^="basic-"] .paneTitle,
+.ares[data-theme^="basic-"] .settingsShell .ghost { color: var(--text) !important; }
+.ares[data-theme^="basic-"] .settingsNav button { color: var(--muted) !important; }
+.ares[data-theme^="basic-"] .settingsNav button[data-on="1"],
+.ares[data-theme^="basic-"] .settingsNav button:hover { color: var(--text) !important; }
+.ares[data-theme^="basic-"] .fieldLabel { color: var(--faint) !important; }
+
+/* primary action fills read as blood-red literals in the modern skin */
+.ares[data-theme^="basic-"] .gateAllow,
+.ares[data-theme^="basic-"] .send:not(.stop):not(.steer) {
+  background: var(--accent) !important;
+  border-color: var(--accent) !important;
+  color: #fff !important;
+}
+
 /* the scrim behind modals stays a neutral dim in both variants */
 .ares[data-style="modern"][data-theme^="basic-"] .paletteScrim {
   background: rgba(15, 15, 18, 0.32) !important;
@@ -497,7 +529,7 @@
   -webkit-backdrop-filter: blur(2px);
 }
 
-/* the sanctum hero's vignette is forge staging — drop it */
+/* the sanctum hero's vignette is forge staging â€” drop it */
 .ares[data-style="modern"][data-theme^="basic-"] .chat:has(> .empty)::after { display: none !important; }
 
 /* kill the remaining decorative glows: medallions, rings and text shadows */
