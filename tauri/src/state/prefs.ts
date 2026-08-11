@@ -70,7 +70,9 @@ export interface Prefs {
   recentModels?: string[];
 }
 
-export type ThemeName = "rage" | "bronze" | "crimson" | "steel" | "nightfall" | "verdant" | "daylight";
+export type ThemeName =
+  | "rage" | "bronze" | "crimson" | "steel" | "nightfall" | "verdant" | "daylight"
+  | "basic-light" | "basic-dark";
 export const THEMES: Array<{ id: ThemeName; label: string; hint: string; swatch: string }> = [
   { id: "rage", label: "Blood & Rage", hint: "obsidian scorched with ember — the god of war", swatch: "#d6402e" },
   { id: "bronze", label: "Bronze", hint: "the old warband gold", swatch: "#c79a4e" },
@@ -79,6 +81,10 @@ export const THEMES: Array<{ id: ThemeName; label: string; hint: string; swatch:
   { id: "nightfall", label: "Nightfall", hint: "violet dusk", swatch: "#8b8bd9" },
   { id: "verdant", label: "Verdant", hint: "emerald phalanx", swatch: "#74c39c" },
   { id: "daylight", label: "Daylight", hint: "the forge at high noon — light mode", swatch: "#f0e9e2" },
+  // The two quiet ones: no forge, no ornament. Neutral greys, one blue accent,
+  // flat surfaces — for working in a room where the war-band is too much.
+  { id: "basic-light", label: "Basic (light)", hint: "clean, flat, neutral — no forge", swatch: "#ffffff" },
+  { id: "basic-dark", label: "Basic (dark)", hint: "clean, flat, neutral — no forge", swatch: "#1e1e1e" },
 ];
 
 export interface EngineConfig {

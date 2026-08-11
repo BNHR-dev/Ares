@@ -264,9 +264,14 @@ a:hover { border-bottom-color: var(--bronze-hi); }
   pointer-events: none;
   z-index: 1;
   opacity: 0;
-  background:
-    radial-gradient(120% 70% at 50% 100%, rgba(var(--ember-rgb), 0.22), transparent 72%),
-    radial-gradient(150% 55% at 50% 0%, rgba(var(--accent-rgb), 0.12), transparent 66%);
+  /* ONE light source, not three. This used to stack a bottom ember, a top
+     accent wash, a corner-pooling inset shadow and a vignette ring — each
+     ending on its own boundary, which read as separate blobs ("sectiony")
+     and as hard edges where the stage rectangle clipped them.
+     Now: a single dome whose ORIGIN sits below the panel (50% 108%) and whose
+     falloff completes at 72%, so it reaches zero well inside every edge. No
+     clip, no seam, nothing to feather — the light simply runs out. */
+  background: radial-gradient(78% 54% at 50% 108%, rgba(var(--ember-rgb), 0.20), transparent 72%);
   transition: opacity 500ms ease;
 }
 .workGlow::before {
@@ -293,13 +298,15 @@ a:hover { border-bottom-color: var(--bronze-hi); }
   z-index: 40;
   opacity: 0;
   transition: opacity 520ms ease;
-  /* scorched rim-light pressing in from every edge + a low forge-heat from below */
-  background:
-    radial-gradient(160% 130% at 50% 118%, rgba(255, 90, 38, 0.16), transparent 46%),
-    radial-gradient(120% 120% at 50% 50%, transparent 60%, rgba(140, 29, 18, 0.28) 100%);
-  box-shadow:
-    inset 0 0 90px rgba(var(--accent-rgb), 0.16),
-    inset 0 0 38px rgba(var(--ember-rgb), 0.14);
+  /* the veil's inset rim-light must follow the rounded window, not stamp a
+     square across its corners */
+  border-radius: var(--win-radius);
+  /* The veil carries the SAME single light across the whole window (rail and
+     titlebar included) so the room is lit as one space. The inset box-shadows
+     that used to live here are gone: an inset shadow with a big blur pools its
+     light into the four corners, which is exactly the "blobs on the corners"
+     look. Edge definition belongs to the 1px rim, not to a shadow. */
+  background: radial-gradient(92% 58% at 50% 112%, rgba(255, 90, 38, 0.13), transparent 74%);
   mix-blend-mode: screen;
 }
 .ares[data-working="1"]::after { opacity: 1; animation: rageBreath 2.4s ease-in-out infinite; }
@@ -2252,9 +2259,11 @@ button.small { padding: 5px 12px; font-size: 11px; border-radius: var(--r-sm); }
    off     = the hard kill switch: nothing renders, nothing animates. */
 .ares[data-flame="glow"] .screenFlame .fStrip { display: none; }
 .ares[data-flame="glow"] .screenFlame {
-  /* the inset rim now follows border-radius, so it hugs the rounded window
-     instead of stamping a hard rectangle across the corners */
-  box-shadow: inset 0 0 64px -12px rgba(var(--ember-rgb), 0.26), inset 0 0 0 1px rgba(var(--ember-rgb), 0.10);
+  /* A hairline rim ONLY. The 64px inset bloom this used to carry pooled into
+     the corners (inset shadows always do), giving four bright blobs instead of
+     an even edge — the "sectiony" look. The rim follows border-radius, so it
+     hugs the rounded window instead of stamping a rectangle. */
+  box-shadow: inset 0 0 0 1px rgba(var(--ember-rgb), 0.14);
   animation: none;
 }
 

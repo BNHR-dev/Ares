@@ -41,8 +41,14 @@ export const CHANGELOG: ChangelogEntry[] = [
     version: "0.37.2",
     date: "August 2026",
     title: "The frame comes alive",
-    tagline: "The working glow stamped hard square corners inside a rounded window. Now it hugs the frame — and a hairline light travels the edge while Ares works.",
+    tagline: "The working glow stamped hard square corners inside a rounded window. Now it hugs the frame, a hairline light travels the edge while Ares works — and two quiet new themes join the war-bands.",
     highlights: [
+      {
+        icon: "🎨",
+        title: "Basic (light) and Basic (dark)",
+        blurb: "Two plain themes for when the forge is too much: flat neutral greys, one blue accent, no embers or glow. Every existing theme is untouched.",
+        tag: "New",
+      },
       {
         icon: "✨",
         title: "A glow that fits the window",

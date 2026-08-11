@@ -1079,21 +1079,26 @@
 .ares[data-style="modern"] .send.stop { color: var(--ember-text); border-color: rgba(226, 102, 52, 0.5); background: rgba(143, 29, 29, 0.42); }
 .ares[data-style="modern"] .send.steer { color: var(--gold-glyph); background: var(--coin); border-color: rgba(200, 155, 94, 0.34); }
 
-/* the ember rail under the composer — the one motion that means "working" */
+/* the ember rail under the composer — the one motion that means "working".
+   DIFFUSE, not a rule: at 2px hard-edged and 90% opaque this read as a solid
+   bright bar ruled across the window — a "square" of light with cut ends
+   rather than a glow. Blurring a taller, softer streak keeps the same sweep
+   while giving it no edge to look sharp: light, not a rectangle. */
 .ares[data-style="modern"] .composer::after {
   content: "";
   display: block;
   width: min(836px, 88%);
-  height: 2px;
-  margin: 7px auto 0;
-  border-radius: 2px;
+  height: 5px;
+  margin: 5px auto 0;
+  border-radius: 999px;
   background: linear-gradient(90deg, rgba(255, 106, 48, 0), var(--ember), var(--ember-hi), rgba(255, 106, 48, 0));
   background-size: 200% 100%;
   animation: emberSweep 2.4s linear infinite;
+  filter: blur(4px);
   opacity: 0;
   transition: opacity 300ms ease;
 }
-.ares[data-style="modern"][data-working="1"] .composer::after { opacity: 0.9; }
+.ares[data-style="modern"][data-working="1"] .composer::after { opacity: 0.5; }
 
 .ares[data-style="modern"] .slashMenu {
   border: 1px solid rgba(200, 155, 94, 0.26);

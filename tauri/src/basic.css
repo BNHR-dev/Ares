@@ -1,0 +1,290 @@
+/* Basic (light) / Basic (dark) — the quiet themes.
+ *
+ * Every other theme is a war-band: forge heat, gold hairlines, embers drifting,
+ * a serif display voice. These two are the opposite by design — flat neutral
+ * greys, ONE blue accent, no ornament, no glass, no glow. The reference is a
+ * plain modern chat client: white or near-black field, a slightly tinted
+ * sidebar, hairline dividers, and type doing all the work.
+ *
+ * Implementation notes:
+ *   1. This file is imported AFTER modern.css so it wins ties on load order,
+ *      and the token overrides also carry a [data-style="modern"] compound
+ *      selector so they beat that skin's own token block on specificity too.
+ *   2. Almost everything re-tints for free, because both skins read the same
+ *      token names. What needs explicit help is the handful of surfaces
+ *      modern.css paints with literal hex (titlebar, rail, panels) and the
+ *      decorative layers, which are simply removed.
+ *   3. "Working" still reads: the rim, the dome and the sweep all derive from
+ *      --ember-rgb, which here is the blue accent rather than fire. Nothing
+ *      flashes, exactly as in every other theme.
+ */
+
+/* ── tokens ──────────────────────────────────────────────────────────────── */
+
+.ares[data-theme="basic-light"],
+.ares[data-style="modern"][data-theme="basic-light"] {
+  color-scheme: light;
+
+  --bg: #ffffff;
+  --bg-raised: #f7f7f8;
+  --panel: #ffffff;
+  --panel-2: #f4f4f5;
+
+  --text: #18181b;
+  --text-hi: #09090b;
+  --muted: #52525b;
+  --faint: #8b8b95;
+
+  --line: rgba(0, 0, 0, 0.09);
+  --line-raised: rgba(0, 0, 0, 0.13);
+  --line-active: rgba(0, 0, 0, 0.22);
+  --line-strong: rgba(0, 0, 0, 0.16);
+
+  --accent: #2f6fed;
+  --accent-hi: #1e5bd6;
+  --accent-rgb: 47, 111, 237;
+
+  /* the "heat" of a working turn is just the accent here */
+  --ember: #2f6fed;
+  --ember-hi: #5b8ff5;
+  --ember-text: #1e5bd6;
+  --ember-rim: rgba(47, 111, 237, 0.35);
+  --ember-rgb: 47, 111, 237;
+
+  /* gold carries structure/labels in the modern skin — neutralize to grey */
+  --gold: #52525b;
+  --gold-hi: #3f3f46;
+  --gold-glyph: #52525b;
+
+  --blood: #d4d4d8;
+  --steel: #16a34a;
+  --mint-text: #15803d;
+  --crimson: #dc2626;
+
+  --coin: linear-gradient(180deg, #f4f4f5, #eaeaec);
+  --coin-ember: linear-gradient(180deg, #e8effd, #dbe6fb);
+
+  /* no glass: flat cards with a hairline */
+  --glass-fill: linear-gradient(180deg, #ffffff, #ffffff);
+  --glass-edge: rgba(0, 0, 0, 0.10);
+  --glass-spec: 0 0 0 0 transparent;
+  --glass-blur: blur(0px);
+  --glass-lift: 0 1px 2px rgba(0, 0, 0, 0.06);
+
+  /* one voice — the serif display face is part of the war-band, not this */
+  --display: var(--font);
+}
+
+.ares[data-theme="basic-dark"],
+.ares[data-style="modern"][data-theme="basic-dark"] {
+  color-scheme: dark;
+
+  --bg: #1a1a1a;
+  --bg-raised: #1f1f1f;
+  --panel: #212121;
+  --panel-2: #262626;
+
+  --text: #ededed;
+  --text-hi: #fafafa;
+  --muted: rgba(237, 237, 237, 0.66);
+  --faint: rgba(237, 237, 237, 0.42);
+
+  --line: rgba(255, 255, 255, 0.09);
+  --line-raised: rgba(255, 255, 255, 0.14);
+  --line-active: rgba(255, 255, 255, 0.24);
+  --line-strong: rgba(255, 255, 255, 0.18);
+
+  --accent: #5b8ff5;
+  --accent-hi: #86adf8;
+  --accent-rgb: 91, 143, 245;
+
+  --ember: #5b8ff5;
+  --ember-hi: #86adf8;
+  --ember-text: #9dbcfa;
+  --ember-rim: rgba(91, 143, 245, 0.4);
+  --ember-rgb: 91, 143, 245;
+
+  --gold: #a1a1aa;
+  --gold-hi: #d4d4d8;
+  --gold-glyph: #a1a1aa;
+
+  --blood: #3f3f46;
+  --steel: #4ade80;
+  --mint-text: #86efac;
+  --crimson: #f87171;
+
+  --coin: linear-gradient(180deg, #2b2b2b, #202020);
+  --coin-ember: linear-gradient(180deg, #22304a, #1c2537);
+
+  --glass-fill: linear-gradient(180deg, #212121, #212121);
+  --glass-edge: rgba(255, 255, 255, 0.10);
+  --glass-spec: 0 0 0 0 transparent;
+  --glass-blur: blur(0px);
+  --glass-lift: 0 1px 2px rgba(0, 0, 0, 0.4);
+
+  --display: var(--font);
+}
+
+/* ── strip the ornament ──────────────────────────────────────────────────── */
+/* !important because these layers are painted by several skins at equal
+   specificity; a theme that means "no ornament" has to win outright. */
+
+.ares[data-theme^="basic-"] .backdrop,
+.ares[data-theme^="basic-"] .backdrop::before,
+.ares[data-theme^="basic-"] .backdrop::after,
+.ares[data-theme^="basic-"] .astrolabe,
+.ares[data-theme^="basic-"] .depthField,
+.ares[data-theme^="basic-"] .embers,
+.ares[data-theme^="basic-"] .embers::after,
+.ares[data-theme^="basic-"] .screenFlame,
+.ares[data-theme^="basic-"] .workGlow,
+.ares[data-theme^="basic-"] .hackerRain,
+.ares[data-theme^="basic-"]::after,
+.ares[data-theme^="basic-"]::before {
+  display: none !important;
+  animation: none !important;
+}
+
+/* the emblem watermark behind the empty stage is forge iconography too */
+.ares[data-theme^="basic-"] .empty .emptyEmblem { opacity: 0.08 !important; filter: grayscale(1); }
+
+/* ── flatten the surfaces modern.css paints with literal hex ─────────────── */
+
+.ares[data-theme^="basic-"],
+.ares[data-style="modern"][data-theme^="basic-"] { background: var(--bg); }
+
+.ares[data-style="modern"][data-theme^="basic-"] .titlebar {
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--line);
+  box-shadow: none;
+}
+.ares[data-style="modern"][data-theme^="basic-"] .rail,
+.ares[data-theme^="basic-"] .rail {
+  background: var(--bg-raised);
+  border-right: 1px solid var(--line);
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+.ares[data-theme^="basic-"] .stage,
+.ares[data-theme^="basic-"] .chat { background: transparent; }
+
+/* composer: a plain rounded field, not a floating lens */
+.ares[data-style="modern"][data-theme^="basic-"] .composerRow,
+.ares[data-theme^="basic-"] .composerRow {
+  background: var(--panel);
+  border: 1px solid var(--line-raised);
+  box-shadow: var(--glass-lift);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+.ares[data-theme^="basic-"] .composerRow:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.15);
+}
+/* the working streak under the composer stays, in accent blue and softer */
+.ares[data-style="modern"][data-theme^="basic-"][data-working="1"] .composer::after { opacity: 0.35; }
+
+/* cards, bubbles, panels: flat fills + hairline, no bloom */
+.ares[data-theme^="basic-"] .toolCard,
+.ares[data-theme^="basic-"] .gate,
+.ares[data-theme^="basic-"] .todoPanel,
+.ares[data-theme^="basic-"] .palette,
+.ares[data-theme^="basic-"] .accountMenu,
+.ares[data-theme^="basic-"] .directory,
+.ares[data-theme^="basic-"] .bugReport,
+.ares[data-theme^="basic-"] .mermaidBlock,
+.ares[data-theme^="basic-"] .chartBlock {
+  background: var(--panel);
+  border-color: var(--line);
+  box-shadow: var(--glass-lift);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+/* the user's own message: a soft neutral bubble, like the reference */
+.ares[data-theme^="basic-"] .turn.user .bubble {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+/* the status capsule flattens with everything else */
+.ares[data-style="modern"][data-theme^="basic-"] .statusBar .statusGroup:first-child {
+  background: var(--panel);
+  border-color: var(--line);
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* selected/hover states: a grey wash, not an ember tint */
+.ares[data-theme^="basic-"] .session:hover { background: rgba(var(--accent-rgb), 0.06); }
+.ares[data-theme^="basic-"] .session[data-on="1"],
+.ares[data-theme^="basic-"] .session[aria-current="true"] { background: var(--panel-2); }
+
+/* the primary button is a solid accent, the one saturated thing in the room */
+.ares[data-style="modern"][data-theme^="basic-"] .primary,
+.ares[data-theme^="basic-"] .primary {
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  color: #ffffff;
+  box-shadow: none;
+}
+.ares[data-theme^="basic-"] .primary:hover { background: var(--accent-hi); border-color: var(--accent-hi); }
+
+/* ── re-map hard-coded text colors ───────────────────────────────────────── */
+/* modern.css writes many text colors as literal parchment/gold values rather
+   than through tokens (rgba(239,227,207,…), rgba(232,200,147,…)). Those are
+   invisible on a white field, so every one of them is mapped back onto the
+   theme's own text ramp. !important because several of these rules carry a
+   deeper selector than a theme can reach. */
+.ares[data-theme^="basic-"] .turn,
+.ares[data-theme^="basic-"] .turnBody,
+.ares[data-theme^="basic-"] .prose,
+.ares[data-theme^="basic-"] .tableWrap,
+.ares[data-theme^="basic-"] .mermaidBlock,
+.ares[data-theme^="basic-"] .chartBlock,
+.ares[data-theme^="basic-"] .helmNav,
+.ares[data-theme^="basic-"] .gateReason,
+.ares[data-theme^="basic-"] .gateTarget,
+.ares[data-theme^="basic-"] .gateAllow,
+.ares[data-theme^="basic-"] .gateAlways,
+.ares[data-theme^="basic-"] .gateDeny { color: var(--text) !important; }
+
+.ares[data-theme^="basic-"] .railBrand,
+.ares[data-theme^="basic-"] .modelBadge,
+.ares[data-theme^="basic-"] .statusSeg,
+.ares[data-theme^="basic-"] .hudReadout,
+.ares[data-theme^="basic-"] .artifactGo,
+.ares[data-theme^="basic-"] .daemonDot,
+.ares[data-theme^="basic-"] .medallion { color: var(--muted) !important; }
+
+.ares[data-theme^="basic-"] .railCollapse,
+.ares[data-theme^="basic-"] .railLabel,
+.ares[data-theme^="basic-"] .thinking,
+.ares[data-theme^="basic-"] .springInner,
+.ares[data-theme^="basic-"] .usage,
+.ares[data-theme^="basic-"] .statusIcon,
+.ares[data-theme^="basic-"] .hudVersion { color: var(--faint) !important; }
+
+/* bare-element rules in modern.css (.railNav button, .session span, badge
+   em/b) carry the same literals and need the same treatment */
+.ares[data-theme^="basic-"] .railNav button,
+.ares[data-theme^="basic-"] .session span,
+.ares[data-theme^="basic-"] .sessionTitle { color: var(--text) !important; }
+.ares[data-theme^="basic-"] .session em,
+.ares[data-theme^="basic-"] .statusSeg em,
+.ares[data-theme^="basic-"] .statusSeg b,
+.ares[data-theme^="basic-"] .modelBadge em,
+.ares[data-theme^="basic-"] .railNav em { color: var(--muted) !important; }
+
+/* the New session button keeps white-on-accent — that pair is already correct */
+.ares[data-theme^="basic-"] .primary,
+.ares[data-theme^="basic-"] .primaryLabel { color: #ffffff !important; }
+
+/* kill the remaining decorative glows: medallions, rings and text shadows */
+.ares[data-theme^="basic-"] .medallion { background: var(--coin); box-shadow: none; }
+.ares[data-theme^="basic-"] .brand,
+.ares[data-theme^="basic-"] .railBrand { text-shadow: none; letter-spacing: 0.18em; }
+.ares[data-theme^="basic-"] .helm-basin-svg { filter: none; }

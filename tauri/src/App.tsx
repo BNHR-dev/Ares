@@ -121,6 +121,9 @@ import {
 import { STREAM_SPEECH_SENTENCE_MIN, STREAM_SPEECH_BATCH_MIN, takeStreamSpeechChunk } from "./voice/streamSpeech";
 import "./styles.css";
 import "./modern.css";
+// LAST on purpose: the Basic themes neutralize tokens the skins above set, so
+// they must win ties on load order as well as on specificity.
+import "./basic.css";
 
 // The app version, injected by Vite's `define`. Guarded with typeof so that even
 // if the build ever fails to substitute the token (which white-screened the app
