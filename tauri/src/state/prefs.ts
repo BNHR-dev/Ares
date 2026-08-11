@@ -72,7 +72,7 @@ export interface Prefs {
 
 export type ThemeName =
   | "rage" | "bronze" | "crimson" | "steel" | "nightfall" | "verdant" | "daylight"
-  | "basic-light" | "basic-dark";
+  | "basic-light" | "basic-dark" | "basic-bronze" | "basic-violet" | "basic-steel";
 export const THEMES: Array<{ id: ThemeName; label: string; hint: string; swatch: string }> = [
   { id: "rage", label: "Blood & Rage", hint: "obsidian scorched with ember — the god of war", swatch: "#d6402e" },
   { id: "bronze", label: "Bronze", hint: "the old warband gold", swatch: "#c79a4e" },
@@ -85,6 +85,9 @@ export const THEMES: Array<{ id: ThemeName; label: string; hint: string; swatch:
   // flat surfaces — for working in a room where the war-band is too much.
   { id: "basic-light", label: "Basic (light)", hint: "clean, flat, neutral — no forge", swatch: "#ffffff" },
   { id: "basic-dark", label: "Basic (dark)", hint: "clean, flat, neutral — no forge", swatch: "#1e1e1e" },
+  { id: "basic-bronze", label: "Basic (bronze)", hint: "the flat theme in warband gold", swatch: "#c79a4e" },
+  { id: "basic-violet", label: "Basic (violet)", hint: "the flat theme in violet dusk", swatch: "#8b8bd9" },
+  { id: "basic-steel", label: "Basic (steel)", hint: "the flat theme in tempered teal", swatch: "#6fb3ae" },
 ];
 
 export interface EngineConfig {
