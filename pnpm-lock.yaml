@@ -182,6 +182,19 @@ importers:
 
   packages/mind: {}
 
+  packages/mnemosyne:
+    dependencies:
+      '@ares/mind':
+        specifier: workspace:*
+        version: link:../mind
+      ws:
+        specifier: ^8.18.0
+        version: 8.21.0
+    devDependencies:
+      '@types/ws':
+        specifier: ^8.5.12
+        version: 8.18.1
+
   packages/operator:
     dependencies:
       '@ares/agent':
