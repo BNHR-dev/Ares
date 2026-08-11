@@ -100,6 +100,10 @@ import {
   type Prefs,
   type ThemeName,
   THEMES,
+  SURFACES,
+  ACCENTS,
+  surfaceToStyle,
+  surfaceToTheme,
   type RouteLane,
   ROUTE_LANES,
   type Routing,
@@ -3087,6 +3091,7 @@ function App() {
       className="ares"
       data-daemon={daemon}
       data-theme={prefs.theme}
+      data-accent={prefs.accent}
       data-flame={prefs.flameMode}
       data-style={prefs.uiStyle}
       data-panel={forge.open ? "1" : "0"}
@@ -9427,38 +9432,46 @@ function Settings({
                 </div>
                 <button onClick={onLaunchLivingSurface} disabled={!native}>LAUNCH ARES ↗</button>
               </div>
-              <label className="fieldLabel">Interface style</label>
-              <div className="displayModes">
-                <button
-                  data-on={draft.uiStyle === "modern" ? "1" : "0"}
-                  onClick={() => {
-                    setDraftPrefs({ ...draft, uiStyle: "modern" });
-                    onLivePref({ uiStyle: "modern" }); // display-only — preview instantly
-                  }}
-                >
-                  <strong>Modern</strong>
-                  <span>Floating smoked glass, copper ember, cinematic canvas.</span>
-                </button>
-                <button
-                  data-on={draft.uiStyle === "new" ? "1" : "0"}
-                  onClick={() => {
-                    setDraftPrefs({ ...draft, uiStyle: "new" });
-                    onLivePref({ uiStyle: "new" });
-                  }}
-                >
-                  <strong>Forged</strong>
-                  <span>Glass depth, spring motion, living gauges.</span>
-                </button>
-                <button
-                  data-on={draft.uiStyle === "legacy" ? "1" : "0"}
-                  onClick={() => {
-                    setDraftPrefs({ ...draft, uiStyle: "legacy" });
-                    onLivePref({ uiStyle: "legacy" });
-                  }}
-                >
-                  <strong>Legacy</strong>
-                  <span>The classic flat obsidian shell.</span>
-                </button>
+              {/* Surface first, colour second — two small dials instead of a
+                  twelve-card grid. Selecting a surface derives the theme and
+                  shell it needs; the accent then re-tints whichever you chose. */}
+              <label className="fieldLabel">Surface</label>
+              <div className="surfaceRow">
+                {SURFACES.map((s) => (
+                  <button
+                    key={s.id}
+                    className="surfaceCard"
+                    data-on={draft.surface === s.id ? "1" : "0"}
+                    data-surface={s.id}
+                    onClick={() => {
+                      const next = { ...draft, surface: s.id, theme: surfaceToTheme(s.id), uiStyle: surfaceToStyle(s.id) };
+                      setDraftPrefs(next);
+                      onLivePref({ surface: s.id, theme: next.theme, uiStyle: next.uiStyle });
+                    }}
+                  >
+                    <span className="surfacePreview" aria-hidden="true" />
+                    <strong>{s.label}</strong>
+                    <em>{s.hint}</em>
+                  </button>
+                ))}
+              </div>
+              <label className="fieldLabel">Accent</label>
+              <div className="accentRow">
+                {ACCENTS.map((a) => (
+                  <button
+                    key={a.id}
+                    className="accentDot"
+                    data-on={draft.accent === a.id ? "1" : "0"}
+                    title={a.label}
+                    aria-label={a.label}
+                    onClick={() => {
+                      setDraftPrefs({ ...draft, accent: a.id });
+                      onLivePref({ accent: a.id });
+                    }}
+                  >
+                    <span style={{ background: a.swatch }} />
+                  </button>
+                ))}
               </div>
               <label className="fieldLabel">Tool call display</label>
               <div className="displayModes">
@@ -9470,24 +9483,6 @@ function Settings({
                   <strong>Technical</strong>
                   <span>Raw tool inputs and outputs, full detail.</span>
                 </button>
-              </div>
-              <label className="fieldLabel">Accent theme</label>
-              <div className="themeGrid">
-                {THEMES.map((t) => (
-                  <button
-                    key={t.id}
-                    className="themeCard"
-                    data-on={draft.theme === t.id ? "1" : "0"}
-                    onClick={() => {
-                      setDraftPrefs({ ...draft, theme: t.id });
-                      onLivePref({ theme: t.id }); // display-only — preview instantly
-                    }}
-                  >
-                    <span className="themeSwatch" style={{ background: t.swatch }} />
-                    <strong>{t.label}</strong>
-                    <em>{t.hint}</em>
-                  </button>
-                ))}
               </div>
             </div>
           ) : null}

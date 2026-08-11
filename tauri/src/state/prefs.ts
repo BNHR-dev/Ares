@@ -40,8 +40,12 @@ export interface Prefs {
   sessionProjects?: Record<string, string>;
   /** Project names whose rail section is currently collapsed. */
   collapsedProjects?: string[];
-  /** Accent theme for the desktop chrome. */
+  /** Accent theme for the desktop chrome. Derived from surface + accent. */
   theme: ThemeName;
+  /** The surface the UI is painted on (shell + neutral ramp). */
+  surface: SurfaceName;
+  /** The colour applied on top of that surface, via data-accent. */
+  accent: AccentName;
   /** Interface style — "modern" = the glass-forge reskin (floating smoked-glass
    *  surfaces over a cinematic obsidian canvas, copper accent, mint success;
    *  scoped under data-style="modern" in modern.css); "new" = the Forged skin
@@ -73,6 +77,61 @@ export interface Prefs {
 export type ThemeName =
   | "rage" | "bronze" | "crimson" | "steel" | "nightfall" | "verdant" | "daylight"
   | "basic-light" | "basic-dark" | "basic-bronze" | "basic-violet" | "basic-steel";
+
+/* ── Appearance, as two dials instead of one long list ──────────────────────
+   The old panel offered a flat grid of every theme, which grew to twelve
+   cards and read as clutter. Appearance is really two independent choices:
+   the SURFACE you work on, and the ACCENT that colours it. Four surfaces × a
+   row of swatches covers more combinations than the old list did, in a
+   fraction of the space.
+
+   `theme` and `uiStyle` remain the wire format the whole app already reads —
+   surface/accent derive into them, so nothing downstream had to change. */
+export type SurfaceName = "legacy" | "modern" | "basic-light" | "basic-dark";
+export const SURFACES: Array<{ id: SurfaceName; label: string; hint: string }> = [
+  { id: "modern", label: "Modern", hint: "Smoked glass over a cinematic canvas" },
+  { id: "legacy", label: "Legacy", hint: "The classic flat obsidian shell" },
+  { id: "basic-dark", label: "Basic dark", hint: "Flat neutral greys, no ornament" },
+  { id: "basic-light", label: "Basic light", hint: "Flat white, no ornament" },
+];
+
+export type AccentName = "ember" | "bronze" | "crimson" | "steel" | "violet" | "verdant" | "blue";
+export const ACCENTS: Array<{ id: AccentName; label: string; swatch: string }> = [
+  { id: "ember", label: "Ember", swatch: "#e26634" },
+  { id: "bronze", label: "Bronze", swatch: "#c79a4e" },
+  { id: "crimson", label: "Crimson", swatch: "#c0504a" },
+  { id: "steel", label: "Steel", swatch: "#6fb3ae" },
+  { id: "violet", label: "Violet", swatch: "#8b8bd9" },
+  { id: "verdant", label: "Verdant", swatch: "#6dc398" },
+  { id: "blue", label: "Blue", swatch: "#2f6fed" },
+];
+
+/** The surface decides the shell; the accent is applied on top via data-accent. */
+export function surfaceToStyle(surface: SurfaceName): Prefs["uiStyle"] {
+  return surface === "legacy" ? "legacy" : "modern";
+}
+export function surfaceToTheme(surface: SurfaceName): ThemeName {
+  if (surface === "basic-light") return "basic-light";
+  if (surface === "basic-dark") return "basic-dark";
+  return "rage"; // the obsidian base; data-accent supplies the colour
+}
+/** Migration: read a surface/accent pair out of a pre-split saved theme. */
+function surfaceFromLegacy(theme: unknown, uiStyle: unknown): SurfaceName {
+  if (theme === "basic-light" || theme === "daylight") return "basic-light";
+  if (typeof theme === "string" && theme.startsWith("basic-")) return "basic-dark";
+  return uiStyle === "legacy" ? "legacy" : "modern";
+}
+function accentFromLegacy(theme: unknown): AccentName {
+  switch (theme) {
+    case "bronze": case "basic-bronze": return "bronze";
+    case "crimson": return "crimson";
+    case "steel": case "basic-steel": return "steel";
+    case "nightfall": case "basic-violet": return "violet";
+    case "verdant": return "verdant";
+    case "basic-light": case "basic-dark": return "blue";
+    default: return "ember";
+  }
+}
 export const THEMES: Array<{ id: ThemeName; label: string; hint: string; swatch: string }> = [
   { id: "rage", label: "Blood & Rage", hint: "obsidian scorched with ember — the god of war", swatch: "#d6402e" },
   { id: "bronze", label: "Bronze", hint: "the old warband gold", swatch: "#c79a4e" },
@@ -120,12 +179,22 @@ export function loadPrefs(): Prefs {
     flameMode: IS_LINUX ? "minimal" : "glow",
     pinned: [],
     theme: "rage",
+    surface: "modern",
+    accent: "ember",
     uiStyle: "modern",
     engine: {},
   };
   try {
     const raw = JSON.parse(window.localStorage.getItem(PREFS_KEY) ?? "{}") as Partial<Prefs>;
     const themeOk = THEMES.some((t) => t.id === raw.theme);
+    // Pre-split saves carry only `theme`; read a surface/accent pair out of it
+    // so an existing user lands on the closest equivalent instead of a reset.
+    const surface: SurfaceName = SURFACES.some((s) => s.id === raw.surface)
+      ? (raw.surface as SurfaceName)
+      : surfaceFromLegacy(raw.theme, raw.uiStyle);
+    const accent: AccentName = ACCENTS.some((a) => a.id === raw.accent)
+      ? (raw.accent as AccentName)
+      : accentFromLegacy(raw.theme);
     const routing = raw.routing && typeof raw.routing === "object" ? raw.routing : {};
     return {
       provider: raw.provider ?? fallback.provider,
@@ -173,15 +242,15 @@ export function loadPrefs(): Prefs {
       collapsedProjects: Array.isArray(raw.collapsedProjects)
         ? raw.collapsedProjects.filter((p): p is string => typeof p === "string")
         : undefined,
-      theme: themeOk ? (raw.theme as ThemeName) : "rage",
+      surface,
+      accent,
+      // Derived, never authored: the surface owns the theme now. Kept in the
+      // saved shape because the whole app reads prefs.theme.
+      theme: raw.surface || !themeOk ? surfaceToTheme(surface) : (raw.theme as ThemeName),
       // Glass-revamp migration: pre-V2 saves stored "new" as the mere DEFAULT,
-      // not a choice — upgrade those to "modern" once. Post-V2 saves (any
-      // value) are explicit picks and stick, so Forged stays selectable.
-      uiStyle: raw.uiStyle === "legacy"
-        ? "legacy"
-        : raw.uiStyleV2 && raw.uiStyle === "new"
-          ? "new"
-          : "modern",
+      // not a choice — upgrade those to "modern" once. Forged is no longer in
+      // the picker, but a save that explicitly holds it still renders it.
+      uiStyle: raw.uiStyleV2 && raw.uiStyle === "new" ? "new" : surfaceToStyle(surface),
       uiStyleV2: true,
       engine: raw.engine && typeof raw.engine === "object" ? raw.engine : {},
       voiceEnabled: raw.voiceEnabled === true,

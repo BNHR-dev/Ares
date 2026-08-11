@@ -130,6 +130,94 @@
   --display: var(--font);
 }
 
+/* ── Appearance controls: two dials, not a grid ──────────────────────────── */
+/* Deliberately unscoped by theme — the panel itself should be compact in
+   every surface, since the clutter was structural, not thematic. */
+.surfaceRow {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.surfaceCard {
+  display: grid;
+  gap: 3px;
+  padding: 10px 12px;
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--panel);
+  transition: border-color 140ms ease, background 140ms ease, transform 140ms ease;
+}
+.surfaceCard:hover { border-color: var(--line-strong); transform: translateY(-1px); }
+.surfaceCard[data-on="1"] { border-color: var(--accent); background: rgba(var(--accent-rgb), 0.08); }
+.surfaceCard strong { font-size: 12.5px; color: var(--text); }
+.surfaceCard em { font-style: normal; font-size: 11px; line-height: 1.4; color: var(--faint); }
+/* a two-tone chip that previews the surface's actual value scheme */
+.surfacePreview {
+  height: 22px;
+  border-radius: 5px;
+  border: 1px solid var(--line);
+  margin-bottom: 4px;
+}
+.surfaceCard[data-surface="modern"] .surfacePreview { background: linear-gradient(115deg, #0d0b0a 55%, #241d19); }
+.surfaceCard[data-surface="legacy"] .surfacePreview { background: linear-gradient(115deg, #0a0708 55%, #1e1213); }
+.surfaceCard[data-surface="basic-dark"] .surfacePreview { background: linear-gradient(115deg, #1a1a1a 55%, #2a2a2a); }
+.surfaceCard[data-surface="basic-light"] .surfacePreview { background: linear-gradient(115deg, #ffffff 55%, #f0f0f2); }
+
+.accentRow { display: flex; flex-wrap: wrap; gap: 8px; }
+.accentDot {
+  width: 30px; height: 30px;
+  display: grid; place-items: center;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: transparent;
+  transition: border-color 140ms ease, transform 140ms ease;
+}
+.accentDot span { width: 17px; height: 17px; border-radius: 50%; display: block; }
+.accentDot:hover { transform: translateY(-1px); border-color: var(--line-strong); }
+.accentDot[data-on="1"] { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.22); }
+
+/* ── the accent dial ─────────────────────────────────────────────────────── */
+/* Colour is now independent of surface: data-accent re-tints ANY base — the
+   obsidian shells and the flat ones alike — so four surfaces times seven
+   accents replaces what used to be a twelve-card grid. The doubled attribute
+   keeps these above every surface's own token block. */
+.ares[data-accent="ember"][data-accent] {
+  --accent: #e26634; --accent-hi: #ff8a5c; --accent-rgb: 226, 102, 52;
+  --ember: #ff6a30; --ember-hi: #ffb24d; --ember-rgb: 255, 106, 48;
+}
+.ares[data-accent="bronze"][data-accent] {
+  --accent: #c79a4e; --accent-hi: #e6bd72; --accent-rgb: 199, 154, 78;
+  --ember: #e0a93c; --ember-hi: #ffd877; --ember-rgb: 224, 169, 60;
+}
+.ares[data-accent="crimson"][data-accent] {
+  --accent: #c0504a; --accent-hi: #e87a72; --accent-rgb: 192, 80, 74;
+  --ember: #e36258; --ember-hi: #ff9a8f; --ember-rgb: 227, 98, 88;
+}
+.ares[data-accent="steel"][data-accent] {
+  --accent: #6fb3ae; --accent-hi: #a6e0da; --accent-rgb: 111, 179, 174;
+  --ember: #5fb8b0; --ember-hi: #95e6dd; --ember-rgb: 95, 184, 176;
+}
+.ares[data-accent="violet"][data-accent] {
+  --accent: #8b8bd9; --accent-hi: #b6b6f5; --accent-rgb: 139, 139, 217;
+  --ember: #9a8bef; --ember-hi: #c4b6ff; --ember-rgb: 154, 139, 239;
+}
+.ares[data-accent="verdant"][data-accent] {
+  --accent: #6dc398; --accent-hi: #9fe7bd; --accent-rgb: 109, 195, 152;
+  --ember: #59c08c; --ember-hi: #93eab8; --ember-rgb: 89, 192, 140;
+}
+.ares[data-accent="blue"][data-accent] {
+  --accent: #2f6fed; --accent-hi: #5b8ff5; --accent-rgb: 47, 111, 237;
+  --ember: #2f6fed; --ember-hi: #5b8ff5; --ember-rgb: 47, 111, 237;
+}
+/* on the light surface the accent must darken, not brighten, to stay legible */
+.ares[data-theme="basic-light"][data-accent][data-accent] {
+  --accent-hi: color-mix(in srgb, var(--accent) 78%, black);
+  --ember-text: color-mix(in srgb, var(--accent) 82%, black);
+  --ember-rim: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
 /* ── the coloured flat themes ────────────────────────────────────────────── */
 /* Same flat design, same dark ramp, different accent. Everything downstream
    reads --accent/--ember, so a theme is just its colour. */
@@ -197,10 +285,14 @@
    black screen with a glowing forge coin before the themed UI appeared. */
 .ares[data-theme^="basic-"] .boot { background: var(--bg) !important; }
 .ares[data-theme^="basic-"] .bootEmblem {
+  /* the circle is declared only by the modern skin, so a flat theme on any
+     other surface rendered the emblem as a hard square block */
+  border-radius: 50% !important;
   background: var(--coin-ember) !important;
   border: 1px solid var(--line-raised) !important;
   color: var(--accent) !important;
   box-shadow: none !important;
+  overflow: hidden;
 }
 .ares[data-theme^="basic-"] .bootRing { border-color: var(--line-raised) !important; opacity: 0.7; }
 .ares[data-theme^="basic-"] .bootSigil { filter: none !important; }
