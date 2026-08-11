@@ -35,7 +35,7 @@ import { recordConsciousnessObservation } from "../consciousnessContext.js";
 import { aresAgentHome, deletePersona, listPersonas, loadAgentConfig, onLifecycle, runDeepDream, runSkill, skillHubProbe, skillHubList, skillHubGet, skillHubPublish, installHubSkill, readLocalSkillFiles, writePersona } from "@ares/agent";
 import { adoptPersonaByName, applyPersonaToolResult, newPersonaGate, personaForMessage, personaToWire, type PersonaGate } from "./daemon/personas.js";
 import { assembleCognitiveState } from "./daemon/cognitiveState.js";
-import { QueryEngineDispatcher, OperatorBackgroundLoop, deriveLeash, domainOf, isOperatorPaused, listGoals, loadStandingOrders, materializeDueStandingOrders, type StandingOrder } from "@ares/operator";
+import { QueryEngineDispatcher, OperatorBackgroundLoop, deriveLeash, domainOf, isOperatorPaused, listGoals, loadStandingOrders, materializeDueStandingOrders, loadWatchers, type StandingOrder } from "@ares/operator";
 import { MemoryStore, mindPaths, reflectOnRun, detectWorkspaceProjectId, loadProjectState, buildConversationDigest, mergeDurableFacts, withConsolidationLock, CONVERSATION_REFLECT_SYSTEM, DURABLE_FACTS_SCHEMA_HINT, type DurableFact } from "@ares/mind";
 import { OAUTH_PROVIDERS, PROVIDER_LABELS, startOAuthFlow, connectedProviders, getProviderConfig, setCredential, hasCredential, deleteCredential, clientIdName, clientSecretName, runAresAccountSignin, probeAresOauth } from "@ares/core";
 import { KillSwitch } from "@ares/effects";
@@ -1566,6 +1566,8 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
   // ARES_OPERATOR_AUTOTICK=0 kill switch and a live user turn both park ticks via
   // the pause gate, so the operator_autotick toggle still takes effect next tick.
   const daemonStandingAtStart = await loadStandingOrders(live.context.home).catch(() => [] as StandingOrder[]);
+  // Watchers widen the opt-in identically: adding a condition to watch IS the opt-in.
+  const daemonWatchersAtStart = await loadWatchers(live.context.home).catch(() => []);
   // Build the loop whenever the opt-in holds (LOOP=1 or standing orders queued).
   // Do NOT gate construction on the ARES_OPERATOR_AUTOTICK kill switch: it's a
   // LIVE toggle handled by the paused() gate below, so a daemon booted with
@@ -1573,7 +1575,7 @@ export async function daemonCommand(args: ParsedArgs): Promise<number> {
   // user flips it back on — without a restart. The loop ticks are cheap no-ops
   // while parked, exactly as the old per-tick-gated setInterval was.
   const autotickLoop =
-    !(process.env.ARES_OPERATOR_LOOP === "1" || daemonStandingAtStart.length > 0)
+    !(process.env.ARES_OPERATOR_LOOP === "1" || daemonStandingAtStart.length > 0 || daemonWatchersAtStart.length > 0)
       ? null
       : new OperatorBackgroundLoop(
           {

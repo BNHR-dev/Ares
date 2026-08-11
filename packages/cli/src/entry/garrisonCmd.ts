@@ -20,7 +20,7 @@ import { TodoStore, ShellRegistry, type FileReadStamp } from "@ares/tools";
 import { dim, notice } from "../terminalUi.js";
 import { loadUiSettings } from "../uiSettings.js";
 import { prepareAresAgent, runDeepDream, runHeartbeatTick } from "@ares/agent";
-import { QueryEngineDispatcher, OperatorBackgroundLoop, isOperatorPaused, runCrucibleTrials, loadStandingOrders, materializeDueStandingOrders, type StandingOrder } from "@ares/operator";
+import { QueryEngineDispatcher, OperatorBackgroundLoop, isOperatorPaused, runCrucibleTrials, loadStandingOrders, materializeDueStandingOrders, loadWatchers, type StandingOrder } from "@ares/operator";
 import { MemoryStore, detectWorkspaceProjectId, loadProjectState, withConsolidationLock } from "@ares/mind";
 import { SessionManager, GarrisonServer, Scheduler, ApprovalQueue, tokenPath, DEFAULT_GARRISON_PORT, type GatewayServerFrame } from "@ares/garrison";
 import { buildHolotableHtml, MECH_SPEC, ROBOT_ARM_SPEC, type HoloSpec } from "../holotable.js";
@@ -344,7 +344,11 @@ export async function garrisonCommand(args: ParsedArgs): Promise<number> {
   // The autotick kill switch still wins. Standing orders that come due each tick
   // materialize into goals the loop then executes under the unattended gate.
   const standingAtStart = await loadStandingOrders(context.home).catch(() => [] as StandingOrder[]);
-  const loopActive = process.env.ARES_OPERATOR_AUTOTICK !== "0" && (process.env.ARES_OPERATOR_LOOP === "1" || standingAtStart.length > 0);
+  // Watchers widen the opt-in the same way: adding a condition to watch IS the opt-in.
+  const watchersAtStart = await loadWatchers(context.home).catch(() => []);
+  const loopActive =
+    process.env.ARES_OPERATOR_AUTOTICK !== "0" &&
+    (process.env.ARES_OPERATOR_LOOP === "1" || standingAtStart.length > 0 || watchersAtStart.length > 0);
   const operatorLoop = !loopActive
     ? null
     : new OperatorBackgroundLoop(

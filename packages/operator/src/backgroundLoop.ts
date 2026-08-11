@@ -2,6 +2,7 @@ import { decideAttention, attentionItemsFromGoals, type AttentionDecision } from
 import { tickGoal, type ControlLoopContext } from "./controlLoop.js";
 import { Scheduler } from "./scheduler.js";
 import { activeGoals } from "./store.js";
+import { checkWatchers } from "./watchers.js";
 import type { Goal } from "./types.js";
 
 export type OperatorWakeReason = "manual" | "interval" | "event";
@@ -18,7 +19,8 @@ export type OperatorBackgroundEvent =
   | { type: "operator_tick"; reason: OperatorWakeReason; goalId: string; status: Goal["status"]; summary: string }
   | { type: "operator_idle"; reason: OperatorWakeReason; summary: string; suggestions: string[] }
   | { type: "operator_error"; message: string }
-  | { type: "operator_stopped" };
+  | { type: "operator_stopped" }
+  | { type: "watcher_fired"; id: string; label: string; goalId: string; summary: string };
 
 export interface OperatorBackgroundLoopOptions {
   everyMs?: number;
@@ -126,6 +128,16 @@ export class OperatorBackgroundLoop {
       // a recurring mission becomes runnable on the very tick it comes due.
       if (this.opts.beforeTick) {
         try { await this.opts.beforeTick(); } catch { /* never let a hook kill the tick */ }
+      }
+      // Condition watchers: probe reality, PROPOSE (never act) when one trips.
+      // Runs before the goal read so a fresh proposal is runnable this same tick.
+      try {
+        const watched = await checkWatchers(this.ctx.home, { workspace: this.ctx.workspace, signal: this.controller.signal });
+        for (const f of watched.fired) {
+          this.emit({ type: "watcher_fired", id: f.watcher.id, label: f.watcher.label, goalId: f.goalId, summary: f.summary });
+        }
+      } catch {
+        // a watcher pass never kills the tick
       }
       const goals = await activeGoals(this.ctx.home);
       const decision = decideAttention(attentionItemsFromGoals(goals));

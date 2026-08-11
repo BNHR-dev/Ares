@@ -86,6 +86,26 @@ export {
   type MaterializeResult,
 } from "./standingOrders.js";
 
+export {
+  WATCHER_SCHEMA,
+  MIN_WATCHER_CADENCE_MS,
+  MAX_PROBES_PER_TICK,
+  newWatcherId,
+  normalizeWatcher,
+  saveWatcher,
+  loadWatchers,
+  addWatcher,
+  removeWatcher,
+  setWatcherEnabled,
+  dueWatchers,
+  checkWatchers,
+  renderWatchers,
+  type Watcher,
+  type FiredWatcher,
+  type CheckWatchersResult,
+  type CheckWatchersContext,
+} from "./watchers.js";
+
 export { runProbe, type ProbeResult, type ProbeContext } from "./probe.js";
 
 export { WorldModel, type WorldSource, type WorldSnapshot } from "./worldModel.js";
