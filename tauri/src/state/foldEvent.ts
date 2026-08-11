@@ -455,6 +455,11 @@ export function foldEvent(s: SessionVm, e: AresEvent): SessionVm {
           filesTouched,
           startedTick: prev?.startedTick ?? Date.now(),
         };
+        session.lastCodingBackend = {
+          backend: session.codingBackend.backend,
+          label: session.codingBackend.label,
+          phase: session.codingBackend.phase,
+        };
         break;
       }
       for (let i = items.length - 1; i >= 0; i--) {

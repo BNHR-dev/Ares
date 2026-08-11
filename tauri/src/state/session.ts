@@ -218,6 +218,10 @@ export interface SessionVm {
   /** Live delegation cut-scene — populated from coding_backend progress events
    *  while Ares drives an external coder (Claude Code / Codex) on the account. */
   codingBackend?: CodingBackendVm;
+  /** Sticky disclosure of the session's last delegation. The cut-scene resets
+   *  at turn start (fresh elapsed clock); this survives, so the footer can
+   *  always answer "did an external harness touch this session?". */
+  lastCodingBackend?: { backend: string; label: string; phase: CodingBackendVm["phase"] };
 }
 
 export interface CodingBackendVm {

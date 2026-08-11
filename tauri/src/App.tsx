@@ -3772,6 +3772,25 @@ function App() {
                 <b>persona</b><span>{activePersona.label}</span>
               </button>
             ) : null}
+            {/* WHICH HANDS did the work. When Ares delegates to an external
+                coding harness (Claude Code / Codex on the Ares account), the
+                cut-scene scrolls away with the turn — this chip stays for the
+                whole session, so delegation is always disclosed, never buried. */}
+            {(active?.codingBackend ?? active?.lastCodingBackend) ? (
+              <button
+                className="statusSeg"
+                data-seg="harness"
+                data-state={(active?.codingBackend ?? active?.lastCodingBackend)?.phase}
+                title={`This session used the ${(active?.codingBackend ?? active?.lastCodingBackend)?.label} harness (Ares account credentials, no user OAuth).\nLast run: ${(active?.codingBackend ?? active?.lastCodingBackend)?.phase}.`}
+              >
+                <b>harness</b>
+                <span>
+                  {(active?.codingBackend ?? active?.lastCodingBackend)?.backend}
+                  {" · "}
+                  {(active?.codingBackend ?? active?.lastCodingBackend)?.phase}
+                </span>
+              </button>
+            ) : null}
             <button
               className="statusSeg"
               data-seg="model"
