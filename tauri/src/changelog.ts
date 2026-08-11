@@ -38,6 +38,32 @@ export interface ChangelogEntry {
 // from the "earlier updates" strip.
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.37.1",
+    date: "August 2026",
+    title: "Rounded off",
+    tagline: "Three rough edges from a live screenshot — a sidebar that broke past a dozen sessions, razor-sharp window corners, and edges that fused into the app behind.",
+    highlights: [
+      {
+        icon: "📜",
+        title: "A sidebar that scrolls",
+        blurb: "A long session list now scrolls inside the rail instead of overflowing it and crushing the New session button.",
+        tag: "Polished",
+      },
+      {
+        icon: "🔲",
+        title: "Native rounded corners",
+        blurb: "The window gets its Windows 11 rounded corners back instead of shipping a razor-sharp rectangle.",
+        tag: "Polished",
+      },
+      {
+        icon: "🪟",
+        title: "Clean window edges",
+        blurb: "A proper border separates Ares from whatever sits behind it — no more visually fusing with the next window's buttons.",
+        tag: "Polished",
+      },
+    ],
+  },
+  {
     version: "0.37.0",
     date: "August 2026",
     title: "It remembers what you said",
