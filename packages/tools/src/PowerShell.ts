@@ -9,6 +9,7 @@ import {
   buildTool,
   describeShellActivity,
   destructiveShellDecision,
+  irrecoverableShellRefusal,
   resolveWorkspacePath,
   shellInputSchema,
   shellRepositoryInstructionDecision,
@@ -40,6 +41,10 @@ export const PowerShellTool = buildTool({
   },
 
   async call(i, ctx) {
+    // See Bash.call — refused at execution because bypass mode auto-allows
+    // every permission prompt, and this loss cannot be undone.
+    const refusal = irrecoverableShellRefusal(i.command);
+    if (refusal) throw new Error(refusal);
     const cwd = await resolveWorkspacePath(ctx, i.cwd, "cwd", "execute");
     const pwsh = (await which("pwsh")) ?? (await which("powershell"));
     if (!pwsh) throw new Error("Neither pwsh nor powershell found on PATH");

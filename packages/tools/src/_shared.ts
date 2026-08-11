@@ -604,6 +604,59 @@ export function describeShellActivity(rawCommand: string, background: boolean): 
   return lead(`Running ${program}`);
 }
 
+/**
+ * Commands whose damage git CANNOT undo, refused outright — regardless of
+ * permission mode, including bypass/YOLO.
+ *
+ * Everything else in the destructive list is recoverable in principle: a
+ * `reset --hard` or `checkout --` throws away work git still has objects for,
+ * and the owner accepted that risk when they turned prompting off. `git clean`
+ * with -x/-X is different in kind: it deletes IGNORED files, i.e. exactly the
+ * files git never tracked and therefore cannot restore. In a repo that keeps
+ * local-only state behind .gitignore — env files, vault databases, an
+ * untracked docs tree — that is unrecoverable data loss, and the ignore rule
+ * that protects those files from being published is precisely what leaves
+ * them unprotected here.
+ *
+ * This is not hypothetical: an agent run cleaning up 16 test artifacts reached
+ * for `git clean -fdX`, destroyed 197 local-only files including the .env, the
+ * vault DBs and the entire docs corpus (plus the backup directory that existed
+ * to survive this exact accident), and then — after detecting and reporting
+ * the loss — ran the same command again.
+ *
+ * A preview (-n/--dry-run) is always allowed: seeing the kill list first is
+ * the whole remedy. Deleting a known set of files by name is also unaffected.
+ * Returns a refusal message, or null when the command is fine.
+ */
+export function irrecoverableShellRefusal(command: string): string | null {
+  const normalized = command.replace(/\s+/g, " ").trim();
+  // every `git clean` invocation in the line, including chained ones
+  // Pre-subcommand git options may take a VALUE (`git -C <path> clean …`,
+  // `git --git-dir=… clean …`), so a flag may be followed by a bare argument
+  // before `clean` appears. Missing that form would leave the most explicit
+  // spelling — the one that names another repository — unguarded.
+  const cleans = normalized.match(/(?:^|[;&|]\s*)git\s+(?:-[^\s]+\s+(?:[^-\s][^\s]*\s+)?)*clean\b[^;&|]*/gi);
+  if (!cleans) return null;
+  for (const clean of cleans) {
+    const flags = clean.slice(clean.toLowerCase().indexOf("clean") + 5);
+    // -x / -X anywhere in a short cluster (-fdX) or as a long option
+    const removesIgnored = /(?:^|\s)-[a-wyz]*x[a-wyz]*(?:\s|$)/i.test(flags) || /--(?:force-)?x\b/.test(flags);
+    if (!removesIgnored) continue;
+    const isPreview = /(?:^|\s)-[a-z]*n[a-z]*(?:\s|$)/i.test(flags) || /--dry-run\b/.test(flags);
+    if (isPreview) continue;
+    return (
+      "Refused: `git clean` with -x/-X deletes IGNORED files, which git cannot restore — " +
+      "in this kind of repository that usually means .env files, local databases, and untracked " +
+      "documentation. This refusal holds even in bypass/YOLO mode because the loss is permanent.\n\n" +
+      "Do one of these instead:\n" +
+      "  1. Preview it first: `git clean -ndX` — read the list, then delete what you actually meant to.\n" +
+      "  2. Delete the files you created BY NAME (`rm path/a path/b`). If you made them, you have the list.\n" +
+      "  3. Write throwaway/probe files to a scratch directory OUTSIDE the repo, so cleanup can never touch it."
+    );
+  }
+  return null;
+}
+
 /** Commands that can erase data or discard uncommitted work. */
 export function destructiveShellDecision(command: string): PermissionDecision | null {
   const normalized = command.replace(/\s+/g, " ").trim();

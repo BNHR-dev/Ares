@@ -9,6 +9,7 @@ import {
   buildTool,
   describeShellActivity,
   destructiveShellDecision,
+  irrecoverableShellRefusal,
   resolveWorkspacePath,
   shellInputSchema,
   shellRepositoryInstructionDecision,
@@ -73,6 +74,12 @@ export const BashTool = buildTool({
   },
 
   async call(i, ctx): Promise<{ output: unknown; display: string }> {
+    // Enforced HERE, not in checkPermissions: a permission decision is only a
+    // prompt, and bypass/YOLO auto-allows every prompt. An unrecoverable
+    // deletion has to be refused at the point of execution or the mode that
+    // exists to remove friction also removes the last guard.
+    const refusal = irrecoverableShellRefusal(i.command);
+    if (refusal) throw new Error(refusal);
     const cwd = await resolveWorkspacePath(ctx, i.cwd, "cwd", "execute");
     const bash = await resolveBashProgram();
 
