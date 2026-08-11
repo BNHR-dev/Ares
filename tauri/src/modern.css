@@ -1079,26 +1079,14 @@
 .ares[data-style="modern"] .send.stop { color: var(--ember-text); border-color: rgba(226, 102, 52, 0.5); background: rgba(143, 29, 29, 0.42); }
 .ares[data-style="modern"] .send.steer { color: var(--gold-glyph); background: var(--coin); border-color: rgba(200, 155, 94, 0.34); }
 
-/* the ember rail under the composer — the one motion that means "working".
-   DIFFUSE, not a rule: at 2px hard-edged and 90% opaque this read as a solid
-   bright bar ruled across the window — a "square" of light with cut ends
-   rather than a glow. Blurring a taller, softer streak keeps the same sweep
-   while giving it no edge to look sharp: light, not a rectangle. */
-.ares[data-style="modern"] .composer::after {
-  content: "";
-  display: block;
-  width: min(836px, 88%);
-  height: 5px;
-  margin: 5px auto 0;
-  border-radius: 999px;
-  background: linear-gradient(90deg, rgba(255, 106, 48, 0), var(--ember), var(--ember-hi), rgba(255, 106, 48, 0));
-  background-size: 200% 100%;
-  animation: emberSweep 2.4s linear infinite;
-  filter: blur(4px);
-  opacity: 0;
-  transition: opacity 300ms ease;
-}
-.ares[data-style="modern"][data-working="1"] .composer::after { opacity: 0.5; }
+/* The ember rail that used to run under the composer is GONE.
+   It was a bar ruled straight across the window under the input — the one
+   element repeatedly reported as "squared off" — and no amount of blurring
+   fixes the underlying shape: a horizontal line has two ends, and ends read
+   as cut. The working state is now carried by light that has no edges at all
+   (the dome rising behind the composer) plus the hairline sweep travelling
+   the window rim, so nothing has to be drawn across the content. */
+.ares[data-style="modern"] .composer::after { content: none; }
 
 .ares[data-style="modern"] .slashMenu {
   border: 1px solid rgba(200, 155, 94, 0.26);
