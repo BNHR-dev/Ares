@@ -4,6 +4,7 @@ import {
   composeVerifiedChildSessionSync,
   installGlobalCrashHandlers,
   loadChildVerificationDebt,
+  loadSessionRollout,
   openWorkspaceSessionKernel,
   runReliabilityTriage,
   writeCrashLogSync,
@@ -406,7 +407,19 @@ export async function garrisonCommand(args: ParsedArgs): Promise<number> {
   const approvalTimeoutMs = Number(process.env.ARES_APPROVAL_TIMEOUT_MS) || undefined;
   const approvals = new ApprovalQueue({ approver: "owner", timeoutMs: approvalTimeoutMs });
   context.approvals = { requestApproval: approvals.requestApproval };
-  const server = new GarrisonServer({ home: context.home, sessions, scheduler, approvals, port: requestedPort });
+  const server = new GarrisonServer({
+    home: context.home,
+    sessions,
+    scheduler,
+    approvals,
+    port: requestedPort,
+    // Recorded-event replay for the /view page and any session.history client:
+    // the workspace audit rollout (events.jsonl) is the source.
+    history: async (sessionId, opts) => {
+      const rollout = await loadSessionRollout(context.workspace, sessionId);
+      return opts?.limit ? rollout.entries.slice(-opts.limit) : rollout.entries;
+    },
+  });
   const bound = await server.start();
   scheduler.start();
   operatorLoop?.start();
