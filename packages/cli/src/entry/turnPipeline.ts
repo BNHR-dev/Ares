@@ -8,7 +8,7 @@ import type { PermissionMode } from "@ares/protocol";
 import { messageText } from "@ares/protocol";
 import { notice } from "../terminalUi.js";
 import { consciousnessContextReminder } from "../consciousnessContext.js";
-import { deliberateForTurn, emitLifecycle, gainForTarget, unifiedRecallForTurn, runWitness } from "@ares/agent";
+import { deliberateForTurn, emitLifecycle, gainForTarget, lawsPromptBlock, unifiedRecallForTurn, runWitness } from "@ares/agent";
 import { listCapabilities } from "@ares/operator";
 import { buildForegroundReminder, classifyUserIntent, MemoryRouter, MemoryStore, withConsolidationLock } from "@ares/mind";
 import { SessionManager, GarrisonServer } from "@ares/garrison";
@@ -514,6 +514,10 @@ export function buildSystemPrompt(
     persona: opts.persona,
     providerFamily: opts.providerFamily,
     model: opts.model,
+    // The owner's standing orders — read fresh (mtime-cached) on every
+    // compose, so a law recorded this turn is in force in the very next
+    // provider call, in EVERY session, agent runtime or not.
+    laws: lawsPromptBlock(),
     surfaces: {
       tools: promptToolSurfaces(),
       workflows: promptWorkflowSurfaces(permissionMode),

@@ -1,4 +1,5 @@
 export { aresAgentHome, agentPaths, workspaceToolsPath, type AgentPaths } from "./paths.js";
+export { addLaw, removeLaw, listLaws, lawsPromptBlock, lawsPath, MAX_LAWS, type Law } from "./laws.js";
 export { exists, readTextIfExists, writeFileAtomic, renderTemplate, nonCommentLines } from "./files.js";
 export { readTemplate, type AgentTemplateName } from "./templates.js";
 export { defaultAgentConfig, loadAgentConfig, expandHomePath, type AresAgentConfig, type SlotConfig } from "./config.js";

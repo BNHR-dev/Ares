@@ -31,6 +31,10 @@ export interface ComposePromptOptions {
   providerFamily?: ProviderFamily;
   model?: string;
   surfaces: PromptSurfaces;
+  /** The owner's LAWS block (lawsPromptBlock). ALWAYS-ON by design — it rides
+   *  the system prompt itself, after the doctrine it outranks, and is never
+   *  part of any budgeted context. Empty string when no laws exist. */
+  laws?: string;
 }
 
 /** Join non-empty blocks with exactly one blank line between them. */
@@ -43,6 +47,10 @@ export function composeSystemPrompt(opts: ComposePromptOptions): string {
     renderPersona(opts.persona),
     craftCore(),
     providerOverlay(opts.providerFamily, opts.model),
+    // Laws sit AFTER the doctrine they outrank — recency reinforces the
+    // precedence the block itself states — and BEFORE the surfaces, so tool
+    // doctrine and environment can still reference them.
+    opts.laws,
     opts.surfaces.tools,
     opts.surfaces.workflows,
     opts.surfaces.environment,

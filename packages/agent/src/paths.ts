@@ -5,6 +5,8 @@ export interface AgentPaths {
   home: string;
   identity: string;
   soul: string;
+  /** LAWS.md — the owner's standing orders, injected ALWAYS-ON (see laws.ts). */
+  laws: string;
   user: string;
   heartbeat: string;
   memory: string;
@@ -39,6 +41,7 @@ export function agentPaths(home = aresAgentHome()): AgentPaths {
     home,
     identity: path.join(home, "IDENTITY.md"),
     soul: path.join(home, "SOUL.md"),
+    laws: path.join(home, "LAWS.md"),
     user: path.join(home, "USER.md"),
     heartbeat: path.join(home, "HEARTBEAT.md"),
     memory: path.join(home, "MEMORY.md"),
