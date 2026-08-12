@@ -6,14 +6,14 @@
 //
 // The mechanism: background shells run behind a DETACHED, unref'd supervisor so
 // they survive a daemon restart and stay pollable. Nothing ever took that
-// survival away. Closing Ares, or pressing Stop, left the supervisor running â€”
+// survival away. Closing Ares, or pressing Stop, left the supervisor running —
 // and a dev-server-shaped job that relaunches a game every few minutes then
 // does exactly that, forever, with no window open to show it and no UI to stop
 // it from.
 //
 // The rule these tests hold: a job may survive a RESTART, never its host. On
 // Stop we suspend what the turn started; on shutdown we suspend everything. A
-// suspension is resumable and NEVER auto-resumes â€” that last part is what keeps
+// suspension is resumable and NEVER auto-resumes — that last part is what keeps
 // "pick the session back up" from meaning "the game starts again".
 
 import test from "node:test";
@@ -38,7 +38,7 @@ async function setup(t) {
   const registry = new ShellRegistry();
   registry.configureDurability({ kernel, workspace });
   registry.registerSession(sessionId);
-  // Real processes, because suspension really kills process trees â€” the first
+  // Real processes, because suspension really kills process trees — the first
   // version of this fixture used the test runner's own pid and the sweep
   // promptly taskkill'd the test run. That is the behaviour working; it just
   // needs a stand-in that is safe to reap.
@@ -61,7 +61,7 @@ async function setup(t) {
 
 /**
  * A job that reads as genuinely alive: a fresh supervisor state file behind a
- * real live pid â€” which is exactly what reconciliation checks before it will
+ * real live pid — which is exactly what reconciliation checks before it will
  * call a job "running".
  */
 async function seedLiveJob(ctx, n, opts = {}) {
@@ -132,7 +132,7 @@ test("closing the host suspends running jobs and marks them resumable", async (t
   }
 });
 
-test("a suspension writes NO completion input â€” nothing wakes up and re-runs it", async (t) => {
+test("a suspension writes NO completion input — nothing wakes up and re-runs it", async (t) => {
   const ctx = await setup(t);
   const { workspace, kernel, sessionId, registry } = ctx;
   const id = await seedLiveJob(ctx, 3);
@@ -141,7 +141,7 @@ test("a suspension writes NO completion input â€” nothing wakes up and re-r
 
   const job = kernel.getBackgroundJob(id);
   assert.equal(job.completionInputId, null,
-    "a completion row becomes a recovered TURN on the next start â€” that is exactly how an unattended relaunch loop begins");
+    "a completion row becomes a recovered TURN on the next start — that is exactly how an unattended relaunch loop begins");
 });
 
 test("Stop takes down what the turn started, and leaves older work alone", async (t) => {
@@ -188,7 +188,7 @@ test("resuming a job that is still alive does not double-launch it", async (t) =
   const id = await seedLiveJob(ctx, 7);
 
   const result = await registry.resume(id, sessionId);
-  assert.equal(result.id, id, "a live job resumes to ITSELF â€” two copies of a dev server is the bug, not the fix");
+  assert.equal(result.id, id, "a live job resumes to ITSELF — two copies of a dev server is the bug, not the fix");
 });
 
 test("a job from another session is invisible and untouchable", async (t) => {
@@ -244,7 +244,7 @@ test("a boot sweep stops what a CRASHED host left running, in sessions it never 
   assert.equal(kernel.getBackgroundJob(sibling).status, "running", "a live sibling host's job is left alone");
 });
 
-test("suspension is idempotent â€” a second sweep finds nothing left to stop", async (t) => {
+test("suspension is idempotent — a second sweep finds nothing left to stop", async (t) => {
   const ctx = await setup(t);
   const { workspace, kernel, sessionId, registry } = ctx;
   await seedLiveJob(ctx, 11);

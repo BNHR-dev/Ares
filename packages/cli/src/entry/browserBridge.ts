@@ -420,7 +420,7 @@ export function makeBrowserTool(
             output: {
               action: i.action,
               status: "duplicate_suppressed",
-              note: "ACTION NOT PERFORMED â€” this identical outward browser sequence committed less than 15 seconds ago. Verify the existing outcome or pass allowRepeat:true if repetition is intentional.",
+              note: "ACTION NOT PERFORMED — this identical outward browser sequence committed less than 15 seconds ago. Verify the existing outcome or pass allowRepeat:true if repetition is intentional.",
               filmstripDir: filmstripDir(strip),
             },
             display: "duplicate browser sequence suppressed",
@@ -551,7 +551,7 @@ export function makeBrowserTool(
         const recent = recentOutwardActions.get(journalKey);
         if (!i.allowRepeat && recent && Date.now() - recent < 15_000) {
           return {
-            output: { action: i.action, status: "duplicate_suppressed", note: "ACTION NOT PERFORMED â€” this identical click committed less than 15 seconds ago. Verify the existing outcome or pass allowRepeat:true.", filmstripDir: filmstripDir(strip) },
+            output: { action: i.action, status: "duplicate_suppressed", note: "ACTION NOT PERFORMED — this identical click committed less than 15 seconds ago. Verify the existing outcome or pass allowRepeat:true.", filmstripDir: filmstripDir(strip) },
             display: "duplicate click suppressed",
           };
         }
@@ -657,7 +657,7 @@ export function makeBrowserTool(
       const recent = recentOutwardActions.get(journalKey);
       if (!i.allowRepeat && recent && Date.now() - recent < 15_000) {
         return {
-          output: { action: i.action, status: "duplicate_suppressed", note: "ACTION NOT PERFORMED â€” this identical click committed less than 15 seconds ago. Verify the existing outcome or pass allowRepeat:true.", filmstripDir: filmstripDir(strip) },
+          output: { action: i.action, status: "duplicate_suppressed", note: "ACTION NOT PERFORMED — this identical click committed less than 15 seconds ago. Verify the existing outcome or pass allowRepeat:true.", filmstripDir: filmstripDir(strip) },
           display: "duplicate click suppressed",
         };
       }
