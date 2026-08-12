@@ -265,7 +265,7 @@ export function makeComputerUseTool(runner: ComputerActionRunner = runComputerAc
         return { ok: false, message: "activate needs `text` — a substring of the target window's title (use `windows` to list them)." };
       }
       if (i.action === "act" && !i.steps?.length) {
-        return { ok: false, message: "act needs `steps` â€” ordered desktop/UIA actions to run in one focused transaction." };
+        return { ok: false, message: "act needs `steps` — ordered desktop/UIA actions to run in one focused transaction." };
       }
       if ((i.action === "uia_click" || i.action === "uia_fill") && !i.name?.trim()) {
         return { ok: false, message: `${i.action} needs an accessible control \`name\` (use uia_tree first).` };
