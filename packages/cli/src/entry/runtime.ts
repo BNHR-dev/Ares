@@ -14,21 +14,35 @@ export { parseArgs, type ParsedArgs } from "./args.js";
 
 let cachedCliVersion: string | undefined;
 
-/** The shipped CLI version, read from this package's own package.json instead
- *  of a hardcoded literal that goes stale every release (was "0.11.2" while
- *  the actual build had moved on). Walks up from dist/entry/ (or src/entry/)
- *  until it finds the package.json. */
+/** The shipped CLI version, read from a package.json instead of a hardcoded
+ *  literal that goes stale every release (was "0.11.2" while the actual build
+ *  had moved on). Walks up from dist/entry/ (or src/entry/) and keeps going to
+ *  the root manifest — the one named "ares", whose version the release workflow
+ *  bumps alongside tauri.conf.json.
+ *
+ *  Stopping at the first package.json found reintroduced the same staleness by
+ *  another route: `packages/cli/package.json` is a private workspace member
+ *  nobody bumps, so it still read 0.16.0 while the product shipped 0.37.2. That
+ *  number is not only cosmetic — it goes out as `app_version` in the daemon
+ *  handshake and as `aresVersion` on the agent side.
+ *
+ *  The nearest manifest stays as the fallback, so a CLI extracted on its own
+ *  (no monorepo root above it) still reports something rather than 0.0.0. */
 export async function cliVersion(): Promise<string> {
   if (cachedCliVersion) return cachedCliVersion;
   try {
     let dir = path.dirname(fileURLToPath(import.meta.url));
-    let version: string | undefined;
-    for (let depth = 0; depth < 4 && !version; depth++) {
+    let nearest: string | undefined;
+    let root: string | undefined;
+    for (let depth = 0; depth < 5 && !root; depth++) {
       dir = path.dirname(dir);
       const raw = await readFile(path.join(dir, "package.json"), "utf8").catch(() => null);
-      if (raw) version = (JSON.parse(raw) as { version?: string }).version;
+      if (!raw) continue;
+      const manifest = JSON.parse(raw) as { name?: string; version?: string };
+      if (manifest.name === "ares") root = manifest.version;
+      else nearest ??= manifest.version;
     }
-    cachedCliVersion = version ?? "0.0.0";
+    cachedCliVersion = root ?? nearest ?? "0.0.0";
   } catch {
     cachedCliVersion = "0.0.0";
   }
