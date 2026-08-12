@@ -515,13 +515,23 @@ export async function attachCommand(args: ParsedArgs): Promise<number> {
   let lastEventSessionId: string | undefined;
 
   const rl = createInterface({ input: process.stdin, output: process.stdout });
+  // Readline throws ERR_USE_AFTER_CLOSE if prompted after it closes, and every
+  // prompt() below is reached from a gateway frame — i.e. from inside the
+  // websocket handler, where an exception is not caught and takes the process
+  // down. stdin can close well before the gateway stops sending.
+  let inputClosed = false;
   const prompt = () => {
-    if (!streaming) rl.prompt();
+    if (!streaming && !inputClosed) rl.prompt();
   };
   rl.setPrompt("ares> ");
 
   return await new Promise<number>((resolve) => {
+    let settled = false;
     const bail = (message: string, code: number) => {
+      // Reentrant by design: bail() closes readline, which fires the "close"
+      // handler below, which calls bail() again. First one wins.
+      if (settled) return;
+      settled = true;
       process.stderr.write(`${message}\n`);
       rl.close();
       try {
@@ -531,6 +541,16 @@ export async function attachCommand(args: ParsedArgs): Promise<number> {
       }
       resolve(code);
     };
+
+    // stdin at EOF — Ctrl-D, or any non-interactive invocation such as
+    // `ares attach </dev/null`, a pipeline, or a supervisor that gives the
+    // process no terminal. There is no way to type into the session any more,
+    // so detach the way /quit does instead of waiting on input that can never
+    // arrive.
+    rl.on("close", () => {
+      inputClosed = true;
+      bail("detached (the session lives on in the Garrison)", 0);
+    });
 
     const attach = (id: string, label?: string) => {
       if (attached.has(id)) return;
