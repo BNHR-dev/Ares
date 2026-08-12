@@ -13,7 +13,7 @@
     "build": "tsc -b",
     "check": "tsc -b --pretty false",
     "lint": "pnpm check",
-    "test": "pnpm build && node --test --test-concurrency=4 tests/*.test.mjs",
+    "test": "pnpm build && node scripts/run-tests.mjs",
     "ares": "node packages/cli/dist/entry.js",
     "install:cli": "powershell -ExecutionPolicy Bypass -File scripts/install.ps1",
     "uninstall:cli": "powershell -ExecutionPolicy Bypass -File scripts/uninstall.ps1",

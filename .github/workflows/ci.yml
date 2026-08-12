@@ -43,8 +43,12 @@ jobs:
       - name: Build
         run: pnpm build
 
+      # Via the wrapper so the run gets a throwaway ARES_HOME. A CI runner is
+      # disposable, but the suite behaving the same here and on a developer's
+      # machine is the point — this is where a test that leans on a populated
+      # home would be caught.
       - name: Test
-        run: node --test tests/*.test.mjs
+        run: node scripts/run-tests.mjs
 
   coverage:
     name: Coverage (Node built-in)
@@ -71,9 +75,10 @@ jobs:
         run: pnpm build
 
       # --experimental-test-coverage is a Node 22 feature; the matrix job above
-      # already pins node-version 22, so this flag is safe to use here.
+      # already pins node-version 22, so this flag is safe to use here. The
+      # wrapper forwards any leading-dash argument straight to the runner.
       - name: Test with coverage
-        run: node --test --experimental-test-coverage tests/*.test.mjs
+        run: node scripts/run-tests.mjs --experimental-test-coverage
 
   rust:
     name: Build (Rust desktop shell, ${{ matrix.os }})
