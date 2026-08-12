@@ -23,6 +23,7 @@ export {
   acquireBrowserPage,
   browserLaunchAttempts,
   findInstalledChromium,
+  linuxChromiumCandidates,
   parseCdpPorts,
   type PlaywrightOptions,
   type LaunchAttempt,
