@@ -76,14 +76,34 @@ jobs:
         run: node --test --experimental-test-coverage tests/*.test.mjs
 
   rust:
-    name: Build (Rust desktop shell)
-    # The Tauri crate is Windows-first (windows-sys / WebView2). Building on a
-    # Windows runner matches the real target and avoids the Linux webkit2gtk
-    # system-dependency dance. Packaging the installer is intentionally skipped
-    # here — this just proves the shell compiles.
-    runs-on: windows-latest
+    name: Build (Rust desktop shell, ${{ matrix.os }})
+    # The Tauri crate is Windows-first (windows-sys / WebView2), and Windows
+    # stays the job that matches the real release target. Linux is here because
+    # a Windows-only job compiles straight past Linux-only defects: the startup
+    # abort in #3 was a GTK realization rule, invisible to a cross-compile-clean
+    # Windows build. The webkit2gtk "dance" it used to avoid is four apt
+    # packages, below, and the crate needs no Cargo.toml change to build.
+    # Packaging the installer is intentionally skipped — this proves the shell
+    # compiles and runs the crate's unit tests.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+
+      # webkit2gtk and its friends are the Tauri Linux system dependencies; the
+      # Windows runner carries WebView2 already and needs none of this.
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
@@ -124,3 +144,8 @@ jobs:
 
       - name: cargo build
         run: cargo build --manifest-path tauri/src-tauri/Cargo.toml
+
+      # The crate's unit tests are pure helpers (path resolution and the like),
+      # no window and no display server involved, so they run on both runners.
+      - name: cargo test
+        run: cargo test --manifest-path tauri/src-tauri/Cargo.toml
