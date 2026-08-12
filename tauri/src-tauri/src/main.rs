@@ -2872,8 +2872,76 @@ fn desktop_ares_home_string() -> String {
         .to_string()
 }
 
+/// The user's desktop directory.
+///
+/// On Windows and macOS this is `~/Desktop`. On Linux the folder is localized —
+/// `~/Bureau` on a French session, `~/Escritorio` on a Spanish one — and the
+/// authoritative answer is XDG's `XDG_DESKTOP_DIR`, the same thing
+/// `xdg-user-dir DESKTOP` reads.
+///
+/// A hardcoded `~/Desktop` is not merely a missed lookup here:
+/// `desktop_workspace_dir()` creates what this returns, so on a localized
+/// session it plants an English `Desktop/Ares Workspace` beside the real
+/// desktop, and the workspace the user sees in the UI is not the folder they
+/// can find. `ares_export_log` fails the other way — it filters on `is_dir()`,
+/// so the exported log silently lands in the Ares home instead.
 fn user_desktop_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    if let Some(dir) = xdg_desktop_dir() {
+        return Some(dir);
+    }
     user_home_dir().map(|home| home.join("Desktop"))
+}
+
+/// Resolve `XDG_DESKTOP_DIR` the way xdg-user-dir does: an exported variable
+/// wins, otherwise the assignment in `~/.config/user-dirs.dirs`, whose lines
+/// look like `XDG_DESKTOP_DIR="$HOME/Bureau"`. That file is *sourced* by the
+/// shell, so a later assignment overrides an earlier one — hence last match
+/// wins, not first.
+#[cfg(target_os = "linux")]
+fn xdg_desktop_dir() -> Option<PathBuf> {
+    if let Some(value) = env::var_os("XDG_DESKTOP_DIR") {
+        let path = PathBuf::from(value);
+        if path.is_absolute() {
+            return Some(path);
+        }
+    }
+    let home = user_home_dir()?;
+    let config = env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".config"));
+    let text = fs::read_to_string(config.join("user-dirs.dirs")).ok()?;
+    parse_xdg_desktop_dir(&text, &home)
+}
+
+/// Split out from the file read so the quoting and `$HOME` cases are testable
+/// without touching a real `user-dirs.dirs`.
+#[cfg(target_os = "linux")]
+fn parse_xdg_desktop_dir(text: &str, home: &Path) -> Option<PathBuf> {
+    let mut found: Option<PathBuf> = None;
+    for line in text.lines() {
+        // A commented-out assignment starts with '#', so it never matches.
+        let Some(value) = line.trim().strip_prefix("XDG_DESKTOP_DIR=") else {
+            continue;
+        };
+        let value = value.trim().trim_matches('"');
+        // The spec's generator only ever writes literal absolute paths or a
+        // $HOME prefix; no general shell expansion is attempted.
+        let expanded = match value {
+            "$HOME" | "${HOME}" => home.to_path_buf(),
+            _ => match value
+                .strip_prefix("$HOME/")
+                .or_else(|| value.strip_prefix("${HOME}/"))
+            {
+                Some(rest) => home.join(rest),
+                None => PathBuf::from(value),
+            },
+        };
+        if expanded.is_absolute() {
+            found = Some(expanded);
+        }
+    }
+    found
 }
 
 fn user_config_dir() -> Option<PathBuf> {
@@ -2890,4 +2958,63 @@ fn user_config_dir() -> Option<PathBuf> {
             home.join(".config")
         }
     })
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::parse_xdg_desktop_dir;
+    use std::path::{Path, PathBuf};
+
+    fn home() -> &'static Path {
+        Path::new("/home/tester")
+    }
+
+    #[test]
+    fn reads_a_localized_desktop_from_a_home_relative_assignment() {
+        // The shape `xdg-user-dirs-update` actually writes on a French session.
+        let text = "# This file is written by xdg-user-dirs-update\n\
+                    XDG_DOCUMENTS_DIR=\"$HOME/Documents\"\n\
+                    XDG_DESKTOP_DIR=\"$HOME/Bureau\"\n";
+        assert_eq!(
+            parse_xdg_desktop_dir(text, home()),
+            Some(PathBuf::from("/home/tester/Bureau"))
+        );
+    }
+
+    #[test]
+    fn accepts_a_literal_absolute_path_and_the_braced_home_form() {
+        assert_eq!(
+            parse_xdg_desktop_dir("XDG_DESKTOP_DIR=\"/srv/desks/tester\"\n", home()),
+            Some(PathBuf::from("/srv/desks/tester"))
+        );
+        assert_eq!(
+            parse_xdg_desktop_dir("XDG_DESKTOP_DIR=\"${HOME}/Escritorio\"\n", home()),
+            Some(PathBuf::from("/home/tester/Escritorio"))
+        );
+    }
+
+    #[test]
+    fn ignores_commented_and_unrelated_assignments() {
+        let text = "#XDG_DESKTOP_DIR=\"$HOME/Commented\"\n\
+                    XDG_DOWNLOAD_DIR=\"$HOME/Téléchargements\"\n";
+        assert_eq!(parse_xdg_desktop_dir(text, home()), None);
+    }
+
+    #[test]
+    fn a_later_assignment_wins_because_the_file_is_sourced() {
+        let text = "XDG_DESKTOP_DIR=\"$HOME/First\"\n\
+                    XDG_DESKTOP_DIR=\"$HOME/Second\"\n";
+        assert_eq!(
+            parse_xdg_desktop_dir(text, home()),
+            Some(PathBuf::from("/home/tester/Second"))
+        );
+    }
+
+    #[test]
+    fn a_desktop_disabled_by_an_empty_value_is_not_a_relative_path() {
+        // `XDG_DESKTOP_DIR=""` means "no desktop directory". Expanding that to
+        // an empty relative path and joining it onto anything would be worse
+        // than falling back to ~/Desktop, so it must not resolve.
+        assert_eq!(parse_xdg_desktop_dir("XDG_DESKTOP_DIR=\"\"\n", home()), None);
+    }
 }
