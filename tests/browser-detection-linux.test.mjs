@@ -56,7 +56,7 @@ test("non-distro install prefixes are searched", () => {
 
 test("directories on PATH are searched", () => {
   const candidates = withPath(
-    ["/opt/custom/bin", "/home/tester/.local/bin"].join(path.delimiter),
+    ["/opt/custom/bin", "/home/tester/.local/bin"].join(":"),
     linuxChromiumCandidates,
   );
   assert.ok(candidates.includes("/opt/custom/bin/chromium"));
@@ -78,13 +78,13 @@ test("browser preference outranks directory order", () => {
 
 test("a directory listed twice does not produce a duplicate candidate", () => {
   // /usr/bin is both hardcoded and almost always on PATH.
-  const candidates = withPath(["/usr/bin", "/usr/bin"].join(path.delimiter), linuxChromiumCandidates);
+  const candidates = withPath(["/usr/bin", "/usr/bin"].join(":"), linuxChromiumCandidates);
   assert.equal(new Set(candidates).size, candidates.length);
 });
 
 test("an unset PATH is not treated as a directory", () => {
   const candidates = withPath(undefined, linuxChromiumCandidates);
-  assert.ok(candidates.every((c) => path.isAbsolute(c)), "no relative candidates");
+  assert.ok(candidates.every((c) => path.posix.isAbsolute(c)), "no relative candidates");
   assert.ok(!candidates.some((c) => c.startsWith("undefined")));
 });
 
@@ -92,8 +92,8 @@ test("a relative PATH entry is ignored", () => {
   // "." and "bin" are legal PATH entries. Kept as candidates they would be
   // resolved by existsSync against the daemon's cwd, which is the operator's
   // workspace — a file named `chromium` there is not a browser.
-  const candidates = withPath([".", "bin", "/opt/custom/bin"].join(path.delimiter), linuxChromiumCandidates);
-  assert.ok(candidates.every((c) => path.isAbsolute(c)), "no relative candidates");
+  const candidates = withPath([".", "bin", "/opt/custom/bin"].join(":"), linuxChromiumCandidates);
+  assert.ok(candidates.every((c) => path.posix.isAbsolute(c)), "no relative candidates");
   assert.ok(!candidates.includes("chromium"), "a bare cwd-relative name is not a candidate");
   assert.ok(candidates.includes("/opt/custom/bin/chromium"), "absolute entries still counted");
 });

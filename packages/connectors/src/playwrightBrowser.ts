@@ -94,14 +94,19 @@ export function linuxChromiumCandidates(): string[] {
     "chromium",
     "chromium-browser",
   ];
+  // POSIX semantics explicitly, not the host's: these are Linux paths and a
+  // Linux PATH, so ":" and "/" are right by construction rather than by
+  // accident of where the process happens to run. It also makes the function
+  // total, so its contract is testable on every CI runner instead of one.
+  //
   // A relative PATH entry (".", "bin") is legal and useless to us: existsSync
   // would resolve it against the daemon's cwd and could match some unrelated
   // file in the workspace. Absolute directories only.
   const pathDirs = (process.env.PATH ?? "")
-    .split(path.delimiter)
-    .filter((dir) => dir && path.isAbsolute(dir));
+    .split(":")
+    .filter((dir) => dir && path.posix.isAbsolute(dir));
   const dirs = ["/usr/bin", "/usr/local/bin", "/snap/bin", ...pathDirs];
-  const candidates = names.flatMap((name) => dirs.map((dir) => path.join(dir, name)));
+  const candidates = names.flatMap((name) => dirs.map((dir) => path.posix.join(dir, name)));
   // Vendor packages install the real binary here; the /usr/bin entry is only a
   // symlink, so this still hits when that symlink is absent.
   candidates.push("/opt/google/chrome/chrome", "/opt/microsoft/msedge/msedge");
