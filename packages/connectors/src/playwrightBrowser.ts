@@ -63,16 +63,49 @@ export function findInstalledChromium(): string | undefined {
             "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
             "/Applications/Chromium.app/Contents/MacOS/Chromium",
           ]
-        : [
-            "/usr/bin/google-chrome",
-            "/usr/bin/google-chrome-stable",
-            "/usr/bin/microsoft-edge",
-            "/usr/bin/microsoft-edge-stable",
-            "/usr/bin/chromium",
-            "/usr/bin/chromium-browser",
-          ];
+        : linuxChromiumCandidates();
 
   return candidates.find((candidate) => candidate && existsSync(candidate));
+}
+
+/** Where a Chromium-family browser actually lives on Linux.
+ *
+ *  Probing six fixed `/usr/bin/...` paths only ever found distro packages. It
+ *  missed manual installs in /usr/local/bin, snaps in /snap/bin, and the vendor
+ *  .deb/.rpm layout that puts the real binary under /opt and only symlinks a
+ *  launcher — so on a machine with, say, no system Chromium, every candidate
+ *  missed and detection fell through to Playwright's bundled browser.
+ *
+ *  PATH is searched as well, which is what covers the long tail no fixed list
+ *  can enumerate. Browser preference (Chrome, then Edge, then Chromium) is kept
+ *  ahead of directory order, because the point of detection is the real
+ *  browser's fingerprint, not merely finding something that runs.
+ *
+ *  A wrong guess is cheap and a missed one is not: browserLaunchAttempts()
+ *  tries each strategy in turn and catches per attempt, so a detected path that
+ *  refuses to start costs one failed launch before the bundled-Chromium floor
+ *  takes over. */
+export function linuxChromiumCandidates(): string[] {
+  const names = [
+    "google-chrome",
+    "google-chrome-stable",
+    "microsoft-edge",
+    "microsoft-edge-stable",
+    "chromium",
+    "chromium-browser",
+  ];
+  // A relative PATH entry (".", "bin") is legal and useless to us: existsSync
+  // would resolve it against the daemon's cwd and could match some unrelated
+  // file in the workspace. Absolute directories only.
+  const pathDirs = (process.env.PATH ?? "")
+    .split(path.delimiter)
+    .filter((dir) => dir && path.isAbsolute(dir));
+  const dirs = ["/usr/bin", "/usr/local/bin", "/snap/bin", ...pathDirs];
+  const candidates = names.flatMap((name) => dirs.map((dir) => path.join(dir, name)));
+  // Vendor packages install the real binary here; the /usr/bin entry is only a
+  // symlink, so this still hits when that symlink is absent.
+  candidates.push("/opt/google/chrome/chrome", "/opt/microsoft/msedge/msedge");
+  return [...new Set(candidates)];
 }
 
 /** One browser-launch strategy: extra options merged into launchPersistentContext. */
