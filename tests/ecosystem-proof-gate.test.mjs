@@ -122,6 +122,61 @@ test("make clean and script-chain forgery still never count", async (t) => {
   }
 });
 
+function exitCodedShellTool(exitCodeFor) {
+  return {
+    schema: { name: "PowerShell", description: "shell", inputJsonSchema: { type: "object" }, safety: "workspace-write", concurrency: "exclusive" },
+    async call(input) {
+      const exitCode = exitCodeFor(input.command);
+      return { output: { command: input.command, exitCode, timedOut: false, stdout: exitCode === 0 ? "pass" : "1 failing", stderr: "" } };
+    },
+  };
+}
+
+test("a green package-suite run clears a red scoped test run (the coding-v2 atomic-state burn)", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "ares-proof-suite-covers-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const file = path.join(root, "src", "atomicStore.mjs");
+  const events = await runProofScenario(root, [
+    { tool: { name: "Edit", input: { file_path: "src/atomicStore.mjs" } } },
+    { tool: { name: "PowerShell", input: { command: "node --test tests/atomic-store.test.mjs", description: "Scoped test" } } },
+    { tool: { name: "Edit", input: { file_path: "src/atomicStore.mjs" } } },
+    { tool: { name: "PowerShell", input: { command: "npm test", description: "Full suite" } } },
+    { text: "verified" },
+  ], [editTool(file), exitCodedShellTool((command) => command === "npm test" ? 0 : 1)]);
+  assert.equal(events.findLast((e) => e.type === "turn_end").workStatus, "verified",
+    "the project's own full test suite is the proof the gate's hint demands — it must clear a scoped red run");
+});
+
+test("a green scoped test run does NOT clear a red package-suite run", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "ares-proof-scoped-noclear-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const file = path.join(root, "src", "atomicStore.mjs");
+  const events = await runProofScenario(root, [
+    { tool: { name: "Edit", input: { file_path: "src/atomicStore.mjs" } } },
+    { tool: { name: "PowerShell", input: { command: "npm test", description: "Full suite" } } },
+    { tool: { name: "PowerShell", input: { command: "node --test tests/one.test.mjs", description: "Scoped test" } } },
+    { text: "claiming done" },
+    { text: "still claiming" },
+  ], [editTool(file), exitCodedShellTool((command) => command === "npm test" ? 1 : 0)]);
+  assert.equal(events.findLast((e) => e.type === "turn_end").workStatus, "unverified",
+    "a passing subset must never cover a failing full suite");
+});
+
+test("cross-spelling pytest invocations cover each other", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "ares-proof-pytest-alias-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const file = path.join(root, "app.py");
+  const events = await runProofScenario(root, [
+    { tool: { name: "Edit", input: { file_path: "app.py" } } },
+    { tool: { name: "PowerShell", input: { command: "pytest tests/test_app.py", description: "Scoped test" } } },
+    { tool: { name: "Edit", input: { file_path: "app.py" } } },
+    { tool: { name: "PowerShell", input: { command: "python -m pytest", description: "Full suite" } } },
+    { text: "verified" },
+  ], [editTool(file), exitCodedShellTool((command) => command === "python -m pytest" ? 0 : 1)]);
+  assert.equal(events.findLast((e) => e.type === "turn_end").workStatus, "verified",
+    "python -m pytest is the same suite as pytest — it must clear the scoped red run");
+});
+
 test("the unverified nag names project-appropriate proof for an Unreal workspace", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "ares-proof-hint-"));
   t.after(() => rm(root, { recursive: true, force: true }));

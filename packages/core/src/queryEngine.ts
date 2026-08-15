@@ -5294,6 +5294,20 @@ function isManualVerificationCall(name: string, input: unknown): boolean {
   return manualVerificationCommand(name, input) !== null;
 }
 
+/** Families that invoke the package's own full JS test suite. A bare run of
+ *  one of these executes a superset of any scoped JS test-runner invocation,
+ *  and it is exactly the proof the verification hint instructs the model to
+ *  produce — so it must clear a scoped red run. */
+const JS_SUITE_FAMILIES = new Set(["npm test", "pnpm test", "yarn test"]);
+const JS_TEST_RUNNER_FAMILIES = new Set(["node --test", "vitest", "jest", "npx vitest", "npx jest", ...JS_SUITE_FAMILIES]);
+
+/** Family with cross-spelling aliases collapsed (`python -m pytest` ≡ `pytest`)
+ *  so equivalent full-suite invocations cover each other's failures. */
+function normalizedVerificationFamily(command: string): string | null {
+  const family = verificationCommandFamily(command);
+  return family?.replace(/^python3?\s+-m\s+pytest$/, "pytest") ?? null;
+}
+
 function verificationCommandFamily(command: string): string | null {
   // Script-invoked proof (Unreal Build.bat and friends): the family is the
   // script itself — a green `script:build.bat` covers a red `script:build.bat`.
@@ -5305,9 +5319,19 @@ function verificationCommandFamily(command: string): string | null {
 
 function verificationCommandCovers(passingCommand: string, failedCommand: string): boolean {
   if (passingCommand === failedCommand) return true;
-  const passingFamily = verificationCommandFamily(passingCommand);
-  const failedFamily = verificationCommandFamily(failedCommand);
-  return passingFamily !== null && passingFamily === failedFamily && passingCommand === passingFamily;
+  // Only a BARE family invocation (the whole suite, not a re-scoped subset)
+  // can cover a different failed command.
+  if (passingCommand !== verificationCommandFamily(passingCommand)) return false;
+  const passingFamily = normalizedVerificationFamily(passingCommand);
+  const failedFamily = normalizedVerificationFamily(failedCommand);
+  if (passingFamily === null) return false;
+  if (passingFamily === failedFamily) return true;
+  // The package suite runs every test the scoped runner ran — and it is the
+  // exact proof deriveVerificationHint tells the model this gate accepts.
+  // Without this, a red `node --test tests/x.test.mjs` followed by a green
+  // `npm test` left the failure flag set FOREVER, vetoing even the host
+  // verifier's green behavioral run (the coding-v2 atomic-state 20-turn burn).
+  return JS_SUITE_FAMILIES.has(passingFamily) && failedFamily !== null && JS_TEST_RUNNER_FAMILIES.has(failedFamily);
 }
 
 function isSuccessfulVerificationCall(name: string, input: unknown, output: unknown): boolean {
