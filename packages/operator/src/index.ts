@@ -356,6 +356,7 @@ export {
   runGauntlet,
   CODING_GAUNTLET,
   CODING_GAUNTLET_V2,
+  CODING_GAUNTLET_V3,
   GAUNTLET_SCHEMA_VERSION,
   type GauntletTask,
   type GauntletTaskResult,

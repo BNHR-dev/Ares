@@ -9,7 +9,7 @@ import os from "node:os";
 import { ReadTool, GlobTool, GrepTool, EditTool, WriteTool, ApplyIntentTool, MemoryTool, TodoStore, ShellRegistry, type RichToolContext, type FileReadStamp } from "@ares/tools";
 import { notice } from "../terminalUi.js";
 import { completeBootstrap, createMemoryStore, recordCardMemoryOnce, ensureAgentScaffold, exportHome, importHome, listSnapshots, loadAgentConfig, restoreSnapshot, runDeepDream, runRemDream, snapshotBrain } from "@ares/agent";
-import { distillMissionCard, learningCardId, learningCardMemoryText, listLearningCards, loadLearningCard, saveLearningCard, type LearningCard, loadGoal, loadMissionContract, runEvalSuite, runGauntlet, CODING_GAUNTLET, CODING_GAUNTLET_V2, type EvalReport, type EvalTask } from "@ares/operator";
+import { distillMissionCard, learningCardId, learningCardMemoryText, listLearningCards, loadLearningCard, saveLearningCard, type LearningCard, loadGoal, loadMissionContract, runEvalSuite, runGauntlet, CODING_GAUNTLET, CODING_GAUNTLET_V2, CODING_GAUNTLET_V3, type EvalReport, type EvalTask } from "@ares/operator";
 import { MemoryStore, withConsolidationLock } from "@ares/mind";
 import { buildCodingTools } from "./engineTools.js";
 import { AresCommandPermissionStore, AresPathPermissionStore } from "./permissions.js";
@@ -188,9 +188,9 @@ async function gauntletCommand(args: ParsedArgs): Promise<number> {
   const runtime: AresRuntimeState = { permissionMode: "workspace-write" };
   const isolatedHomes: string[] = [];
   const evalShellRegistries: ShellRegistry[] = [];
-  const suite = args.flags.get("suite") ?? "coding-v2";
-  if (suite !== "coding-v1" && suite !== "coding-v2") {
-    process.stderr.write("error: --suite must be coding-v1 or coding-v2\n");
+  const suite = args.flags.get("suite") ?? "coding-v3";
+  if (suite !== "coding-v1" && suite !== "coding-v2" && suite !== "coding-v3") {
+    process.stderr.write("error: --suite must be coding-v1, coding-v2, or coding-v3\n");
     return 2;
   }
   const isMockProvider = selection.provider.name === "mock" || selection.provider.name.startsWith("mock-");
@@ -217,7 +217,7 @@ async function gauntletCommand(args: ParsedArgs): Promise<number> {
     model: selection.model,
     keepWorkspaces: args.flags.has("keep"),
     suite,
-    tasks: suite === "coding-v2" ? CODING_GAUNTLET_V2 : CODING_GAUNTLET,
+    tasks: suite === "coding-v3" ? CODING_GAUNTLET_V3 : suite === "coding-v2" ? CODING_GAUNTLET_V2 : CODING_GAUNTLET,
     harness: args.flags.get("harness") !== "false" && !args.flags.has("no-harness"),
     harnessManifest: {
       ...sourceIdentity,

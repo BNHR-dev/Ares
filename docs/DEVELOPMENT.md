@@ -30,7 +30,9 @@ they write (and remove) a launcher in `${XDG_BIN_HOME:-$HOME/.local/bin}`. Neith
 touches your PATH, your shell config, or the Ares home. `docs/PLATFORM-SUPPORT.md`
 records the exact contract and which platforms it is tested on.
 
-The default long-horizon coding benchmark is `ares eval coding --suite coding-v2`.
+The default long-horizon coding benchmark is `ares eval coding --suite coding-v3`
+(coding-v2 saturated at 100% for deepseek-v4-pro with and without the harness on
+2026-08-15; it remains available for trend continuity).
 It records integrity, proof, false-green, token, prompt, task-manifest, and
 tool-schema data under the Ares home. Real-model runs execute candidate code;
 run them in a disposable VM/container and pass `--allow-unsafe-process-eval`.

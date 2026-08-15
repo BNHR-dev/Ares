@@ -615,6 +615,404 @@ export const CODING_GAUNTLET: GauntletTask[] = [
 // coding-v2: multi-module tasks that require navigation, compatibility
 // reasoning, test integrity, and post-edit proof. Fixtures are dependency-free
 // Node repositories so the score measures coding rather than package installs.
+// coding-v3: the de-saturation suite. coding-v2 pinned at 100% for
+// deepseek-v4-pro with AND without the harness (2026-08-15 baseline), so it
+// can no longer rank anything. v3 targets failure modes frontier models still
+// get wrong: byte-boundary streaming, cancellation composed with queueing,
+// algorithmic complexity under a real clock, red-herring debugging where the
+// "obviously wrong" code is load-bearing, and a versioned migration chain.
+// Fixtures stay dependency-free Node; probes stay reality-only.
+export const CODING_GAUNTLET_V3: GauntletTask[] = [
+  {
+    id: "stream-frame-parser",
+    title: "Make a streaming frame parser chunk-boundary safe",
+    prompt:
+      "Streaming clients report corrupted text when multi-byte characters straddle network chunks, and the final event of a response is silently dropped. Fix src/frameParser.mjs so the emitted frames are identical no matter how the byte stream is chunked — including one byte at a time. Keep the public API (constructor(onFrame), push(bytes), flush()). Do not edit tests; run the suite to confirm.",
+    files: {
+      "package.json": JSON.stringify({ type: "module", scripts: { test: "node --test tests/*.test.mjs" } }, null, 2),
+      "src/frameParser.mjs": `export class FrameParser {
+  constructor(onFrame) { this.onFrame = onFrame; this.tail = ""; }
+  push(chunk) {
+    const text = this.tail + Buffer.from(chunk).toString("utf8");
+    const lines = text.split("\\n");
+    this.tail = lines.pop() ?? "";
+    for (const line of lines) { if (line.length > 0) this.onFrame(JSON.parse(line)); }
+  }
+  flush() { this.tail = ""; }
+}
+`,
+      "src/transport.mjs": `export async function pump(stream, parser) { for await (const chunk of stream) parser.push(chunk); parser.flush(); }
+`,
+      "src/metrics.mjs": `export function frameCounter() { let n = 0; return { count: () => n, tick: () => { n++; } }; }
+`,
+      "docs/protocol.md": "Frames are newline-delimited JSON. CRLF and LF both terminate a frame; blank lines are ignored; a final frame may arrive without a trailing newline and is emitted on flush(). Payloads are UTF-8 and may be split at ANY byte boundary.\n",
+      "tests/frame-parser.test.mjs": `import test from "node:test";
+import assert from "node:assert/strict";
+import { FrameParser } from "../src/frameParser.mjs";
+
+const doc = '{"id":1,"note":"h\\u00e9llo \\ud83c\\udf0d"}\\r\\n\\r\\n{"id":2,"note":"ok"}\\n{"id":3,"note":"\\u672b\\u5c3e"}';
+const bytes = Buffer.from(doc, "utf8");
+const expected = [
+  { id: 1, note: "h\\u00e9llo \\ud83c\\udf0d" },
+  { id: 2, note: "ok" },
+  { id: 3, note: "\\u672b\\u5c3e" },
+];
+
+function collect(chunks) {
+  const frames = [];
+  const parser = new FrameParser((frame) => frames.push(frame));
+  for (const chunk of chunks) parser.push(chunk);
+  parser.flush();
+  return frames;
+}
+
+test("every two-chunk split of the byte stream yields identical frames", () => {
+  for (let split = 0; split <= bytes.length; split++) {
+    assert.deepEqual(collect([bytes.subarray(0, split), bytes.subarray(split)]), expected, "split at byte " + split);
+  }
+});
+
+test("one byte per chunk", () => {
+  const chunks = [];
+  for (let i = 0; i < bytes.length; i++) chunks.push(bytes.subarray(i, i + 1));
+  assert.deepEqual(collect(chunks), expected);
+});
+
+test("flush emits a final frame that has no trailing newline", () => {
+  assert.deepEqual(collect([Buffer.from('{"only":true}', "utf8")]), [{ only: true }]);
+});
+
+test("flush is safe on an empty stream", () => {
+  assert.deepEqual(collect([]), []);
+});
+`,
+    },
+    protectedFiles: ["tests/frame-parser.test.mjs"],
+    allProbesRequired: true,
+    probes: [
+      { kind: "command", cmd: "node", args: ["--test", "tests/frame-parser.test.mjs"], expectExit: 0, timeoutMs: 60_000 },
+      { kind: "command", cmd: "node", args: ["-e", "import('./src/frameParser.mjs').then(({FrameParser})=>{const doc='{\"a\":\"\\ud83c\\udf0d\\u00e9\"}\\n{\"b\":2}';const bytes=Buffer.from(doc,'utf8');const out=[];const p=new FrameParser(f=>out.push(f));for(const b of bytes)p.push(Uint8Array.of(b));p.flush();if(JSON.stringify(out)!==JSON.stringify([{a:'\\ud83c\\udf0d\\u00e9'},{b:2}]))process.exit(9)})"], expectExit: 0, timeoutMs: 15_000 },
+    ],
+    maxTurns: 48,
+  },
+  {
+    id: "async-mutex-cancellation",
+    title: "Make lock cancellation compose with the waiter queue",
+    prompt:
+      "Under load, aborting a queued request occasionally deadlocks the whole job runner: the lock is never handed to the next waiter, or is handed to a request that already gave up. Fix src/mutex.mjs so cancellation composes with the queue: acquire(signal) rejects on abort (including an already-aborted signal) without ever corrupting the lock, and release() always hands the lock to the next LIVE waiter or frees it. Keep the caller-facing contract; do not edit tests; run the suite.",
+    files: {
+      "package.json": JSON.stringify({ type: "module", scripts: { test: "node --test tests/*.test.mjs" } }, null, 2),
+      "src/mutex.mjs": `export class Mutex {
+  constructor() { this.locked = false; this.queue = []; }
+  acquire(signal) {
+    if (!this.locked) { this.locked = true; return Promise.resolve(); }
+    return new Promise((resolve, reject) => {
+      this.queue.push({ resolve });
+      signal?.addEventListener("abort", () => { reject(new Error("aborted")); }, { once: true });
+    });
+  }
+  release() {
+    const next = this.queue.shift();
+    if (next) next.resolve();
+    else this.locked = false;
+  }
+}
+`,
+      "src/withLock.mjs": `export async function withLock(mutex, signal, fn) { await mutex.acquire(signal); try { return await fn(); } finally { mutex.release(); } }
+`,
+      "src/jobRunner.mjs": `import { withLock } from "./withLock.mjs";
+export function makeRunner(mutex) { return (signal, job) => withLock(mutex, signal, job); }
+`,
+      "src/backoff.mjs": `export function backoffMs(attempt) { return Math.min(30000, 250 * 2 ** attempt); }
+`,
+      "docs/locking.md": "Contract: acquire(signal?) resolves when the lock is held and rejects if the signal aborts first (an already-aborted signal rejects immediately and never joins the queue). release() hands the lock to the oldest live waiter, skipping aborted ones, or frees the lock when none remain.\n",
+      "tests/mutex.test.mjs": `import test from "node:test";
+import assert from "node:assert/strict";
+import { Mutex } from "../src/mutex.mjs";
+import { withLock } from "../src/withLock.mjs";
+
+test("aborting a queued waiter hands the lock to the next live waiter", { timeout: 5000 }, async () => {
+  const m = new Mutex();
+  await m.acquire();
+  const controller = new AbortController();
+  const doomed = m.acquire(controller.signal);
+  doomed.catch(() => {});
+  const order = [];
+  const survivor = m.acquire().then(() => order.push("survivor"));
+  controller.abort();
+  await assert.rejects(doomed);
+  m.release();
+  await survivor;
+  assert.deepEqual(order, ["survivor"]);
+  m.release();
+  await m.acquire();
+  m.release();
+});
+
+test("an already-aborted signal is rejected without corrupting the lock", { timeout: 5000 }, async () => {
+  const m = new Mutex();
+  await m.acquire();
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(m.acquire(controller.signal));
+  m.release();
+  await m.acquire();
+  m.release();
+});
+
+test("aborting every queued waiter then releasing frees the lock", { timeout: 5000 }, async () => {
+  const m = new Mutex();
+  await m.acquire();
+  const controllers = Array.from({ length: 5 }, () => new AbortController());
+  const waiters = controllers.map((ctrl) => m.acquire(ctrl.signal).catch(() => "aborted"));
+  for (const ctrl of controllers) ctrl.abort();
+  assert.deepEqual(await Promise.all(waiters), ["aborted", "aborted", "aborted", "aborted", "aborted"]);
+  m.release();
+  await m.acquire();
+  m.release();
+});
+
+test("waiters acquire in FIFO order", { timeout: 5000 }, async () => {
+  const m = new Mutex();
+  await m.acquire();
+  const order = [];
+  const first = m.acquire().then(() => { order.push(1); m.release(); });
+  const second = m.acquire().then(() => { order.push(2); m.release(); });
+  m.release();
+  await Promise.all([first, second]);
+  assert.deepEqual(order, [1, 2]);
+});
+
+test("withLock releases the lock when the body throws", { timeout: 5000 }, async () => {
+  const m = new Mutex();
+  await assert.rejects(withLock(m, undefined, async () => { throw new Error("boom"); }), /boom/);
+  await m.acquire();
+  m.release();
+});
+`,
+    },
+    protectedFiles: ["tests/mutex.test.mjs"],
+    allProbesRequired: true,
+    probes: [
+      { kind: "command", cmd: "node", args: ["--test", "tests/mutex.test.mjs"], expectExit: 0, timeoutMs: 60_000 },
+      { kind: "command", cmd: "node", args: ["-e", "import('./src/mutex.mjs').then(async({Mutex})=>{const guard=setTimeout(()=>process.exit(8),2000);const m=new Mutex();await m.acquire();const ac=new AbortController();ac.abort();let rejected=false;try{await m.acquire(ac.signal)}catch{rejected=true}if(!rejected)process.exit(7);m.release();await m.acquire();clearTimeout(guard);m.release()})"], expectExit: 0, timeoutMs: 15_000 },
+    ],
+    maxTurns: 48,
+  },
+  {
+    id: "interval-aggregation-perf",
+    title: "Scale the concurrency report without changing its semantics",
+    prompt:
+      "The daily concurrency report went from seconds to being killed by the scheduler as traffic grew (~150k sessions, ~150k sampled timestamps). Rewrite concurrencyAt in src/report.mjs to handle that size with IDENTICAL semantics: start inclusive, end exclusive, unsorted inputs allowed, inputs never mutated. The grader runs the full 150k x 150k workload under a hard timeout, so an O(n*m) scan cannot pass. Do not edit tests; run the suite and demonstrate the speed yourself.",
+    files: {
+      "package.json": JSON.stringify({ type: "module", scripts: { test: "node --test tests/*.test.mjs" } }, null, 2),
+      "src/report.mjs": `export function concurrencyAt(intervals, timestamps) {
+  return timestamps.map((t) => intervals.filter((iv) => iv.start <= t && t < iv.end).length);
+}
+`,
+      "src/loadSessions.mjs": `export function toIntervals(rows) { return rows.map((row) => ({ start: row.startedAt, end: row.endedAt })); }
+`,
+      "src/render.mjs": `export function renderReport(counts) { return counts.join("\\n"); }
+`,
+      "docs/report.md": "concurrencyAt(intervals, timestamps): for each timestamp t, the number of intervals with start <= t < end. Inputs may be unsorted; the function must not mutate them. Empty intervals (start === end) are never active.\n",
+      "tests/report.test.mjs": `import test from "node:test";
+import assert from "node:assert/strict";
+import { concurrencyAt } from "../src/report.mjs";
+
+test("boundary semantics: start inclusive, end exclusive", () => {
+  const intervals = [{ start: 0, end: 10 }, { start: 5, end: 5 }, { start: 10, end: 20 }, { start: 3, end: 12 }];
+  assert.deepEqual(concurrencyAt(intervals, [0, 3, 5, 9, 10, 12, 19, 20, -1]), [1, 2, 2, 2, 2, 1, 1, 0, 0]);
+});
+
+test("inputs may be unsorted and must not be mutated", () => {
+  const intervals = [{ start: 7, end: 9 }, { start: 1, end: 4 }];
+  const snapshot = JSON.stringify(intervals);
+  const timestamps = [8, 2, 8];
+  assert.deepEqual(concurrencyAt(intervals, timestamps), [1, 1, 1]);
+  assert.equal(JSON.stringify(intervals), snapshot);
+  assert.deepEqual(timestamps, [8, 2, 8]);
+});
+
+test("agrees with a brute-force reference on a deterministic fixture", () => {
+  let seed = 1;
+  const rnd = () => ((seed = (seed * 48271) % 2147483647) / 2147483647);
+  const intervals = Array.from({ length: 500 }, () => { const start = Math.floor(rnd() * 1000); return { start, end: start + Math.floor(rnd() * 50) }; });
+  const timestamps = Array.from({ length: 500 }, () => Math.floor(rnd() * 1000));
+  const expected = timestamps.map((t) => intervals.filter((iv) => iv.start <= t && t < iv.end).length);
+  assert.deepEqual(concurrencyAt(intervals, timestamps), expected);
+});
+`,
+    },
+    protectedFiles: ["tests/report.test.mjs"],
+    allProbesRequired: true,
+    probes: [
+      { kind: "command", cmd: "node", args: ["--test", "tests/report.test.mjs"], expectExit: 0, timeoutMs: 60_000 },
+      { kind: "command", cmd: "node", args: ["-e", "import('./src/report.mjs').then(({concurrencyAt})=>{let s=1;const rnd=()=>((s=s*48271%2147483647)/2147483647);const n=150000;const intervals=Array.from({length:n},()=>{const a=Math.floor(rnd()*1e6);return{start:a,end:a+1+Math.floor(rnd()*5000)}});const ts=Array.from({length:n},()=>Math.floor(rnd()*1e6));const t0=Date.now();const out=concurrencyAt(intervals,ts);const dt=Date.now()-t0;if(!Array.isArray(out)||out.length!==n)process.exit(7);for(let k=0;k<300;k++){const i=Math.floor(k*n/300);const t=ts[i];let c=0;for(const iv of intervals){if(iv.start<=t&&t<iv.end)c++}if(out[i]!==c)process.exit(8)}if(dt>20000)process.exit(9)})"], expectExit: 0, timeoutMs: 30_000 },
+    ],
+    maxTurns: 48,
+  },
+  {
+    id: "phantom-flake",
+    title: "Find the real dedupe bug behind a misleading incident report",
+    prompt:
+      "Field report from ops: 'Payments occasionally process twice. We are pretty sure it is the LRU in src/cache.mjs - it DELETES entries during get(), which looks completely wrong. Same batch, same event, gets through dedupe twice.' Investigate and fix the double-processing for good. Careful: parts of this system look strange but are correct and load-bearing, and the protected tests pin their exact behavior. Do not edit tests; run the suite.",
+    files: {
+      "package.json": JSON.stringify({ type: "module", scripts: { test: "node --test tests/*.test.mjs" } }, null, 2),
+      "src/cache.mjs": `export class LruCache {
+  constructor(capacity) { this.capacity = capacity; this.map = new Map(); }
+  get(key) {
+    if (!this.map.has(key)) return undefined;
+    const value = this.map.get(key);
+    this.map.delete(key);
+    this.map.set(key, value);
+    return value;
+  }
+  set(key, value) {
+    if (this.map.has(key)) this.map.delete(key);
+    this.map.set(key, value);
+    if (this.map.size > this.capacity) this.map.delete(this.map.keys().next().value);
+  }
+  has(key) { return this.map.has(key); }
+  get size() { return this.map.size; }
+}
+`,
+      "src/dedupe.mjs": `export function eventKey(event) { return JSON.stringify(event); }
+export class Deduper {
+  constructor(cache) { this.cache = cache; }
+  isDuplicate(event) {
+    const key = eventKey(event);
+    if (this.cache.has(key)) { this.cache.get(key); return true; }
+    this.cache.set(key, true);
+    return false;
+  }
+}
+`,
+      "src/pipeline.mjs": `import { Deduper } from "./dedupe.mjs";
+export function processBatch(deduper, events, handler) { const out = []; for (const event of events) { if (deduper.isDuplicate(event)) continue; out.push(handler(event)); } return out; }
+export { Deduper };
+`,
+      "src/journal.mjs": `export function journalLine(event) { return new Array(0).concat(event.id ?? "unknown").join(""); }
+`,
+      "docs/incident-4711.md": "INC-4711: duplicate payment processing. Ops suspects src/cache.mjs (get() deletes the entry it reads!). Events for the same payment arrive from BOTH the worker fleet and the API gateway; the two producers serialize fields in different orders.\n",
+      "tests/dedupe.test.mjs": `import test from "node:test";
+import assert from "node:assert/strict";
+import { LruCache } from "../src/cache.mjs";
+import { Deduper } from "../src/dedupe.mjs";
+import { processBatch } from "../src/pipeline.mjs";
+
+test("the same logical event is suppressed regardless of producer key order", () => {
+  const deduper = new Deduper(new LruCache(64));
+  const fromWorker = { id: "p-9", amount: 25, meta: { region: "eu", retry: 0 } };
+  const fromApi = { meta: { retry: 0, region: "eu" }, amount: 25, id: "p-9" };
+  const handled = processBatch(deduper, [fromWorker, fromApi], (event) => event.id);
+  assert.deepEqual(handled, ["p-9"]);
+});
+
+test("array order stays meaningful: reordered arrays are DIFFERENT events", () => {
+  const deduper = new Deduper(new LruCache(64));
+  const handled = processBatch(deduper, [
+    { id: "a", steps: [1, 2] },
+    { id: "a", steps: [2, 1] },
+    { id: "b", steps: [1, 2] },
+  ], (event) => event.id);
+  assert.deepEqual(handled, ["a", "a", "b"]);
+});
+
+test("the read-refresh LRU eviction order is load-bearing and must not change", () => {
+  const cache = new LruCache(2);
+  cache.set("a", 1);
+  cache.set("b", 2);
+  cache.get("a");
+  cache.set("c", 3);
+  assert.equal(cache.has("a"), true, "recently-read key survives");
+  assert.equal(cache.has("b"), false, "least-recently-used key is evicted");
+  assert.equal(cache.has("c"), true);
+});
+`,
+    },
+    protectedFiles: ["tests/dedupe.test.mjs"],
+    allProbesRequired: true,
+    probes: [
+      { kind: "command", cmd: "node", args: ["--test", "tests/dedupe.test.mjs"], expectExit: 0, timeoutMs: 60_000 },
+      { kind: "command", cmd: "node", args: ["-e", "import('./src/dedupe.mjs').then(({eventKey})=>{const a=eventKey({x:{b:1,a:[{z:1,y:2}]},n:0});const b=eventKey({n:0,x:{a:[{y:2,z:1}],b:1}});if(a!==b)process.exit(7);const c=eventKey({t:[1,2]});const d=eventKey({t:[2,1]});if(c===d)process.exit(8)})"], expectExit: 0, timeoutMs: 15_000 },
+    ],
+    maxTurns: 48,
+  },
+  {
+    id: "schema-chain-migration",
+    title: "Chain versioned migrations without losing user data",
+    prompt:
+      "Documents persist in three historical shapes (see docs/migrations.md). Old documents lose user fields on load, v1 inputs get mutated in place, and invalid documents slip through unvalidated. Make migrate(doc) in src/migrate.mjs bring ANY supported version to v3: unknown top-level fields survive every hop, inputs are never mutated, a current v3 document is returned as the same reference, empty v1 tags become an empty list, and invalid documents are rejected with an error whose message contains 'invalid'. Do not edit tests; run the suite.",
+    files: {
+      "package.json": JSON.stringify({ type: "module", scripts: { test: "node --test tests/*.test.mjs" } }, null, 2),
+      "src/migrate.mjs": `export function migrate(doc) {
+  if (!doc || typeof doc !== "object") throw new Error("invalid document");
+  if (doc.version === 3) return doc;
+  if (doc.version === 2) return { version: 3, profile: { name: doc.name }, tags: doc.tags, rev: 0 };
+  if (doc.version === 1) { doc.tags = doc.tags.split(","); doc.version = 2; return migrate(doc); }
+  throw new Error("unsupported version " + doc.version);
+}
+`,
+      "src/render.mjs": `export function title(doc) { return doc.profile.name + " (rev " + doc.rev + ")"; }
+`,
+      "src/api.mjs": `import { migrate } from "./migrate.mjs";
+export function loadDocument(raw) { return migrate(JSON.parse(raw)); }
+`,
+      "docs/migrations.md": "v1: {version:1, name, tags:'a,b' (comma string; empty string means no tags)}. v2: {version:2, name, tags:[...]}. v3 (current): {version:3, profile:{name}, tags:[...], rev}. Unknown top-level fields belong to the user and must survive migration. Inputs are immutable. Rejections throw errors whose message contains 'invalid'.\n",
+      "tests/migrate.test.mjs": `import test from "node:test";
+import assert from "node:assert/strict";
+import { migrate } from "../src/migrate.mjs";
+
+test("v1 documents reach v3 with unknown fields intact and input untouched", () => {
+  const v1 = { version: 1, name: "alpha", tags: "red,blue", starred: true, owner: { id: 7 } };
+  const snapshot = JSON.stringify(v1);
+  const out = migrate(v1);
+  assert.equal(out.version, 3);
+  assert.deepEqual(out.profile, { name: "alpha" });
+  assert.deepEqual(out.tags, ["red", "blue"]);
+  assert.equal(out.rev, 0);
+  assert.equal(out.starred, true);
+  assert.deepEqual(out.owner, { id: 7 });
+  assert.equal(JSON.stringify(v1), snapshot, "input document must not be mutated");
+});
+
+test("empty v1 tags become an empty list", () => {
+  assert.deepEqual(migrate({ version: 1, name: "e", tags: "" }).tags, []);
+});
+
+test("v2 documents reach v3 with unknown fields intact", () => {
+  const v2 = { version: 2, name: "beta", tags: ["x"], pinned: "yes" };
+  const out = migrate(v2);
+  assert.deepEqual(out.profile, { name: "beta" });
+  assert.deepEqual(out.tags, ["x"]);
+  assert.equal(out.pinned, "yes");
+});
+
+test("a current document is returned as the same reference and migration is idempotent", () => {
+  const v3 = { version: 3, profile: { name: "gamma" }, tags: [], rev: 4, extra: 1 };
+  assert.equal(migrate(v3), v3);
+  const migrated = migrate({ version: 1, name: "d", tags: "x" });
+  assert.deepEqual(migrate(migrated), migrated);
+});
+
+test("invalid documents are rejected", () => {
+  assert.throws(() => migrate({ version: 1, name: "x", tags: 5 }), /invalid/i);
+  assert.throws(() => migrate({ version: 2, name: "x", tags: "not-an-array" }), /invalid/i);
+  assert.throws(() => migrate({ version: 9 }), /invalid/i);
+  assert.throws(() => migrate(null), /invalid/i);
+});
+`,
+    },
+    protectedFiles: ["tests/migrate.test.mjs"],
+    allProbesRequired: true,
+    probes: [
+      { kind: "command", cmd: "node", args: ["--test", "tests/migrate.test.mjs"], expectExit: 0, timeoutMs: 60_000 },
+      { kind: "command", cmd: "node", args: ["-e", "import('./src/migrate.mjs').then(({migrate})=>{const v1={version:1,name:'n',tags:'a',keep:{deep:true}};const out=migrate(v1);if(v1.version!==1||typeof v1.tags!=='string')process.exit(7);if(out.keep?.deep!==true||out.version!==3)process.exit(8);const v3={version:3,profile:{name:'z'},tags:['t'],rev:2};if(migrate(v3)!==v3)process.exit(9)})"], expectExit: 0, timeoutMs: 15_000 },
+    ],
+    maxTurns: 48,
+  },
+];
+
 export const CODING_GAUNTLET_V2: GauntletTask[] = [
   {
     id: "event-contract-migration",

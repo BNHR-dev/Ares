@@ -182,7 +182,7 @@ export async function printHelp(): Promise<void> {
       "  ares mind list | doctor | consolidate [--json]",
       "                              Inspect, diagnose, or sleep-consolidate memory.",
       "  ares eval [--json]         Run the built-in harness regression eval suite.",
-      "  ares eval coding [--suite coding-v2|coding-v1] [--no-harness] [--json]",
+      "  ares eval coding [--suite coding-v3|coding-v2|coding-v1] [--no-harness] [--json]",
       "                              Run the coding gauntlet; real models require --allow-unsafe-process-eval inside an isolated VM/container.",
       "  ares login                  ChatGPT OAuth device-code flow.",
       "  ares doctor                 Show provider auth + Ollama Cloud health.",
